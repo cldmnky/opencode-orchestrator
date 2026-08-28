@@ -17,6 +17,21 @@
  */
 export const GOAL_TOOL_PERMISSION = "orchestrator_goal"
 
+/**
+ * Namespaced permission actions for the orchestrator-only feature tools.
+ *
+ * Like the goal tools, these tools are registered under the `orchestrator`
+ * namespace. Declaring one explicit `permission` action per family lets the
+ * installer and the agent transform grant or revoke the whole family with a
+ * single rule, while any exact user-authored rule is always respected. They
+ * are orchestrator-only (goal-style `allow`) so worker agents cannot see or
+ * invoke them unless the operator grants the action explicitly.
+ */
+export const GH_TOOL_PERMISSION = "orchestrator_gh"
+export const WORKTREE_TOOL_PERMISSION = "orchestrator_worktree"
+export const CD_TOOL_PERMISSION = "orchestrator_cd"
+export const SESSION_MOVE_PERMISSION = "orchestrator_session_move"
+
 export type PermissionEffect = "allow" | "deny" | "ask"
 
 export type PermissionRule = {
@@ -29,6 +44,15 @@ export type PermissionRuleLike = {
   action?: unknown
   resource?: unknown
   effect?: unknown
+}
+
+/** Build the deny-all rule the installer writes to hide the feature tools from non-orchestrator agents. */
+export function orchestratorOnlyPermissionRule(effect: PermissionEffect): PermissionRule {
+  return {
+    action: [GH_TOOL_PERMISSION, WORKTREE_TOOL_PERMISSION, CD_TOOL_PERMISSION, SESSION_MOVE_PERMISSION].join("|"),
+    resource: "*",
+    effect,
+  }
 }
 
 export function goalToolPermissionRule(effect: PermissionEffect): PermissionRule {

@@ -14,6 +14,17 @@ export const COMMAND_NAMES = [
 ] as const
 
 const agentId = z.string().trim().min(1)
+
+/**
+ * Validates a worktree root as an absolute POSIX path (or, when nullable,
+ * an explicit `null` meaning "no whitelisted roots"). Rejects relative
+ * paths, drive letters, and embedded NUL bytes.
+ */
+const absolutePosixPath = z
+  .string()
+  .refine((value) => value.startsWith("/") && !/[a-zA-Z]:/.test(value) && !value.includes("\0"), {
+    message: "worktree root must be an absolute POSIX path or null",
+  })
 const roleOptions = z
   .object({
     planning: agentId.default(DEFAULT_ROLES.planning),
@@ -47,6 +58,19 @@ export const OrchestratorOptionsSchema = z
         cooldown_ms: z.number().int().nonnegative().default(1000),
       })
       .default({ auto_continue: true, max_continuations: 50, cooldown_ms: 1000 }),
+    github: z
+      .object({
+        enabled: z.boolean().default(false),
+        allow_mutations: z.boolean().default(false),
+      })
+      .default({ enabled: false, allow_mutations: false }),
+    worktree: z
+      .object({
+        enabled: z.boolean().default(false),
+        allow_mutations: z.boolean().default(false),
+        root: absolutePosixPath.nullable().default(null),
+      })
+      .default({ enabled: false, allow_mutations: false, root: null }),
   })
   .superRefine((value, context) => {
     const seen = new Map<string, RoleName>()

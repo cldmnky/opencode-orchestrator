@@ -45,18 +45,42 @@ export function inspectConfig(path: string): DoctorReport {
     }
   }
 
-  const plugin = findPlugin(document.plugins)
+  const safePlugin = findSafePlugin(document.plugins)
+  const legacyPlugin = findLegacyBarePlugin(document.plugins)
+  const plugin = safePlugin ?? legacyPlugin
   if (!plugin) {
-    checks.push({ name: "plugin", status: "fail", message: "opencode-orchestrator is not registered" })
+    checks.push({ name: "plugin", status: "fail", message: "opencode-orchestrator is not registered; run the installer" })
+  } else if (legacyPlugin && !safePlugin) {
+    checks.push({
+      name: "plugin",
+      status: "fail",
+      message:
+        'the registered plugin entry "opencode-orchestrator" is the unrelated npm registry package (owned by agnusdei1207); build this repository from source, install the freshly built tarball into the project, and run the installer again to write a config-relative local file reference',
+    })
+  } else if (legacyPlugin) {
+    checks.push({
+      name: "plugin",
+      status: "warn",
+      message: 'plugins also contains a legacy "opencode-orchestrator" registry entry; rerun the installer to migrate it to a local file reference',
+    })
   }
 
   let options
-  try {
-    options = parseOptions(plugin && isRecord(plugin) ? plugin.options : {})
-    checks.push({ name: "options", status: "pass", message: "plugin options are valid" })
-  } catch (error) {
-    checks.push({ name: "options", status: "fail", message: error instanceof Error ? error.message : String(error) })
+  if (legacyPlugin && !safePlugin) {
+    checks.push({
+      name: "options",
+      status: "fail",
+      message: "plugin options were not validated because the registered entry is the unrelated npm registry package; reinstall locally first",
+    })
     options = parseOptions({})
+  } else {
+    try {
+      options = parseOptions(plugin && isRecord(plugin) ? plugin.options : {})
+      checks.push({ name: "options", status: "pass", message: "plugin options are valid" })
+    } catch (error) {
+      checks.push({ name: "options", status: "fail", message: error instanceof Error ? error.message : String(error) })
+      options = parseOptions({})
+    }
   }
 
   const agents = isRecord(document.agents) ? document.agents : {}
@@ -107,18 +131,46 @@ export function inspectConfig(path: string): DoctorReport {
   return { path, status, checks, agents: agentNames, configuredCommands, runtimeCommands }
 }
 
-function findPlugin(value: unknown): Record<string, unknown> | string | undefined {
+/**
+ * First plugin entry that resolves to this repository's plugin, in either V2
+ * form: a bare string or an object with a `package` field. Safe references are
+ * a config-local source (`/src/index.ts`) or built (`/dist/index.js`) file, or
+ * this repository's future scoped package `@cldmnky/opencode-orchestrator`.
+ * Separators are normalized before matching so Windows-style configs are
+ * recognized too.
+ */
+function findSafePlugin(value: unknown): string | Record<string, unknown> | undefined {
+  if (!Array.isArray(value)) return undefined
+  return value.find((entry): entry is string | Record<string, unknown> => {
+    if (typeof entry === "string") return isSafePluginReference(entry)
+    if (!isRecord(entry) || typeof entry.package !== "string") return false
+    return isSafePluginReference(entry.package)
+  })
+}
+
+/**
+ * First plugin entry still using the legacy bare registry name
+ * 'opencode-orchestrator' — the unrelated npm package, never this repository.
+ */
+function findLegacyBarePlugin(value: unknown): string | Record<string, unknown> | undefined {
   if (!Array.isArray(value)) return undefined
   return value.find((entry) => {
     if (entry === "opencode-orchestrator") return true
-    if (!isRecord(entry) || typeof entry.package !== "string") return false
-    return (
-      entry.package === "opencode-orchestrator" ||
-      entry.package.endsWith("/opencode-orchestrator") ||
-      entry.package.endsWith("/src/index.ts") ||
-      entry.package.endsWith("/dist/index.js")
-    )
-  }) as Record<string, unknown> | string | undefined
+    return isRecord(entry) && entry.package === "opencode-orchestrator"
+  }) as string | Record<string, unknown> | undefined
+}
+
+function isSafePluginReference(value: string): boolean {
+  const reference = normalizePackageReference(value)
+  if (reference === "opencode-orchestrator") return false
+  // Only this repository's own future scoped package. Arbitrary scopes could
+  // be unrelated packages, so they must not be treated as this plugin.
+  if (reference === "@cldmnky/opencode-orchestrator") return true
+  return reference.endsWith("/src/index.ts") || reference.endsWith("/dist/index.js")
+}
+
+function normalizePackageReference(value: string): string {
+  return value.replaceAll("\\", "/")
 }
 
 function hasModel(value: unknown): boolean {

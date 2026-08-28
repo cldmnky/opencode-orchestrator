@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
-import { dirname, isAbsolute, join, resolve } from "node:path"
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { commandDefinitions } from "../opencode-v2/commands/index.js"
 import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
@@ -10,6 +11,66 @@ import { parseOptions, type OrchestratorOptions } from "../core/config.js"
 export type InstallTarget = "project" | "global"
 export type AgentModelReferences = Record<string, string>
 
+/**
+ * Maps a runtime file (the installer CLI or the exported installer bundle) to
+ * the plugin entry it ships with. Only exact layouts are supported; separators
+ * are normalized first so Windows paths match too:
+ * - `src/cli/index.ts` or `src/cli/install.ts` -> `<root>/src/index.ts`
+ * - `dist/cli/index.js` or `dist/installer.js` -> `<root>/dist/index.js`
+ * Any other layout throws so a misconfigured runtime cannot silently write a
+ * reference to a file that does not exist.
+ *
+ * Suffix lengths differ (`dist/installer.js` is two levels below root,
+ * `dist/cli/index.js` is three), so the root is derived by stripping the exact
+ * matched suffix.
+ */
+const RUNTIME_LAYOUTS = [
+  { suffix: "/src/cli/index.ts", entry: "src/index.ts" },
+  { suffix: "/src/cli/install.ts", entry: "src/index.ts" },
+  { suffix: "/dist/cli/index.js", entry: "dist/index.js" },
+  { suffix: "/dist/installer.js", entry: "dist/index.js" },
+] as const
+
+export function pluginEntryForRuntimeFile(runtimeFile: string): string {
+  const normalized = runtimeFile.split(sep).join("/")
+  for (const { suffix, entry } of RUNTIME_LAYOUTS) {
+    if (normalized.endsWith(suffix)) {
+      return join(normalized.slice(0, -suffix.length), entry)
+    }
+  }
+  throw new Error(
+    `Unsupported installer layout: ${runtimeFile}; expected src/cli/index.ts, src/cli/install.ts, dist/cli/index.js, or dist/installer.js`,
+  )
+}
+
+/**
+ * A plugin reference the installer writes into the config: POSIX-style and
+ * relative to the config file, prefixed with `./` unless already dot-prefixed.
+ * When the config and the plugin entry live on different volumes,
+ * `path.relative` returns an absolute path; that normalized absolute path is
+ * kept as-is because `./`-prefixing it would corrupt it.
+ */
+export function configRelativePluginReference(configPath: string, pluginEntry: string): string {
+  const from = dirname(resolve(configPath))
+  const relativePath = relative(from, pluginEntry)
+  const reference = relativePath.split(sep).join("/")
+  if (isAbsolute(relativePath)) return reference
+  return reference.startsWith(".") ? reference : `./${reference}`
+}
+
+/**
+ * True when the reference points at a local file (dot-relative, `file://` URL,
+ * or absolute) rather than a bare package name resolved against node_modules.
+ */
+export function isLocalPluginReference(packageReference: string): boolean {
+  return (
+    packageReference.startsWith("./") ||
+    packageReference.startsWith("../") ||
+    packageReference.startsWith("file://") ||
+    isAbsolute(packageReference)
+  )
+}
+
 export function defaultConfigPath(target: InstallTarget, cwd = process.cwd()): string {
   if (target === "project") return join(cwd, "opencode.jsonc")
   const configHome = process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? "~", ".config")
@@ -19,7 +80,7 @@ export function defaultConfigPath(target: InstallTarget, cwd = process.cwd()): s
 export function installConfig(
   path: string,
   options: unknown = {},
-  packageReference = "opencode-orchestrator",
+  packageReference?: string,
   modelReferences: AgentModelReferences = {},
 ): {
   addedAgents: string[]
@@ -30,6 +91,13 @@ export function installConfig(
 } {
   const resolved = resolve(path)
   mkdirSync(dirname(resolved), { recursive: true })
+  // Without an explicit reference, derive the local plugin entry from this
+  // file's own location: `src/cli/install.ts` -> `<root>/src/index.ts` in a
+  // source checkout, `dist/installer.js` -> `<root>/dist/index.js` in the
+  // bundled package. Defaulting to a bare package name would be unsafe because
+  // `opencode-orchestrator` on the npm registry is an unrelated package.
+  const effectivePackageReference =
+    packageReference ?? configRelativePluginReference(resolved, pluginEntryForRuntimeFile(fileURLToPath(import.meta.url)))
   const source = existsSync(resolved) ? readFileSync(resolved, "utf8") : "{\n}\n"
   const errors: ParseError[] = []
   const parsed = parse(source, errors, { allowTrailingComma: true })
@@ -66,13 +134,26 @@ export function installConfig(
 
   let result = source
   const existingPlugins = Array.isArray(document.plugins) ? document.plugins : undefined
-  if (!hasPlugin(existingPlugins, packageReference)) {
+  const legacyIndexes = isLocalPluginReference(effectivePackageReference) ? legacyBarePluginIndexes(existingPlugins) : []
+  if (legacyIndexes.length > 0) {
+    const migrateIndex = legacyIndexes[0]
+    const localAlreadyPresent = hasPlugin(existingPlugins, effectivePackageReference)
+    for (const index of [...legacyIndexes].reverse()) {
+      if (index === migrateIndex && !localAlreadyPresent) {
+        result = migrateLegacyPluginEntry(result, index, existingPlugins![index], effectivePackageReference, merged)
+      } else {
+        result = removePluginEntry(result, index)
+      }
+    }
+  } else if (!hasPlugin(existingPlugins, effectivePackageReference)) {
     result = applyEdits(
       result,
       modify(
         result,
         existingPlugins ? ["plugins", existingPlugins.length] : ["plugins"],
-        existingPlugins ? { package: packageReference, options: pluginOptions(merged) } : [{ package: packageReference, options: pluginOptions(merged) }],
+        existingPlugins
+          ? { package: effectivePackageReference, options: pluginOptions(merged) }
+          : [{ package: effectivePackageReference, options: pluginOptions(merged) }],
         { formattingOptions },
       ),
     )
@@ -179,6 +260,45 @@ function atomicWrite(path: string, content: string): void {
 
 function hasPlugin(existing: readonly unknown[] | undefined, packageReference: string): boolean {
   return Boolean(existing?.some((entry) => entry === packageReference || (isRecord(entry) && entry.package === packageReference)))
+}
+
+/**
+ * Indexes of config plugin entries that name the legacy bare package
+ * 'opencode-orchestrator' — the unrelated npm registry name, never a local file.
+ */
+function legacyBarePluginIndexes(plugins: readonly unknown[] | undefined): number[] {
+  if (!plugins) return []
+  const indexes: number[] = []
+  for (let index = 0; index < plugins.length; index += 1) {
+    const entry = plugins[index]
+    if (entry === "opencode-orchestrator" || (isRecord(entry) && entry.package === "opencode-orchestrator")) {
+      indexes.push(index)
+    }
+  }
+  return indexes
+}
+
+/**
+ * Replaces a legacy bare 'opencode-orchestrator' entry in place: a bare string
+ * becomes a full object with the local reference and fresh options, while an
+ * existing object keeps its options and any other fields and only the package
+ * reference is swapped.
+ */
+function migrateLegacyPluginEntry(
+  result: string,
+  index: number,
+  legacy: unknown,
+  packageReference: string,
+  options: OrchestratorOptions,
+): string {
+  if (isRecord(legacy)) {
+    return applyEdits(result, modify(result, ["plugins", index, "package"], packageReference, { formattingOptions }))
+  }
+  return applyEdits(result, modify(result, ["plugins", index], { package: packageReference, options: pluginOptions(options) }, { formattingOptions }))
+}
+
+function removePluginEntry(result: string, index: number): string {
+  return applyEdits(result, modify(result, ["plugins", index], undefined, { formattingOptions }))
 }
 
 function sensitiveReadPermissions(): Array<Record<string, string>> {

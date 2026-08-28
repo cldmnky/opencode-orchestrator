@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { Context } from "@opencode-ai/plugin/promise/plugin"
+import { GOAL_TOOL_PERMISSION } from "../../src/core/permissions.js"
 import { orchestratorPlugin } from "../../src/index.js"
 
 describe("server plugin contract", () => {
@@ -28,7 +29,11 @@ describe("server plugin contract", () => {
       ]),
     )
     const commands: Array<{ name: string; execute(input: any): Promise<void> }> = []
-    const tools: Array<{ name: string; options?: { namespace?: string }; execute(input: unknown, context: any): Promise<any> }> = []
+    const tools: Array<{
+      name: string
+      options?: { namespace?: string; permission?: string }
+      execute(input: unknown, context: any): Promise<any>
+    }> = []
     const disposed: string[] = []
     const switches: string[] = []
     const prompts: any[] = []
@@ -106,6 +111,12 @@ describe("server plugin contract", () => {
       "orchestrator_goal_set",
       "orchestrator_goal_update",
     ])
+    // Every registered goal tool must declare the shared permission action so
+    // a single rule grants or revokes the whole family.
+    expect(tools).toHaveLength(3)
+    for (const tool of tools) {
+      expect(tool.options?.permission).toBe(GOAL_TOOL_PERMISSION)
+    }
     expect(agents.get("orchestrator")?.system).toContain("conductor")
     expect(agents.get("orchestrator")?.system).toContain("Expected outcome")
     expect(agents.get("orchestrator")?.system).toContain("exact disjoint write scope")

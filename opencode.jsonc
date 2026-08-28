@@ -42,7 +42,7 @@
     },
     "reviewer": {
       "mode": "subagent",
-      "model": "opencode-go/grok-4.6#high"
+      "model": "opencode-go/muse-spark-1.2-contributor#xhigh"
     }
   }
 }

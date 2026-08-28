@@ -160,6 +160,151 @@ describe("goal continuation", () => {
     stop()
   })
 
+  test("skips admission when a goal update races the reservation", async () => {
+    const location = { directory: "/workspace", project: { id: "project-update-race" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    // When the reservation is written (count 0 -> 1), a concurrent
+    // `goal_update` pauses and resumes the goal: status is active again and
+    // the continuation count still matches the reservation, but updatedAt
+    // advanced so this is not the exact record we reserved.
+    const racyStorage: StorageLike = {
+      get: async (item) => values.get(item),
+      set: async (item, value) => {
+        values.set(item, value)
+        const goal = value as { continuationCount: number; updatedAt: number }
+        if (item === key && goal.continuationCount === 1) {
+          values.set(key, {
+            ...(values.get(key) as object),
+            status: "active",
+            updatedAt: goal.updatedAt + 1,
+          })
+        }
+      },
+      remove: async (item) => void values.delete(item),
+    }
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream, racyStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-update-race", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // The count alone is not enough: the updated record must not be admitted.
+    expect(prompts).toHaveLength(0)
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(1)
+    stop()
+  })
+
+  test("skips admission when a goal replacement races the reservation", async () => {
+    const location = { directory: "/workspace", project: { id: "project-replace-race" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    // When the reservation is written, a concurrent `goal_set` replaces the
+    // goal with a fresh record whose continuation identity (createdAt and
+    // objective) differs even though the count and lastContinuationAt happen
+    // to match the reservation.
+    const racyStorage: StorageLike = {
+      get: async (item) => values.get(item),
+      set: async (item, value) => {
+        values.set(item, value)
+        const goal = value as { continuationCount: number; lastContinuationAt: number }
+        if (item === key && goal.continuationCount === 1) {
+          values.set(key, {
+            ...newGoal("session", "replaced objective", goal.lastContinuationAt + 1),
+            continuationCount: goal.continuationCount,
+            lastContinuationAt: goal.lastContinuationAt,
+          })
+        }
+      },
+      remove: async (item) => void values.delete(item),
+    }
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream, racyStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-replace-race", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // A replaced goal is never mistaken for the reservation.
+    expect(prompts).toHaveLength(0)
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(1)
+    stop()
+  })
+
+  test("serializes session.deleted cleanup against an in-flight reservation write", async () => {
+    const location = { directory: "/workspace", project: { id: "project-delete-race" } }
+    const key = goalStorageKey(location, "session")
+    const runKey = runStorageKey(location, "session")
+    const stopKey = stopStorageKey(location, "session")
+    const values = new Map<string, unknown>([
+      [key, newGoal("session", "ship the change", 1)],
+      [runKey, { version: 1, sessionID: "session", status: "active", createdAt: 1, updatedAt: 1 }],
+    ])
+    const prompts: Array<{ text: string }> = []
+    // The reservation's goal write blocks until the test releases it, so a
+    // concurrent session.deleted cleanup has to queue behind the reservation
+    // instead of racing it. A /halt flag lands during the same window.
+    let releaseSet!: () => void
+    const setGate = new Promise<void>((resolve) => {
+      releaseSet = resolve
+    })
+    let reservationStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      reservationStarted = resolve
+    })
+    const sharedStorage: StorageLike = {
+      get: async (item) => values.get(item),
+      set: async (item, value) => {
+        if (item === key) {
+          reservationStarted()
+          await setGate
+        }
+        values.set(item, value)
+        if (item === key) {
+          // A concurrent /halt lands while the reservation write is in flight.
+          values.set(stopKey, { version: 1, sessionID: "session", stoppedAt: 1 })
+        }
+      },
+      remove: async (item) => void values.delete(item),
+    }
+
+    // Instance A reserves the turn and blocks mid-write; instance B observes
+    // the session deletion. Both share the module-level session lock.
+    const streamA = createStream()
+    const streamB = createStream()
+    const stopA = startGoalContinuation(
+      fixture(location, values, prompts, streamA, sharedStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+    const stopB = startGoalContinuation(
+      fixture(location, values, prompts, streamB, sharedStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    streamA.push({ id: "idle-delete-race", type: "session.idle", data: { sessionID: "session" } })
+    await started
+    streamB.push({ id: "deleted-race", type: "session.deleted", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    releaseSet()
+
+    // Cleanup runs after the reservation write completes, so the reserved
+    // goal and the racing halt flag must not be resurrected by writes that
+    // follow the delete.
+    await waitFor(() => !values.has(key))
+    expect(values.has(runKey)).toBe(false)
+    expect(values.has(stopKey)).toBe(false)
+    expect(prompts).toHaveLength(0)
+    stopA()
+    stopB()
+  })
+
   test("cleans up goal, run, and halt storage when the session is deleted", async () => {
     const location = { directory: "/workspace", project: { id: "project-delete" } }
     const goalKey = goalStorageKey(location, "session")

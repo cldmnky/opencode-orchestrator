@@ -30,8 +30,21 @@ bun run build
 - There is no configured lint or formatter command. Do not claim lint verification.
 - Use `bun run dev:setup && bun run dev:v2` for an isolated `opencode2 --standalone` harness. It redirects XDG config/data/cache under `dev/state` and does not exercise global config or the shared service.
 
+## Live Reload (repo root)
+
+- `opencode.jsonc` loads `./src/index.ts` directly. Saving `src/**` triggers the server's file watcher — no restart for most changes. Watch `~/.local/share/opencode/log/opencode.log` for `loading plugin .../src/index.ts` and `agent.updated`/`command.updated`.
+- If `/orchestrate`/`/goal` disappear in the TUI, restart the shared service and reopen from the repo: `opencode2 service restart` then `cd repo && opencode2`. Verify with `opencode2 api get /api/plugin | jq -r '.data // . | .[].id'` and `bun run src/cli/index.ts doctor`.
+- Do not set `OPENCODE_CONFIG` in normal dev; it overrides discovery.
+
+## Ship
+
+- Verify first: `bun run typecheck && bun test && bun run build`. `build` emits `dist/index.js`, `dist/tui.js`, `dist/commands.js`, `dist/installer.js`, `dist/cli/index.js`; `dist/` is gitignored but included in `npm pack`.
+- Commit/push: `git add -A && git commit -m "chore: ..."` then `git push origin main`; tag with `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+- `npm publish` to `opencode-orchestrator` is blocked (owned by `agnusdei1207` on npm, latest 1.7.14). Attach `npm pack` tarball to a GitHub Release instead, or publish under `@cldmnky/opencode-orchestrator` with `--access public`.
+
 ## Known Verification Traps
 
 - `bun run dev:v2:dist` rewrites the generated config to `../../dist/index.js`; inspect `dev/project/opencode.jsonc` when verifying which entrypoint is loaded.
 - `bun run build` emits the package's published bundle entrypoints under `dist/`; a successful build does not replace the packed-package smoke test.
 - The plugin defaults to `strict_agents: true`; config-backed agents are materialized after external plugins during beta startup, so the complete dev template or installer is required for strict validation.
+- `opencode2 api get /api/plugin` is location-scoped. Run it from the repo `cwd` (`cd repo && opencode2 api get /api/plugin`) — `?directory=` is ignored on `beta-18414`.

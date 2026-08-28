@@ -3,10 +3,11 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { dirname, join, resolve } from "node:path"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
-import { defaultConfigPath, installConfig, type AgentModelReferences } from "./install.js"
+import { defaultConfigPath, installConfig, configRelativePluginReference, pluginEntryForRuntimeFile, type AgentModelReferences } from "./install.js"
 import { inspectConfig } from "./doctor.js"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
+const cliFile = fileURLToPath(import.meta.url)
 const devProject = join(root, "dev", "project")
 const devState = join(root, "dev", "state")
 
@@ -25,8 +26,11 @@ function install(args: string[]): void {
   const models = modelReferences(args)
   const pathArg = args.find((arg, index) => !arg.startsWith("--") && args[index - 1] !== "--model")
   const path = pathArg ? resolve(pathArg) : undefined
-  const result = installConfig(path ?? defaultConfigPath(target), {}, "opencode-orchestrator", models)
+  const configPath = path ?? defaultConfigPath(target)
+  const packageReference = configRelativePluginReference(configPath, pluginEntryForRuntimeFile(cliFile))
+  const result = installConfig(configPath, {}, packageReference, models)
   console.log(`Installed OpenCode Orchestrator in ${result.path}`)
+  console.log(`Plugin: ${packageReference}`)
   console.log(`Added agents: ${result.addedAgents.join(", ") || "none"}`)
   console.log(`Preserved agents: ${result.preservedAgents.join(", ") || "none"}`)
   console.log("Commands: registered by the V2 plugin at runtime")

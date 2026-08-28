@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Context } from "@opencode-ai/plugin/promise/plugin"
@@ -248,11 +248,18 @@ describe("runtime commands", () => {
     mkdirSync(join(directory, ".orchestrator", "plans"), { recursive: true })
     // A symlink inside plans that points at a file outside of plans.
     writeFileSync(join(directory, "outside.md"), "# Outside\n\n- Step\n")
+    const evilLink = join(directory, ".orchestrator", "plans", "evil.md")
     try {
-      symlinkSync(join(directory, "outside.md"), join(directory, ".orchestrator", "plans", "evil.md"))
-    } catch {
-      // Environments without symlink permission still expect no plan to run.
+      symlinkSync(join(directory, "outside.md"), evilLink)
+    } catch (error) {
+      if (!isUnsupportedSymlinkError(error)) throw error
+      // Platforms that document symlink-creation as unsupported cannot
+      // exercise the escape; skip instead of passing vacuously.
+      return
     }
+    // Prove the symlink genuinely exists on supported platforms: otherwise the
+    // test would pass merely because the plan file is absent.
+    expect(existsSync(evilLink)).toBe(true)
     const fixture = runtimeFixture(directory)
 
     await runCommand(fixture.context, parseOptions({}), "run-plan", invocation("evil"), undefined)
@@ -268,7 +275,8 @@ describe("runtime commands", () => {
     writeFileSync(join(directory, ".orchestrator", "plans", "real.md"), "# Real\n\n- Step\n")
     try {
       symlinkSync(join(directory, ".orchestrator", "plans", "real.md"), join(directory, ".orchestrator", "plans", "alias.md"))
-    } catch {
+    } catch (error) {
+      if (!isUnsupportedSymlinkError(error)) throw error
       // Skip the positive case where symlinks are unavailable.
       return
     }
@@ -301,6 +309,14 @@ describe("runtime commands", () => {
 
 function invocation(text: string, prompt: Record<string, unknown> = {}): CommandInvocationLike {
   return { sessionID: "session", prompt: { text, ...prompt }, delivery: "queue" } as CommandInvocationLike
+}
+
+// True only for the error codes platforms document when symlink creation is
+// unsupported (e.g. Windows without developer mode / elevation). Any other
+// failure is a real test-environment problem and must not be swallowed.
+function isUnsupportedSymlinkError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === "EPERM" || code === "EACCES" || code === "EINVAL" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "ENOSYS"
 }
 
 function runtimeFixture(directory: string) {

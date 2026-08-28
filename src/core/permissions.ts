@@ -8,6 +8,12 @@
  * explicit `permission` action on every goal tool lets the installer and the
  * agent transform grant or revoke the whole goal-tool family with a single
  * rule, while any exact user-authored rule for the action is always respected.
+ *
+ * An exact rule (including `ask`) affects visibility only: it controls whether
+ * the model can see and invoke the goal tools. V2's public Promise plugin API
+ * does not expose `permission.assert`, so the goal tools cannot trigger
+ * interactive runtime "ask" prompting. Do not rely on an `ask` rule to produce
+ * a prompt, and do not claim undocumented enforcements beyond visibility.
  */
 export const GOAL_TOOL_PERMISSION = "orchestrator_goal"
 

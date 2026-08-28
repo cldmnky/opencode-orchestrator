@@ -68,7 +68,11 @@ export function applyAgentTransform(draft: AgentDraftLike, options: Orchestrator
       agent.system = appendOnce(agent.system, buildOrchestratorSystem(options))
       // The orchestrator may call the goal tools. Preserved agents that
       // predate the shared permission action need the allow rule appended;
-      // an exact user rule for the action is never overridden.
+      // an exact user rule for the action is never overridden. When the agent
+      // has no `permissions` field at all, V2 would normally fall back to a
+      // deny-all; we must seed that explicitly so the appended goal rule does
+      // not widen every other action. An explicit array — even `[]` — is the
+      // user's policy and is preserved as-is.
       agent.permissions = appendGoalToolPermission(agent.permissions, "allow")
     })
   }
@@ -79,8 +83,12 @@ export function applyAgentTransform(draft: AgentDraftLike, options: Orchestrator
     draft.update(id, (agent) => {
       agent.description = appendOnce(agent.description, roleDescription(role))
       agent.system = appendOnce(agent.system, buildWorkerSystem(role))
-      // Fail closed: workers must never see or drive goal tools, even when a
-      // preserved worker predates the explicit deny or lacks any deny-all.
+      // Fail closed by default: workers get goal tools denied unless an exact
+      // user-authored rule for the action already exists. The installer appends
+      // the deny rule only when no exact user rule is present, so an explicit
+      // user allow/ask remains authoritative. The same deny-all seeding applies
+      // so the deny target is not the only rule in a sparse array that would
+      // widen every other action.
       agent.permissions = appendGoalToolPermission(agent.permissions, "deny")
     })
   }
@@ -92,7 +100,20 @@ function appendGoalToolPermission(
   permissions: PermissionRuleLike[] | undefined,
   effect: "allow" | "deny",
 ): PermissionRuleLike[] {
-  const existing = permissions ? [...permissions] : []
+  // Pinned V2 permission semantics: with an explicit ruleset — even an empty
+  // `[]` — a resource not matched by any rule defaults to effect `ask`, and
+  // only an *absent* `permissions` field triggers the built-in
+  // `missingAgentPermissions` deny-all fallback. An explicit existing array —
+  // including `[]` — is the user's policy and is preserved verbatim. So when
+  // the field is missing we seed an explicit deny-all before appending the
+  // goal rule; otherwise the sparse one-rule array we would write widens every
+  // other action. When an existing array is present, leave it untouched and
+  // append the goal rule only when no exact user rule for that action already
+  // exists.
+  if (permissions === undefined) {
+    return [{ action: "*", resource: "*", effect: "deny" }, goalToolPermissionRule(effect)]
+  }
+  const existing = [...permissions]
   if (hasExactPermissionRule(existing, GOAL_TOOL_PERMISSION)) return existing
   existing.push(goalToolPermissionRule(effect))
   return existing

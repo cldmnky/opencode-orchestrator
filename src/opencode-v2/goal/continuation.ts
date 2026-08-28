@@ -58,11 +58,16 @@ export function startGoalContinuation(context: ContinuationContext, options: Orc
 
     const sessionID = event.data.sessionID
     if (event.type === "session.deleted") {
-      await Promise.all([
-        context.storage.remove(goalStorageKey(context.location, sessionID)),
-        context.storage.remove(runStorageKey(context.location, sessionID)),
-        context.storage.remove(stopStorageKey(context.location, sessionID)),
-      ])
+      // Serialize cleanup under the same per-session lock the reservation uses
+      // so a delete cannot interleave with an in-flight reservation write and
+      // leave stale run/halt state (or admit a prompt for a deleted session).
+      await withSessionLock(context.location, sessionID, async () => {
+        await Promise.all([
+          context.storage.remove(goalStorageKey(context.location, sessionID)),
+          context.storage.remove(runStorageKey(context.location, sessionID)),
+          context.storage.remove(stopStorageKey(context.location, sessionID)),
+        ])
+      })
       inFlight.delete(sessionID)
       lastEvent.delete(sessionID)
       return
@@ -118,11 +123,14 @@ export function startGoalContinuation(context: ContinuationContext, options: Orc
     // must never be queued while holding the lock, but we still re-read the
     // goal and halt flag so a pause, completion, replacement, or /halt that
     // raced the reservation fails closed. Only the exact record we reserved
-    // may be admitted.
+    // may be admitted: identity is compared on the fields the reservation
+    // wrote or that a replacement/update would change, so a goal that was
+    // replaced or updated (not just its continuation count) is never mistaken
+    // for the reservation.
     if (await readAutomationStop(context.storage, stopKey)) return
     const current = await readGoal(context.storage, key)
     if (!current || current.status !== "active") return
-    if (current.continuationCount !== reserved.continuationCount) return
+    if (!isSameReservation(current, reserved)) return
 
     await context.session.prompt({
       sessionID,
@@ -130,6 +138,20 @@ export function startGoalContinuation(context: ContinuationContext, options: Orc
       delivery: "queue",
     })
   }
+}
+
+// Identity of the exact record the reservation wrote, used at admission time.
+// A replacement (`goal_set`) or update (`goal_update`) changes these fields,
+// so comparing them on top of the continuation count prevents an older or
+// replaced goal from being mistaken for the reservation.
+function isSameReservation(current: GoalRecord, reserved: GoalRecord): boolean {
+  return (
+    current.objective === reserved.objective &&
+    current.createdAt === reserved.createdAt &&
+    current.updatedAt === reserved.updatedAt &&
+    current.lastContinuationAt === reserved.lastContinuationAt &&
+    current.continuationCount === reserved.continuationCount
+  )
 }
 
 type SessionEvent = {

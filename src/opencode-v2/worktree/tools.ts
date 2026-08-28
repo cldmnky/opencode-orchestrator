@@ -156,7 +156,7 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
         let status: WorktreeRecord["status"] = record?.status ?? "pending"
         if (!present) status = "orphaned"
         else if (dirtyText.length > 0) status = "dirty"
-        else if (record && record.status !== "dirty") status = "ready"
+        else if (record) status = "ready"
         if (record && status !== record.status) {
           await writeWorktree(deps.storage, { ...record, status })
         }
@@ -217,8 +217,7 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
         const otherOwner = (await listWorktrees(deps.storage)).find(
           (candidate) =>
             candidate.dir === directory &&
-            candidate.sessionID !== tool.sessionID &&
-            (candidate.status === "pending" || candidate.status === "ready" || candidate.status === "moved"),
+            candidate.sessionID !== tool.sessionID,
         )
         if (otherOwner) {
           return result(`worktree cleanup refused: worktree is owned by session ${otherOwner.sessionID}`)

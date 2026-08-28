@@ -1,5 +1,5 @@
 import type { OrchestratorOptions } from "../../core/config.js"
-import { moveSessionAnchor, newSessionAnchor, writeSessionAnchor } from "../session/state.js"
+import { moveSessionAnchor, newSessionAnchor, readSessionAnchor, writeSessionAnchor } from "../session/state.js"
 import {
   readSessionIndex,
   readWorktree,
@@ -75,41 +75,58 @@ export function startWorktreeEventSync(
     const index = await readSessionIndex(context.storage, sessionID)
     const oldProjectID = index?.projectID
     const originProjectID = index?.originProjectID ?? projectID
+    const existing = oldProjectID ? await readSessionAnchor(context.storage, oldProjectID, sessionID) : undefined
+    const currentDirectory = directory || existing?.currentDirectory || index?.directory
     const now = Date.now()
 
     if (oldProjectID && oldProjectID !== projectID) {
       const moved = await moveSessionAnchor(context.storage, oldProjectID, sessionID, {
         projectID,
-        directory,
+        directory: currentDirectory ?? directory,
         workspaceID,
         subpath,
       })
       if (!moved) {
         // No stage-1 anchor at the old key (pre-created sessions): write a
         // fresh anchor at the new key without guessing a stable origin.
-        await writeSessionAnchor(
-          context.storage,
-          newSessionAnchor({
-            sessionID,
-            originProjectID,
-            originDirectory: index?.directory ?? directory,
-            currentProjectID: projectID,
-            currentDirectory: directory,
-            workspaceID,
-            subpath,
-          }),
-          now,
-        )
+        if (currentDirectory) {
+          await writeSessionAnchor(
+            context.storage,
+            newSessionAnchor({
+              sessionID,
+              originProjectID,
+              originDirectory: index?.directory ?? currentDirectory,
+              currentProjectID: projectID,
+              currentDirectory,
+              workspaceID,
+              subpath,
+            }),
+            now,
+          )
+        }
       }
-    } else {
+    } else if (existing && currentDirectory) {
+      await writeSessionAnchor(
+        context.storage,
+        {
+          ...existing,
+          currentProjectID: projectID,
+          currentDirectory,
+          ...(workspaceID !== undefined ? { workspaceID } : {}),
+          ...(subpath !== undefined ? { subpath } : {}),
+          status: "moved",
+        },
+        now,
+      )
+    } else if (currentDirectory) {
       await writeSessionAnchor(
         context.storage,
         newSessionAnchor({
           sessionID,
           originProjectID,
-          originDirectory: directory,
+          originDirectory: index?.directory ?? currentDirectory,
           currentProjectID: projectID,
-          currentDirectory: directory,
+          currentDirectory,
           workspaceID,
           subpath,
         }),

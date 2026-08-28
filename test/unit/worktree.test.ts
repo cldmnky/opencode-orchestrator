@@ -672,6 +672,18 @@ describe("worktree tools", () => {
     const persisted = dirty.values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord
     expect(persisted.status).toBe("dirty")
 
+    const cleaned = collectWorktreeTools({
+      values: dirty.values,
+      runner: scriptedGit((call) => {
+        if (call.args[0] === "worktree" && call.args[1] === "list") return ok(`${MAIN_ONLY}\n\nworktree /srv/worktrees/feature`)
+        if (call.args[0] === "status") return ok("")
+        return undefined
+      }).runner,
+    })
+    const cleanedOut = await cleaned.tools.get("worktree_status")!.execute({}, toolContext("session-1", "orchestrator"))
+    expect((JSON.parse(cleanedOut.content) as { status: string }).status).toBe("ready")
+    expect((cleaned.values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord).status).toBe("ready")
+
     const orphaned = collectWorktreeTools({
       runner: scriptedGit((call) => {
         if (call.args[0] === "worktree" && call.args[1] === "list") return ok(MAIN_ONLY)
@@ -755,27 +767,30 @@ describe("worktree tools", () => {
     const { tools, values } = collectWorktreeTools({
       runner: scriptedGit(() => undefined).runner,
     })
-    const other = newWorktree(
-      {
-        owner: "other-session",
-        sessionID: "other-session",
-        originProjectID: "origin",
-        repoRoot: "/repo",
-        dir: "/srv/worktrees/feature",
-        branch: "feature",
-        base: "main",
-      },
-      100,
-    )
-    values.set(worktreeStorageKey("origin", "other-session"), other)
-    const output = await tools
-      .get("worktree_cleanup")!
-      .execute(
-        { repoRoot: "/repo", directory: "/srv/worktrees/feature", confirm: true },
-        toolContext("session-1", "orchestrator"),
+    for (const status of ["ready", "dirty", "orphaned", "cleanup-failed"] as const) {
+      const other = newWorktree(
+        {
+          owner: "other-session",
+          sessionID: "other-session",
+          originProjectID: "origin",
+          repoRoot: "/repo",
+          dir: "/srv/worktrees/feature",
+          branch: "feature",
+          base: "main",
+        },
+        100,
       )
-    expect(output.content).toContain("refused")
-    expect(output.content).toContain("owned by session other-session")
+      values.set(worktreeStorageKey("origin", "other-session"), { ...other, status })
+      const output = await tools
+        .get("worktree_cleanup")!
+        .execute(
+          { repoRoot: "/repo", directory: "/srv/worktrees/feature", confirm: true },
+          toolContext("session-1", "orchestrator"),
+        )
+      expect(output.content).toContain("refused")
+      expect(output.content).toContain("owned by session other-session")
+      values.delete(worktreeStorageKey("origin", "other-session"))
+    }
   })
 
   test("cleanup removes a clean owned worktree and deletes the durable record", async () => {
@@ -894,6 +909,86 @@ describe("session.moved reconciliation", () => {
     const worktree = values.get(worktreeStorageKey("origin", "s1")) as WorktreeRecord
     expect(worktree.status).toBe("moved")
     expect(values.has(sessionAnchorStorageKey("newproj", "s1"))).toBe(true)
+
+    stop()
+  })
+
+  test("same-project move rewrites the anchor in place without clobbering origin", async () => {
+    const values = new Map<string, unknown>()
+    const storage = memStorage(values)
+    values.set(sessionIndexStorageKey("s1"), {
+      version: 1,
+      sessionID: "s1",
+      projectID: "proj",
+      originProjectID: "origin",
+      directory: "/old/dir",
+      updatedAt: 1,
+    })
+    values.set(sessionAnchorStorageKey("proj", "s1"), {
+      version: 1,
+      sessionID: "s1",
+      originProjectID: "origin",
+      originDirectory: "/origin",
+      currentProjectID: "proj",
+      currentDirectory: "/old/dir",
+      updatedAt: 1,
+    })
+    const stream = createEventStream()
+    const stop = startWorktreeEventSync({ event: { subscribe: () => stream }, storage }, parseOptions({}))
+
+    stream.push({
+      type: "session.moved",
+      data: { sessionID: "s1", projectID: "proj", location: { directory: "/new/dir" } },
+    })
+    await waitFor(() => {
+      const anchor = values.get(sessionAnchorStorageKey("proj", "s1")) as SessionAnchor | undefined
+      return anchor?.currentDirectory === "/new/dir"
+    })
+
+    const anchor = values.get(sessionAnchorStorageKey("proj", "s1")) as SessionAnchor
+    expect(anchor.originProjectID).toBe("origin")
+    expect(anchor.originDirectory).toBe("/origin")
+    expect(anchor.currentDirectory).toBe("/new/dir")
+    expect(anchor.status).toBe("moved")
+
+    stop()
+  })
+
+  test("same-project move without a directory preserves the existing anchor directory", async () => {
+    const values = new Map<string, unknown>()
+    const storage = memStorage(values)
+    values.set(sessionIndexStorageKey("s1"), {
+      version: 1,
+      sessionID: "s1",
+      projectID: "proj",
+      originProjectID: "origin",
+      directory: "/old/dir",
+      updatedAt: 1,
+    })
+    values.set(sessionAnchorStorageKey("proj", "s1"), {
+      version: 1,
+      sessionID: "s1",
+      originProjectID: "origin",
+      originDirectory: "/origin",
+      currentProjectID: "proj",
+      currentDirectory: "/old/dir",
+      updatedAt: 1,
+    })
+    const stream = createEventStream()
+    const stop = startWorktreeEventSync({ event: { subscribe: () => stream }, storage }, parseOptions({}))
+
+    stream.push({
+      type: "session.moved",
+      data: { sessionID: "s1", projectID: "proj" },
+    })
+    await waitFor(() => {
+      const anchor = values.get(sessionAnchorStorageKey("proj", "s1")) as SessionAnchor | undefined
+      return anchor?.status === "moved"
+    })
+
+    const anchor = values.get(sessionAnchorStorageKey("proj", "s1")) as SessionAnchor
+    expect(anchor.currentDirectory).toBe("/old/dir")
+    expect(anchor.originDirectory).toBe("/origin")
 
     stop()
   })

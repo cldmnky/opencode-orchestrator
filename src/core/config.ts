@@ -1,5 +1,6 @@
 import { z } from "zod"
 import { DEFAULT_ROLES, type RoleName } from "./roles.js"
+import { RUNTIME_PLUGIN_ID } from "./package-identity.js"
 
 export const COMMAND_NAMES = [
   "orchestrate",
@@ -77,7 +78,7 @@ export type CommandName = (typeof COMMAND_NAMES)[number]
 export function parseOptions(value: unknown): OrchestratorOptions {
   const parsed = OrchestratorOptionsSchema.safeParse(value ?? {})
   if (!parsed.success) {
-    throw new Error(`Invalid opencode-orchestrator options: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`)
+    throw new Error(`Invalid ${RUNTIME_PLUGIN_ID} options: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`)
   }
 
   return { ...parsed.data, roles: parsed.data.roles as Record<RoleName, string> }

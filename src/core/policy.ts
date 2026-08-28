@@ -35,6 +35,33 @@ export const CHILD_TASK_CONTRACT = [
   "Handoff: the worker handoff format below.",
 ].join("\n")
 
+// Remote (GitHub) orchestration guidance lives here as the single source of
+// truth. Prompt generation embeds these constants verbatim so every prompt
+// kind states the same truthful policy without duplicating text.
+export const TOOL_AVAILABILITY_GUIDANCE = [
+  "Preflight: inspect the tool catalog the connected host actually exposes before using any GitHub tool; never infer availability from MCP server names or status.",
+  "Use only GitHub tools the host has already configured and exposed; never assume, register, or invent tools.",
+  "For issue, branch, pull request, review, merge, or closure operations, require direct evidence from the tool result — the object, its identifier, and its URL — before reporting completion.",
+  "If the connected host does not expose the tools needed for issue or pull request automation, stop and ask the user; do not silently claim the work, fall back to unverified steps, or fabricate results.",
+].join("\n")
+
+export const SECRET_HANDLING_GUIDANCE = [
+  "Never request, resolve, log, paste, or copy raw tokens, authorization headers, environment secrets, or OAuth credentials.",
+  "Redact credentials from every ledger, handoff, and handover.",
+].join("\n")
+
+export const WORKTREE_BOUNDARY_GUIDANCE = [
+  "Prompt-level rules are advisory and do not enforce filesystem isolation.",
+  "The native V2 subagent API does not expose a plugin-controlled atomic worktree or location boundary; prompt-level disjoint write scopes do not equal filesystem isolation.",
+  "Retain native role delegation; safe delegation is allowed whenever isolation is not required.",
+].join("\n")
+
+export const REMOTE_ORCHESTRATION_GUIDANCE = [
+  TOOL_AVAILABILITY_GUIDANCE,
+  SECRET_HANDLING_GUIDANCE,
+  WORKTREE_BOUNDARY_GUIDANCE,
+].join("\n")
+
 export function orchestrationRules(maxParallel: number, requireReview: boolean): string {
   return [
     `At most ${maxParallel} independent child tasks may run at once.`,
@@ -45,7 +72,9 @@ export function orchestrationRules(maxParallel: number, requireReview: boolean):
     "Require an exact disjoint write scope from every child before any parallel write; no two children may claim the same file or area.",
     "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes.",
     "Separate established facts from assumptions: label every assumption explicitly and verify it before relying on it.",
-    "The current V2 native subagent API does not expose an atomic plugin-controlled child worktree; never claim that this plugin provided isolation.",
+    TOOL_AVAILABILITY_GUIDANCE,
+    SECRET_HANDLING_GUIDANCE,
+    WORKTREE_BOUNDARY_GUIDANCE,
     "Start independent read-only work in parallel/background mode.",
     "Record the original branch, HEAD, changed files, commits, and verification in the task ledger when those facts are available.",
     "Do not claim automated GitHub issue or pull request coordination unless the user explicitly performs and verifies those steps.",

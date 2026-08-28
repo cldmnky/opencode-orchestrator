@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "opencode-orchestrator",
+  "name": "opencode-v2-agent-orchestrator",
   "version": "0.1.1",
   "description": "A V2-only multi-agent orchestration plugin for OpenCode.",
   "type": "module",
@@ -11,7 +11,7 @@
     "./installer": "./dist/installer.js"
   },
   "bin": {
-    "opencode-orchestrator": "./dist/cli/index.js"
+    "opencode-v2-agent-orchestrator": "./dist/cli/index.js"
   },
   "files": [
     "dist",

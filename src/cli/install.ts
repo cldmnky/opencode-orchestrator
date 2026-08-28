@@ -7,6 +7,7 @@ import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
 import { GOAL_TOOL_PERMISSION } from "../core/permissions.js"
 import { DEFAULT_ROLES, type RoleName } from "../core/roles.js"
 import { parseOptions, type OrchestratorOptions } from "../core/config.js"
+import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../core/package-identity.js"
 
 export type InstallTarget = "project" | "global"
 export type AgentModelReferences = Record<string, string>
@@ -95,7 +96,8 @@ export function installConfig(
   // file's own location: `src/cli/install.ts` -> `<root>/src/index.ts` in a
   // source checkout, `dist/installer.js` -> `<root>/dist/index.js` in the
   // bundled package. Defaulting to a bare package name would be unsafe because
-  // `opencode-orchestrator` on the npm registry is an unrelated package.
+  // the legacy `opencode-orchestrator` name is ambiguous migration input: the
+  // exact name this package shipped under before the current rename.
   const effectivePackageReference =
     packageReference ?? configRelativePluginReference(resolved, pluginEntryForRuntimeFile(fileURLToPath(import.meta.url)))
   const source = existsSync(resolved) ? readFileSync(resolved, "utf8") : "{\n}\n"
@@ -134,18 +136,28 @@ export function installConfig(
 
   let result = source
   const existingPlugins = Array.isArray(document.plugins) ? document.plugins : undefined
-  const legacyIndexes = isLocalPluginReference(effectivePackageReference) ? legacyBarePluginIndexes(existingPlugins) : []
+  // Legacy entries are migrated/removed only when the installer is writing a
+  // reference it owns: a config-local file, or the current bare/scoped
+  // distribution name passed explicitly. Other bare references are left alone.
+  const legacyIndexes =
+    isLocalPluginReference(effectivePackageReference) || isCanonicalPluginReference(effectivePackageReference)
+      ? legacyBarePluginIndexes(existingPlugins)
+      : []
+  // A canonical entry for the current distribution (bare or scoped) means this
+  // plugin is already configured: keep it as-is and never add a duplicate.
+  const canonicalAlreadyPresent = hasCanonicalPlugin(existingPlugins)
+  const localAlreadyPresent = hasPlugin(existingPlugins, effectivePackageReference)
+  const alreadyPresent = canonicalAlreadyPresent || localAlreadyPresent
   if (legacyIndexes.length > 0) {
     const migrateIndex = legacyIndexes[0]
-    const localAlreadyPresent = hasPlugin(existingPlugins, effectivePackageReference)
     for (const index of [...legacyIndexes].reverse()) {
-      if (index === migrateIndex && !localAlreadyPresent) {
+      if (index === migrateIndex && !alreadyPresent) {
         result = migrateLegacyPluginEntry(result, index, existingPlugins![index], effectivePackageReference, merged)
       } else {
         result = removePluginEntry(result, index)
       }
     }
-  } else if (!hasPlugin(existingPlugins, effectivePackageReference)) {
+  } else if (!alreadyPresent) {
     result = applyEdits(
       result,
       modify(
@@ -263,15 +275,44 @@ function hasPlugin(existing: readonly unknown[] | undefined, packageReference: s
 }
 
 /**
- * Indexes of config plugin entries that name the legacy bare package
- * 'opencode-orchestrator' — the unrelated npm registry name, never a local file.
+ * True when the config already carries a canonical entry for the current
+ * distribution: either the bare distribution name or its scoped spelling, in
+ * string or object form. Such entries are recognized and preserved rather than
+ * migrated or duplicated.
+ */
+function hasCanonicalPlugin(existing: readonly unknown[] | undefined): boolean {
+  return Boolean(
+    existing?.some(
+      (entry) =>
+        isCanonicalPluginReference(typeof entry === "string" ? entry : isRecord(entry) && typeof entry.package === "string" ? entry.package : ""),
+    ),
+  )
+}
+
+/**
+ * True when the reference names the current distribution's canonical forms:
+ * the bare distribution name or its scoped spelling. These are the spelling
+ * variants doctor and the installer treat as "this plugin" in place.
+ */
+function isCanonicalPluginReference(reference: string): boolean {
+  return reference === DISTRIBUTION_NAME || reference === SCOPED_DISTRIBUTION_NAME
+}
+
+/**
+ * Indexes of config plugin entries that name the legacy distribution
+ * 'opencode-orchestrator' — the exact name this repository shipped under before
+ * the current rename (legacy/ambiguous migration input), never a local file
+ * reference.
  */
 function legacyBarePluginIndexes(plugins: readonly unknown[] | undefined): number[] {
   if (!plugins) return []
   const indexes: number[] = []
   for (let index = 0; index < plugins.length; index += 1) {
     const entry = plugins[index]
-    if (entry === "opencode-orchestrator" || (isRecord(entry) && entry.package === "opencode-orchestrator")) {
+    if (
+      entry === LEGACY_DISTRIBUTION_NAME ||
+      (isRecord(entry) && entry.package === LEGACY_DISTRIBUTION_NAME)
+    ) {
       indexes.push(index)
     }
   }

@@ -2,9 +2,10 @@ import { Plugin } from "@opencode-ai/plugin/tui"
 import type { Context, KeymapCommand } from "@opencode-ai/plugin/tui/context"
 import { commandDefinitions } from "./opencode-v2/commands/index.js"
 import { parseOptions } from "./core/config.js"
+import { RUNTIME_PLUGIN_ID } from "./core/package-identity.js"
 
 export const tuiPlugin = Plugin.define({
-  id: "opencode-orchestrator",
+  id: RUNTIME_PLUGIN_ID,
   async setup(context: Context) {
     const options = parseOptions(context.options)
     const location = context.location ?? context.data.location.default()
@@ -45,7 +46,7 @@ export const tuiPlugin = Plugin.define({
 
 function tuiCommand(context: Context, name: string, description: string): KeymapCommand {
   return {
-    id: `opencode-orchestrator.${name}`,
+    id: `${RUNTIME_PLUGIN_ID}.${name}`,
     title: `Orchestrator: /${name}`,
     description,
     group: "OpenCode Orchestrator",

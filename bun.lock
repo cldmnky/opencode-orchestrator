@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "opencode-orchestrator",
+      "name": "opencode-v2-agent-orchestrator",
       "dependencies": {
         "@opencode-ai/plugin": "0.0.0-beta-18414",
         "jsonc-parser": "3.3.1",

@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { parse, type ParseError } from "jsonc-parser"
 import { COMMAND_NAMES, parseOptions } from "../core/config.js"
 import { requiredAgentIds } from "../core/roles.js"
+import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../core/package-identity.js"
 
 export type DoctorCheck = {
   name: string
@@ -49,19 +50,18 @@ export function inspectConfig(path: string): DoctorReport {
   const legacyPlugin = findLegacyBarePlugin(document.plugins)
   const plugin = safePlugin ?? legacyPlugin
   if (!plugin) {
-    checks.push({ name: "plugin", status: "fail", message: "opencode-orchestrator is not registered; run the installer" })
+    checks.push({ name: "plugin", status: "fail", message: `${DISTRIBUTION_NAME} is not registered; run the installer` })
   } else if (legacyPlugin && !safePlugin) {
     checks.push({
       name: "plugin",
       status: "fail",
-      message:
-        'the registered plugin entry "opencode-orchestrator" is the unrelated npm registry package (owned by agnusdei1207); build this repository from source, install the freshly built tarball into the project, and run the installer again to write a config-relative local file reference',
+      message: `the registered plugin entry "${LEGACY_DISTRIBUTION_NAME}" is this plugin's legacy distribution name; install the current ${DISTRIBUTION_NAME} package and run the installer again to write a config-relative local file reference`,
     })
   } else if (legacyPlugin) {
     checks.push({
       name: "plugin",
       status: "warn",
-      message: 'plugins also contains a legacy "opencode-orchestrator" registry entry; rerun the installer to migrate it to a local file reference',
+      message: `plugins also contains a legacy "${LEGACY_DISTRIBUTION_NAME}" entry; rerun the installer to migrate it to the current distribution reference`,
     })
   }
 
@@ -70,7 +70,7 @@ export function inspectConfig(path: string): DoctorReport {
     checks.push({
       name: "options",
       status: "fail",
-      message: "plugin options were not validated because the registered entry is the unrelated npm registry package; reinstall locally first",
+      message: `plugin options were not validated because the registered entry is a legacy distribution name; install the current ${DISTRIBUTION_NAME} package and reinstall locally first`,
     })
     options = parseOptions({})
   } else {
@@ -122,6 +122,12 @@ export function inspectConfig(path: string): DoctorReport {
     status: "warn",
     message: "native V2 subagent sessions cannot receive a plugin-controlled worktree atomically; worktree and GitHub coordination are advisory",
   })
+  checks.push({
+    name: "mcp-github",
+    status: "warn",
+    message:
+      "doctor inspects only static config presence and reports name-level guidance only; it cannot prove the host's merged MCP config, remote GitHub MCP reachability, live tool capability, authentication, or permission grants. Host-configured GitHub MCP is not a plugin feature — configure and verify it with the host (this plugin exposes no GitHub operation API). No headers, environment values, OAuth tokens, or other credentials are read or printed by doctor.",
+  })
 
   const status = checks.some((check) => check.status === "fail")
     ? "error"
@@ -134,8 +140,8 @@ export function inspectConfig(path: string): DoctorReport {
 /**
  * First plugin entry that resolves to this repository's plugin, in either V2
  * form: a bare string or an object with a `package` field. Safe references are
- * a config-local source (`/src/index.ts`) or built (`/dist/index.js`) file, or
- * this repository's future scoped package `@cldmnky/opencode-orchestrator`.
+ * a config-local source (`/src/index.ts`) or built (`/dist/index.js`) file, the
+ * current bare distribution name, or this repository's scoped package.
  * Separators are normalized before matching so Windows-style configs are
  * recognized too.
  */
@@ -149,23 +155,26 @@ function findSafePlugin(value: unknown): string | Record<string, unknown> | unde
 }
 
 /**
- * First plugin entry still using the legacy bare registry name
- * 'opencode-orchestrator' — the unrelated npm package, never this repository.
+ * First plugin entry still using the legacy distribution name
+ * 'opencode-orchestrator' — the previous npm name for this repository, never
+ * this plugin's current distribution.
  */
 function findLegacyBarePlugin(value: unknown): string | Record<string, unknown> | undefined {
   if (!Array.isArray(value)) return undefined
   return value.find((entry) => {
-    if (entry === "opencode-orchestrator") return true
-    return isRecord(entry) && entry.package === "opencode-orchestrator"
+    if (entry === LEGACY_DISTRIBUTION_NAME) return true
+    return isRecord(entry) && entry.package === LEGACY_DISTRIBUTION_NAME
   }) as string | Record<string, unknown> | undefined
 }
 
 function isSafePluginReference(value: string): boolean {
   const reference = normalizePackageReference(value)
-  if (reference === "opencode-orchestrator") return false
-  // Only this repository's own future scoped package. Arbitrary scopes could
-  // be unrelated packages, so they must not be treated as this plugin.
-  if (reference === "@cldmnky/opencode-orchestrator") return true
+  // The legacy distribution name is migratable, never safe in place.
+  if (reference === LEGACY_DISTRIBUTION_NAME) return false
+  // The current distribution name and this repository's own scoped package.
+  // Arbitrary scopes could be unrelated packages, so they must not be treated
+  // as this plugin.
+  if (reference === DISTRIBUTION_NAME || reference === SCOPED_DISTRIBUTION_NAME) return true
   return reference.endsWith("/src/index.ts") || reference.endsWith("/dist/index.js")
 }
 

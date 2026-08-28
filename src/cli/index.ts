@@ -5,6 +5,7 @@ import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { defaultConfigPath, installConfig, configRelativePluginReference, pluginEntryForRuntimeFile, type AgentModelReferences } from "./install.js"
 import { inspectConfig } from "./doctor.js"
+import { DISTRIBUTION_NAME } from "../core/package-identity.js"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const cliFile = fileURLToPath(import.meta.url)
@@ -119,8 +120,8 @@ function replacePluginEntry(source: string, entry: string): string {
 }
 
 function printHelp(): void {
-  console.log("Usage: opencode-orchestrator install [--global] [--model agent=provider/model[#variant]]")
-  console.log("       opencode-orchestrator <doctor|dev-setup|dev-run|dev-reset>")
+  console.log(`Usage: ${DISTRIBUTION_NAME} install [--global] [--model agent=provider/model[#variant]]`)
+  console.log(`       ${DISTRIBUTION_NAME} <doctor|dev-setup|dev-run|dev-reset>`)
 }
 
 await main()

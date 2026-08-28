@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-orchestrator",
+  "version": "0.1.0",
+  "description": "A V2-only multi-agent orchestration plugin for OpenCode.",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./tui": "./dist/tui.js",
+    "./commands": "./dist/commands.js",
+    "./installer": "./dist/installer.js"
+  },
+  "bin": {
+    "opencode-orchestrator": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "dev/project/opencode.example.jsonc"
+  ],
+  "scripts": {
+    "build": "bun run build:plugin && bun run build:tui && bun run build:commands && bun run build:installer && bun run build:cli",
+    "build:plugin": "bun build src/index.ts --outdir dist --target bun --format esm",
+    "build:tui": "bun build src/tui.ts --outfile dist/tui.js --target bun --format esm --external @opencode-ai/plugin/tui",
+    "build:commands": "bun build src/opencode-v2/commands/index.ts --outfile dist/commands.js --target bun --format esm",
+    "build:installer": "bun build src/cli/install.ts --outfile dist/installer.js --target bun --format esm",
+    "build:cli": "bun build src/cli/index.ts --outfile dist/cli/index.js --target bun --format esm",
+    "dev:setup": "bun run src/cli/index.ts dev-setup",
+    "dev:v2": "bun run src/cli/index.ts dev-run",
+    "dev:v2:dist": "bun run build && bun run src/cli/index.ts dev-run --dist",
+    "dev:reset": "bun run src/cli/index.ts dev-reset",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "0.0.0-beta-18414",
+    "jsonc-parser": "3.3.1",
+    "zod": "4.1.8"
+  },
+  "peerDependencies": {
+    "solid-js": ">=1.9.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/sdk": "0.0.0-dev-18560",
+    "@types/bun": "1.3.3",
+    "solid-js": "1.9.10",
+    "typescript": "5.9.2"
+  }
+}

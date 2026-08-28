@@ -1,0 +1,41 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "__PLUGIN_ENTRY__",
+      "options": {
+        "orchestrator": "orchestrator",
+        "roles": {
+          "planning": "planner",
+          "research": "explore",
+          "implementation": "implementer",
+          "review": "reviewer"
+        },
+        "max_parallel": 4,
+        "strict_agents": true
+      }
+    }
+  ],
+  "agents": {
+    "orchestrator": {
+      "mode": "primary",
+      "model": "opencode/big-pickle"
+    },
+    "planner": {
+      "mode": "subagent",
+      "model": "opencode/big-pickle"
+    },
+    "explore": {
+      "mode": "subagent",
+      "model": "opencode/big-pickle"
+    },
+    "implementer": {
+      "mode": "subagent",
+      "model": "opencode/big-pickle"
+    },
+    "reviewer": {
+      "mode": "subagent",
+      "model": "opencode/big-pickle"
+    }
+  }
+}

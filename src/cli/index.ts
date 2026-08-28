@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { defaultConfigPath, installConfig, configRelativePluginReference, pluginEntryForRuntimeFile, type AgentModelReferences } from "./install.js"
-import { inspectConfig } from "./doctor.js"
+import { inspectConfig, mergeStatus, runtimeChecks } from "./doctor.js"
 import { DISTRIBUTION_NAME } from "../core/package-identity.js"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
@@ -56,21 +56,24 @@ function modelReferences(args: readonly string[]): AgentModelReferences {
   return references
 }
 
-function doctor(args: string[]): void {
+async function doctor(args: string[]): Promise<void> {
   const target = args.includes("--global") ? "global" : "project"
   const pathArg = args.find((arg) => !arg.startsWith("--"))
   const config = pathArg ? resolve(pathArg) : defaultConfigPath(target)
   const report = inspectConfig(config)
+  const runtime = await runtimeChecks({ cwd: dirname(resolve(config)) })
+  const checks = [...report.checks, ...runtime]
+  const merged = { ...report, checks, status: mergeStatus(checks) }
   if (args.includes("--json")) {
-    console.log(JSON.stringify(report, null, 2))
+    console.log(JSON.stringify(merged, null, 2))
   } else {
-    console.log(`OpenCode Orchestrator doctor: ${report.path}`)
-    for (const check of report.checks) console.log(`${check.status.toUpperCase()} ${check.name}: ${check.message}`)
-    console.log(`Agents: ${report.agents.join(", ") || "none"}`)
-    console.log(`Configured command entries: ${report.configuredCommands.join(", ") || "none"}`)
-    console.log(`Runtime commands: ${report.runtimeCommands.join(", ") || "none"}`)
+    console.log(`OpenCode Orchestrator doctor: ${merged.path}`)
+    for (const check of merged.checks) console.log(`${check.status.toUpperCase()} ${check.name}: ${check.message}`)
+    console.log(`Agents: ${merged.agents.join(", ") || "none"}`)
+    console.log(`Configured command entries: ${merged.configuredCommands.join(", ") || "none"}`)
+    console.log(`Runtime commands: ${merged.runtimeCommands.join(", ") || "none"}`)
   }
-  if (report.status === "error") process.exitCode = 1
+  if (merged.status === "error") process.exitCode = 1
 }
 
 function devSetup(): void {
@@ -122,6 +125,7 @@ function replacePluginEntry(source: string, entry: string): string {
 function printHelp(): void {
   console.log(`Usage: ${DISTRIBUTION_NAME} install [--global] [--model agent=provider/model[#variant]]`)
   console.log(`       ${DISTRIBUTION_NAME} <doctor|dev-setup|dev-run|dev-reset>`)
+  console.log("doctor checks the local config and, advisory only, this machine's git/gh availability and auth. Plugin commands (/orchestrate, /goal, /cd, ...) exist only at runtime inside OpenCode — they are not CLI subcommands.")
 }
 
 await main()

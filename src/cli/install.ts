@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { commandDefinitions } from "../opencode-v2/commands/index.js"
 import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
-import { GOAL_TOOL_PERMISSION, orchestratorOnlyPermissionRule } from "../core/permissions.js"
+import { GOAL_TOOL_PERMISSION, orchestratorOnlyPermissionRules } from "../core/permissions.js"
 import { DEFAULT_ROLES, type RoleName } from "../core/roles.js"
 import { parseOptions, type OrchestratorOptions } from "../core/config.js"
 import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../core/package-identity.js"
@@ -216,9 +216,9 @@ function orchestratorPermissions(options: OrchestratorOptions): Array<Record<str
     // They share one explicit permission action declared on each tool.
     { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "allow" },
     // Surface the orchestrator-only feature family (github/worktree/cd): one
-    // shared action per family declared on each tool, so a single rule grants
-    // or revokes the whole set while workers stay denied.
-    orchestratorOnlyPermissionRule("allow"),
+    // explicit permission action per family declared on each tool, so discrete
+    // rules grant or revoke each set while workers stay denied.
+    ...orchestratorOnlyPermissionRules("allow"),
     { action: "read", resource: "*", effect: "allow" },
     { action: "glob", resource: "*", effect: "allow" },
     { action: "grep", resource: "*", effect: "allow" },
@@ -238,7 +238,7 @@ function workerPermissions(role: string): Array<Record<string, string>> {
     // orchestrator-only feature tools, even when the installed allow rules
     // above change: the denies keep them invisible.
     { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "deny" },
-    orchestratorOnlyPermissionRule("deny"),
+    ...orchestratorOnlyPermissionRules("deny"),
     { action: "read", resource: "*", effect: "allow" },
     { action: "glob", resource: "*", effect: "allow" },
     { action: "grep", resource: "*", effect: "allow" },

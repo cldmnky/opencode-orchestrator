@@ -48,11 +48,22 @@ export type PermissionRuleLike = {
 
 /** Build the deny-all rule the installer writes to hide the feature tools from non-orchestrator agents. */
 export function orchestratorOnlyPermissionRule(effect: PermissionEffect): PermissionRule {
+  // Kept for backward compatibility in tests that assert the legacy piped shape;
+  // new code should use orchestratorOnlyPermissionRules.
   return {
     action: [GH_TOOL_PERMISSION, WORKTREE_TOOL_PERMISSION, CD_TOOL_PERMISSION, SESSION_MOVE_PERMISSION].join("|"),
     resource: "*",
     effect,
   }
+}
+
+export function orchestratorOnlyPermissionRules(effect: PermissionEffect): PermissionRule[] {
+  return [
+    { action: GH_TOOL_PERMISSION, resource: "*", effect },
+    { action: WORKTREE_TOOL_PERMISSION, resource: "*", effect },
+    { action: CD_TOOL_PERMISSION, resource: "*", effect },
+    { action: SESSION_MOVE_PERMISSION, resource: "*", effect },
+  ]
 }
 
 export function goalToolPermissionRule(effect: PermissionEffect): PermissionRule {

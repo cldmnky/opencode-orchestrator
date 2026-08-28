@@ -1,9 +1,13 @@
 import type { OrchestratorOptions } from "../core/config.js"
 import {
+  GH_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
+  WORKTREE_TOOL_PERMISSION,
+  CD_TOOL_PERMISSION,
+  SESSION_MOVE_PERMISSION,
   goalToolPermissionRule,
   hasExactPermissionRule,
-  orchestratorOnlyPermissionRule,
+  orchestratorOnlyPermissionRules,
   type PermissionEffect,
   type PermissionRuleLike,
 } from "../core/permissions.js"
@@ -118,19 +122,16 @@ function appendFeaturePermissions(
     return [
       { action: "*", resource: "*", effect: "deny" },
       goalToolPermissionRule(effect),
-      orchestratorOnlyPermissionRule(effect),
+      ...orchestratorOnlyPermissionRules(effect),
     ]
   }
   const existing = [...permissions]
   if (!hasExactPermissionRule(existing, GOAL_TOOL_PERMISSION)) existing.push(goalToolPermissionRule(effect))
-  if (!hasExactPermissionRule(existing, ORCHESTRATOR_ONLY_ACTION)) existing.push(orchestratorOnlyPermissionRule(effect))
+  for (const permission of orchestratorOnlyPermissionRules(effect)) {
+    if (!hasExactPermissionRule(existing, permission.action)) existing.push(permission)
+  }
   return existing
 }
-
-// The feature-family action is the `|`-joined action string the shared rules
-// declare; derive it from the rule factory so this module never duplicates
-// the constant list.
-const ORCHESTRATOR_ONLY_ACTION = orchestratorOnlyPermissionRule("allow").action
 
 function appendOnce(existing: string | undefined, addition: string): string {
   if (!existing) return addition

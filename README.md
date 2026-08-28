@@ -30,16 +30,10 @@ Skip the orchestrator for single-file trivial edits — just prompt the model di
 
 ## Install
 
-> **Warning: never use the npm registry package named `opencode-orchestrator`.**
-> That registry name is owned by `agnusdei1207` and is **unrelated to this
-> repository** — invoking that registry package by name through `npx` (or via a
-> `package.json` dependency) runs the unrelated package, not this plugin. Install
-> a freshly built tarball from this repository's source instead.
-
-GitHub's `v0.1.1` release tarball predates the config-relative local-entry fix:
-its installer writes a bare `opencode-orchestrator` reference that V2 resolves
-against `node_modules` — the unrelated registry package. No fixed release is
-published yet, so build from source (or reuse an existing checkout):
+Installation from a local source build (via `npm pack`) is verified; npm
+publication of this package is not claimed. Build once — an existing checkout of
+this repository works too — then install the freshly built tarball as a
+project-local dependency and run the installer:
 
 ```sh
 # 1. Build once (an existing checkout of this repository works too)
@@ -51,38 +45,45 @@ npm pack --pack-destination "$TMPDIR"      # writes a fresh tarball to your temp
 cd ../your-project
 
 # 2. Install the freshly built tarball as a project-local dependency
-npm install --save-dev "$TMPDIR/opencode-orchestrator-0.1.1.tgz"
+npm install --save-dev "$TMPDIR/opencode-v2-agent-orchestrator-0.1.1.tgz"
 
 # 3. Run the installer; with per-agent models
-./node_modules/.bin/opencode-orchestrator install \
+./node_modules/.bin/opencode-v2-agent-orchestrator install \
   --model orchestrator=openai/gpt-5#high --model explore=opencode-go/mimo-v2.5
 ```
 
-The tarball keeps the `0.1.1` version name until the next release, so always use
-your own `npm pack` output — never the stale GitHub `v0.1.1` asset.
-
-The current source/next-release installer writes a config-relative local plugin
-reference — `./node_modules/opencode-orchestrator/dist/index.js` for the built
-package, `./src/index.ts` when run from a source checkout — so V2 resolves the
-file directly without a bare package name. The exported `installConfig(path)`
-(`./installer`) does the same, deriving the reference from its own location.
+Use the tarball your own `npm pack` just produced — there is no published
+registry package to install from. The installer writes a config-relative local
+plugin reference — `./node_modules/opencode-v2-agent-orchestrator/dist/index.js`
+for the built package, `./src/index.ts` when run from a source checkout — so V2
+resolves the file directly. The exported `installConfig(path)` (`./installer`)
+does the same, deriving the reference from its own location.
 
 Global installation (`install --global`) is **not currently supported**: the CLI
 writes a config-relative local reference (e.g.
-`./node_modules/opencode-orchestrator/dist/index.js`), which only resolves
-against a project-local dependency in the target project's `node_modules`. Do
-not use the npm registry name — it is an unrelated package. A scoped/registry
-distribution is required before global install can be documented as safe.
+`./node_modules/opencode-v2-agent-orchestrator/dist/index.js`), which only
+resolves against a project-local dependency in the target project's
+`node_modules`. A scoped/registry distribution is required before global install
+can be documented as safe.
 
-What it does: parses `opencode.jsonc` without stripping comments, adds the config-relative plugin entry above (migrating any legacy bare `opencode-orchestrator` entry in place), and adds the five agents with role-appropriate permissions if missing. Commands are registered at runtime by the plugin — `install` does not write `commands`.
+What it does: parses `opencode.jsonc` without stripping comments, adds the
+config-relative plugin entry above (migrating any legacy bare
+`opencode-orchestrator` entry in place), and adds the five agents with
+role-appropriate permissions if missing. Commands are registered at runtime by
+the plugin — `install` does not write `commands`.
 
-Reinstall is idempotent. Change models later via normal `agents.<id>.model` config, not plugin options.
+The distribution name is `opencode-v2-agent-orchestrator`; the runtime plugin ID
+remains `opencode-orchestrator` for compatibility (agent/tool/command names,
+storage keys, and `doctor` checks are unchanged).
+
+Reinstall is idempotent. Change models later via normal `agents.<id>.model`
+config, not plugin options.
 
 Verify:
 
 ```sh
-./node_modules/.bin/opencode-orchestrator doctor        # checks agents, modes, plugin options
-./node_modules/.bin/opencode-orchestrator doctor --json
+./node_modules/.bin/opencode-v2-agent-orchestrator doctor        # checks agents, modes, plugin options
+./node_modules/.bin/opencode-v2-agent-orchestrator doctor --json
 ```
 
 ## Quick start
@@ -188,7 +189,7 @@ Use native `agents.<id>.model` for per-agent models. Plugin options are orchestr
 ```jsonc
 {
   "plugins": [{
-    "package": "./node_modules/opencode-orchestrator/dist/index.js",
+    "package": "./node_modules/opencode-v2-agent-orchestrator/dist/index.js",
     "options": {
       "orchestrator": "orchestrator",
       "roles": { "planning": "planner", "research": "explore", "implementation": "implementer", "review": "reviewer" },
@@ -236,7 +237,18 @@ Ask the orchestrator to delegate: it will run `explore` in background and `plann
 
 ## V2 Boundary
 
-The current V2 native `subagent` API does not atomically accept both a parent session and a plugin-created worktree. This plugin therefore does not pretend to enforce per-agent worktree or GitHub issue/PR isolation; `doctor` reports that boundary as a warning. Do not treat prompt instructions as a filesystem security boundary.
+- **GitHub access is host-managed.** The plugin does not install MCP servers, add
+  GitHub tools, or handle tokens. GitHub MCP servers/tools and their
+  least-privilege credentials are configured by you or your deployment. Preflight
+  the actual capabilities/permissions a session has before relying on them, and
+  verify any GitHub mutation directly — the plugin owns no issue/PR workflow and
+  performs no GitHub-side automation.
+- **No atomic worktree isolation.** The current V2 native `subagent` API does not
+  atomically accept both a parent session and a plugin-created worktree, so the
+  plugin does not enforce per-agent worktree or GitHub issue/PR isolation;
+  `doctor` reports that boundary as a warning. Canonical plan worktree and GitHub
+  requirements remain deferred under the current public contract.
+- Do not treat prompt instructions as a filesystem security boundary.
 
 ## Development
 

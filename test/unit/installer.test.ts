@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { inspectConfig } from "../../src/cli/doctor.js"
 import { configRelativePluginReference, installConfig, isLocalPluginReference, pluginEntryForRuntimeFile } from "../../src/cli/install.js"
+import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../../src/core/package-identity.js"
 import { GOAL_TOOL_PERMISSION } from "../../src/core/permissions.js"
 
 describe("plugin reference helpers", () => {
@@ -35,8 +36,8 @@ describe("plugin reference helpers", () => {
   test("makes config-relative POSIX references and dot-prefixes them", () => {
     const project = mkdtempSync(join(tmpdir(), "orchestrator-helpers-"))
     expect(configRelativePluginReference(join(project, "opencode.jsonc"), join(project, "src", "index.ts"))).toBe("./src/index.ts")
-    expect(configRelativePluginReference(join(project, "opencode.jsonc"), join(project, "node_modules", "opencode-orchestrator", "dist", "index.js"))).toBe(
-      "./node_modules/opencode-orchestrator/dist/index.js",
+    expect(configRelativePluginReference(join(project, "opencode.jsonc"), join(project, "node_modules", "opencode-v2-agent-orchestrator", "dist", "index.js"))).toBe(
+      "./node_modules/opencode-v2-agent-orchestrator/dist/index.js",
     )
     expect(configRelativePluginReference(join(project, "config", "opencode.jsonc"), join(project, "src", "index.ts"))).toBe("../src/index.ts")
   })
@@ -46,17 +47,19 @@ describe("plugin reference helpers", () => {
   })
 
   test("recognizes local plugin references", () => {
-    expect(isLocalPluginReference("./node_modules/opencode-orchestrator/dist/index.js")).toBe(true)
+    expect(isLocalPluginReference("./node_modules/opencode-v2-agent-orchestrator/dist/index.js")).toBe(true)
     expect(isLocalPluginReference("../src/index.ts")).toBe(true)
     expect(isLocalPluginReference("/absolute/path/index.ts")).toBe(true)
     expect(isLocalPluginReference("file:///absolute/path/dist/index.js")).toBe(true)
+    expect(isLocalPluginReference("opencode-v2-agent-orchestrator")).toBe(false)
     expect(isLocalPluginReference("opencode-orchestrator")).toBe(false)
     expect(isLocalPluginReference("@cldmnky/opencode-orchestrator")).toBe(false)
+    expect(isLocalPluginReference("@cldmnky/opencode-v2-agent-orchestrator")).toBe(false)
   })
 })
 
 describe("legacy plugin migration", () => {
-  const reference = "./node_modules/opencode-orchestrator/dist/index.js"
+  const reference = "./node_modules/opencode-v2-agent-orchestrator/dist/index.js"
 
   test("migrates a legacy bare string in place with normal options", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-migrate-"))
@@ -112,6 +115,85 @@ describe("legacy plugin migration", () => {
     expect(document.plugins).toHaveLength(1)
     expect(document.plugins[0].package).toBe(reference)
   })
+
+  test("preserves a canonical bare entry instead of duplicating a local reference", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-migrate-"))
+    const path = join(directory, "opencode.jsonc")
+    writeFileSync(path, JSON.stringify({ plugins: [{ package: "opencode-v2-agent-orchestrator", options: { max_parallel: 2 } }] }))
+
+    installConfig(path, {}, reference)
+    installConfig(path, {}, reference)
+
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    expect(document.plugins).toHaveLength(1)
+    expect(document.plugins[0].package).toBe("opencode-v2-agent-orchestrator")
+    expect(document.plugins[0].options.max_parallel).toBe(2)
+  })
+
+  test("keeps a canonical bare entry and drops a coexisting legacy duplicate", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-migrate-"))
+    const path = join(directory, "opencode.jsonc")
+    writeFileSync(path, JSON.stringify({ plugins: ["opencode-orchestrator", { package: DISTRIBUTION_NAME }] }))
+
+    installConfig(path, {}, reference)
+
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    expect(document.plugins).toHaveLength(1)
+    expect(document.plugins[0].package).toBe(DISTRIBUTION_NAME)
+  })
+
+  test("preserves a canonical scoped entry instead of duplicating a local reference", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-migrate-"))
+    const path = join(directory, "opencode.jsonc")
+    writeFileSync(path, JSON.stringify({ plugins: [{ package: SCOPED_DISTRIBUTION_NAME, options: { max_parallel: 2 } }] }))
+
+    installConfig(path, {}, reference)
+    installConfig(path, {}, reference)
+
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    expect(document.plugins).toHaveLength(1)
+    expect(document.plugins[0].package).toBe(SCOPED_DISTRIBUTION_NAME)
+    expect(document.plugins[0].options.max_parallel).toBe(2)
+  })
+
+  test("migrates a legacy bare entry in place when explicitly installing the bare canonical reference", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-migrate-"))
+    const path = join(directory, "opencode.jsonc")
+    writeFileSync(path, JSON.stringify({ plugins: [LEGACY_DISTRIBUTION_NAME] }))
+
+    installConfig(path, {}, DISTRIBUTION_NAME)
+    installConfig(path, {}, DISTRIBUTION_NAME)
+
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    expect(document.plugins).toHaveLength(1)
+    expect(document.plugins[0].package).toBe(DISTRIBUTION_NAME)
+  })
+
+  test("migrates a legacy object entry in place when explicitly installing the scoped canonical reference", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-migrate-"))
+    const path = join(directory, "opencode.jsonc")
+    writeFileSync(path, JSON.stringify({ plugins: [{ package: LEGACY_DISTRIBUTION_NAME, options: { max_parallel: 2 }, tui: true }] }))
+
+    installConfig(path, {}, SCOPED_DISTRIBUTION_NAME)
+
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    expect(document.plugins).toHaveLength(1)
+    expect(document.plugins[0].package).toBe(SCOPED_DISTRIBUTION_NAME)
+    expect(document.plugins[0].options.max_parallel).toBe(2)
+    expect(document.plugins[0].tui).toBe(true)
+  })
+
+  test("removes legacy duplicates when a canonical entry already exists and a canonical reference is passed explicitly", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-migrate-"))
+    const path = join(directory, "opencode.jsonc")
+    writeFileSync(path, JSON.stringify({ plugins: [LEGACY_DISTRIBUTION_NAME, { package: DISTRIBUTION_NAME }] }))
+
+    installConfig(path, {}, DISTRIBUTION_NAME)
+
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    expect(document.plugins).toHaveLength(1)
+    expect(document.plugins[0].package).toBe(DISTRIBUTION_NAME)
+  })
 })
 
 describe("installer", () => {
@@ -149,6 +231,7 @@ describe("installer", () => {
     const reference = typeof entry === "string" ? entry : entry.package
     expect(reference).toMatch(/^(\.\/|\.\.\/|\/|file:\/\/)/)
     expect(reference).not.toBe("opencode-orchestrator")
+    expect(reference).not.toBe("opencode-v2-agent-orchestrator")
     expect(reference).toMatch(/(\/src\/index\.ts|\/dist\/index\.js)$/)
 
     const report = inspectConfig(path)
@@ -170,13 +253,14 @@ describe("installer", () => {
     expect(report.checks.find((check) => check.name === "plugin")?.status).toBeUndefined()
   })
 
-  test("doctor accepts config-relative local entries, normalized separators, and scoped names", () => {
+  test("doctor accepts config-relative local entries, normalized separators, canonical bare, and scoped names", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-doctor-"))
     const cases = [
       "./src/index.ts",
-      "./node_modules/opencode-orchestrator/dist/index.js",
-      ".\\node_modules\\opencode-orchestrator\\dist\\index.js",
-      "@cldmnky/opencode-orchestrator",
+      "./node_modules/opencode-v2-agent-orchestrator/dist/index.js",
+      ".\\node_modules\\opencode-v2-agent-orchestrator\\dist\\index.js",
+      DISTRIBUTION_NAME,
+      SCOPED_DISTRIBUTION_NAME,
     ]
     for (const packageValue of cases) {
       const path = join(directory, `config-${cases.indexOf(packageValue)}.jsonc`)
@@ -187,7 +271,7 @@ describe("installer", () => {
     }
   })
 
-  test("doctor treats the legacy bare registry name as an actionable failure", () => {
+  test("doctor treats the legacy distribution name as an actionable failure without owner/conflict wording", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-doctor-"))
     const path = join(directory, "opencode.jsonc")
     writeFileSync(path, JSON.stringify({ plugins: ["opencode-orchestrator"], agents: {} }))
@@ -196,16 +280,23 @@ describe("installer", () => {
 
     const pluginCheck = report.checks.find((check) => check.name === "plugin")
     expect(pluginCheck?.status).toBe("fail")
-    expect(pluginCheck?.message).toContain("registry")
+    expect(pluginCheck?.message).toContain("legacy")
     expect(pluginCheck?.message).toContain("opencode-orchestrator")
+    expect(pluginCheck?.message).not.toContain("agnusdei1207")
+    expect(pluginCheck?.message).not.toContain("unrelated")
     const optionsCheck = report.checks.find((check) => check.name === "options")
     expect(optionsCheck?.status).not.toBe("pass")
     expect(report.status).toBe("error")
   })
 
-  test("doctor accepts safe V2 string entries (source, dist, and scoped)", () => {
+  test("doctor accepts safe V2 string entries (source, dist, canonical bare, and scoped)", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-doctor-"))
-    const stringCases = ["./src/index.ts", "./node_modules/opencode-orchestrator/dist/index.js", "@cldmnky/opencode-orchestrator"]
+    const stringCases = [
+      "./src/index.ts",
+      "./node_modules/opencode-v2-agent-orchestrator/dist/index.js",
+      DISTRIBUTION_NAME,
+      SCOPED_DISTRIBUTION_NAME,
+    ]
     for (const [index, packageValue] of stringCases.entries()) {
       const path = join(directory, `string-${index}.jsonc`)
       writeFileSync(path, JSON.stringify({ plugins: [packageValue], agents: doctorAgents }))
@@ -219,7 +310,7 @@ describe("installer", () => {
   test("doctor warns (not fails) when a legacy bare entry coexists with a safe string", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-doctor-"))
     const path = join(directory, "opencode.jsonc")
-    writeFileSync(path, JSON.stringify({ plugins: ["opencode-orchestrator", "./node_modules/opencode-orchestrator/dist/index.js"], agents: doctorAgents }))
+    writeFileSync(path, JSON.stringify({ plugins: ["opencode-orchestrator", "./node_modules/opencode-v2-agent-orchestrator/dist/index.js"], agents: doctorAgents }))
 
     const report = inspectConfig(path)
 
@@ -230,14 +321,45 @@ describe("installer", () => {
     expect(report.status).toBe("warning")
   })
 
-  test("doctor rejects arbitrary scoped package names", () => {
+  test("doctor rejects scoped package names it does not recognize (including the old scoped spelling)", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-doctor-"))
+    const rejects = ["@unrelated-scope/opencode-orchestrator", "@cldmnky/opencode-orchestrator"]
+    for (const [index, packageValue] of rejects.entries()) {
+      const path = join(directory, `scoped-${index}.jsonc`)
+      writeFileSync(path, JSON.stringify({ plugins: [packageValue], agents: {} }))
+
+      const report = inspectConfig(path)
+
+      expect(report.checks.find((check) => check.name === "plugin")?.status, packageValue).toBe("fail")
+    }
+  })
+
+  test("doctor accepts the canonical bare distribution name as this plugin", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-doctor-"))
     const path = join(directory, "opencode.jsonc")
-    writeFileSync(path, JSON.stringify({ plugins: ["@unrelated-scope/opencode-orchestrator"], agents: {} }))
+    writeFileSync(path, JSON.stringify({ plugins: [{ package: "opencode-v2-agent-orchestrator", options: { max_parallel: 2 } }], agents: doctorAgents }))
 
     const report = inspectConfig(path)
 
-    expect(report.checks.find((check) => check.name === "plugin")?.status).toBe("fail")
+    expect(report.checks.find((check) => check.name === "plugin")?.status).toBeUndefined()
+    expect(report.checks.find((check) => check.name === "options")?.status).toBe("pass")
+    expect(report.status).not.toBe("error")
+  })
+
+  test("doctor reports a static GitHub MCP limitation note without printing credentials", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-doctor-"))
+    const path = join(directory, "opencode.jsonc")
+    writeFileSync(path, JSON.stringify({ plugins: ["opencode-v2-agent-orchestrator"], agents: doctorAgents }))
+
+    const report = inspectConfig(path)
+
+    const check = report.checks.find((item) => item.name === "mcp-github")
+    expect(check?.status).toBe("warn")
+    expect(check?.message).toContain("cannot prove")
+    expect(check?.message).toContain("merged")
+    expect(check?.message).toContain("authentication")
+    expect(check?.message).toContain("permission grants")
+    expect(check?.message).toContain("No headers, environment values, OAuth tokens, or other credentials are read or printed by doctor")
   })
 
   test("allows the shared goal-tool permission for the orchestrator after deny-all", () => {

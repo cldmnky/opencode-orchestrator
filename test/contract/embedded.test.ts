@@ -45,13 +45,14 @@ describe("embedded V2 host", () => {
   test("loads a package-like local dist entry and registers /orchestrate", async () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-sdk-"))
     // A shim standing in for the shipped `dist/index.js` inside a project-local
-    // `node_modules/opencode-orchestrator`, matching the reference the built
-    // installer writes (`./node_modules/opencode-orchestrator/dist/index.js`).
-    const distFile = join(directory, "node_modules", "opencode-orchestrator", "dist", "index.js")
+    // `node_modules/opencode-v2-agent-orchestrator`, matching the reference the
+    // built installer writes
+    // (`./node_modules/opencode-v2-agent-orchestrator/dist/index.js`).
+    const distFile = join(directory, "node_modules", "opencode-v2-agent-orchestrator", "dist", "index.js")
     mkdirSync(dirname(distFile), { recursive: true })
     const specifier = relative(dirname(distFile), fileURLToPath(new URL("../../src/index.ts", import.meta.url)))
     writeFileSync(distFile, `export { default } from ${JSON.stringify(specifier)}\n`, "utf8")
-    const host = await createHost(directory, "./node_modules/opencode-orchestrator/dist/index.js")
+    const host = await createHost(directory, "./node_modules/opencode-v2-agent-orchestrator/dist/index.js")
 
     try {
       await assertPluginActive(host, directory)

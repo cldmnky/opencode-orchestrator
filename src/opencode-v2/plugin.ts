@@ -6,9 +6,10 @@ import { applyCommandTransform } from "./commands/index.js"
 import { runCommand } from "./commands/runtime.js"
 import { startGoalContinuation } from "./goal/continuation.js"
 import { addGoalTools } from "./goal/tools.js"
+import { DISTRIBUTION_NAME, RUNTIME_PLUGIN_ID } from "../core/package-identity.js"
 
 export const orchestratorPlugin = Plugin.define({
-  id: "opencode-orchestrator",
+  id: RUNTIME_PLUGIN_ID,
   tui: true,
   async setup(ctx: Context) {
     const options = parseOptions(ctx.options)
@@ -18,11 +19,11 @@ export const orchestratorPlugin = Plugin.define({
     const agentIssues = validateAgentSet(agents, options)
     if (!bootstrapIsEmpty && agentIssues.length > 0 && options.strict_agents) {
       throw new Error(
-        `opencode-orchestrator agent setup failed: ${agentIssues.join("; ")}. Run opencode-orchestrator install.`,
+        `${RUNTIME_PLUGIN_ID} agent setup failed: ${agentIssues.join("; ")}. Run ${DISTRIBUTION_NAME} install.`,
       )
     }
     if (!bootstrapIsEmpty && agentIssues.length > 0) {
-      console.warn(`opencode-orchestrator agent setup is partial: ${agentIssues.join("; ")}`)
+      console.warn(`${RUNTIME_PLUGIN_ID} agent setup is partial: ${agentIssues.join("; ")}`)
     }
 
     const existingCommands = responseData<{ name: string }>(await ctx.command.list())
@@ -54,10 +55,10 @@ export const orchestratorPlugin = Plugin.define({
         }),
       )
       if (commandResult.collisions.length > 0) {
-        console.warn(`opencode-orchestrator preserved existing commands: ${commandResult.collisions.join(", ")}`)
+        console.warn(`${RUNTIME_PLUGIN_ID} preserved existing commands: ${commandResult.collisions.join(", ")}`)
       }
       if (commandResult.unavailable.length > 0) {
-        console.warn(`opencode-orchestrator omitted commands with unavailable roles: ${commandResult.unavailable.join(", ")}`)
+        console.warn(`${RUNTIME_PLUGIN_ID} omitted commands with unavailable roles: ${commandResult.unavailable.join(", ")}`)
       }
 
       registrations.push(
@@ -86,7 +87,7 @@ export const orchestratorPlugin = Plugin.define({
       registrations.push(
         await ctx.tool.hook("execute.after", (event) => {
           if (event.status === "error" && event.tool.startsWith("orchestrator_")) {
-            console.warn(`opencode-orchestrator tool failed: ${event.error.message}`)
+            console.warn(`${RUNTIME_PLUGIN_ID} tool failed: ${event.error.message}`)
           }
         }),
       )
@@ -165,7 +166,7 @@ function startLateAgentSetup(
       try {
         await iterator.return?.()
       } catch (error) {
-        console.warn("opencode-orchestrator could not close late agent setup", error)
+        console.warn(`${RUNTIME_PLUGIN_ID} could not close late agent setup`, error)
       }
     })()
     await closing
@@ -182,7 +183,7 @@ function startLateAgentSetup(
         const issues = validateAgentSet(current, options)
         if (issues.length > 0) {
           if (!requiredAgentIDs(options).some((id) => !current.some((agent) => agent.id === id))) {
-            console.warn(`opencode-orchestrator could not finalize configured agents: ${issues.join("; ")}`)
+            console.warn(`${RUNTIME_PLUGIN_ID} could not finalize configured agents: ${issues.join("; ")}`)
           }
           continue
         }
@@ -198,7 +199,7 @@ function startLateAgentSetup(
         return
       }
     } catch (error) {
-      if (!stopped) console.warn("opencode-orchestrator could not finalize configured agents", error)
+      if (!stopped) console.warn(`${RUNTIME_PLUGIN_ID} could not finalize configured agents`, error)
     } finally {
       controller.abort()
       await iterator.return?.()

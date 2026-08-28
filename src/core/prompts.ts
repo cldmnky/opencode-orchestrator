@@ -1,4 +1,9 @@
-import { CHILD_TASK_CONTRACT, HANDOFF_FORMAT, orchestrationRules } from "./policy.js"
+import {
+  CHILD_TASK_CONTRACT,
+  HANDOFF_FORMAT,
+  REMOTE_ORCHESTRATION_GUIDANCE,
+  orchestrationRules,
+} from "./policy.js"
 import type { OrchestratorOptions } from "./config.js"
 import { ROLE_GUIDANCE } from "./roles.js"
 
@@ -17,6 +22,7 @@ export function buildWorkerSystem(role: keyof typeof ROLE_GUIDANCE): string {
     ROLE_GUIDANCE[role],
     "",
     CHILD_TASK_CONTRACT,
+    REMOTE_ORCHESTRATION_GUIDANCE,
     "",
     "Worker handoff format:",
     HANDOFF_FORMAT,
@@ -25,7 +31,11 @@ export function buildWorkerSystem(role: keyof typeof ROLE_GUIDANCE): string {
 
 export function buildCommandPrompt(name: string, argumentsText: string): string {
   const args = argumentsText.trim() || "(no arguments)"
-  const common = "Use the configured orchestration roles and native OpenCode subagent delegation. This plugin cannot provide an atomic custom worktree boundary in the current V2 beta, so do not claim worktree or GitHub automation that was not actually performed. Do not claim completion without evidence."
+  const common = [
+    "Use the configured orchestration roles and native OpenCode subagent delegation.",
+    "Do not claim completion without evidence.",
+    REMOTE_ORCHESTRATION_GUIDANCE,
+  ].join("\n")
 
   const prompts: Record<string, string> = {
     orchestrate: `Coordinate this task end to end. Start with repository facts, delegate independent work in parallel only with exact disjoint write scopes, integrate the results, and verify the final state directly.\n\nTask: ${args}`,
@@ -49,5 +59,6 @@ export function buildContinuationPrompt(objective: string, continuationCount: nu
     "Make concrete progress, delegate safely when useful, and stop only after the objective is complete or a blocker requires the user.",
     "Read and update the goal with the namespaced tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update.",
     "Completion requires a direct verification result and an evidence string through orchestrator_goal_update.",
+    REMOTE_ORCHESTRATION_GUIDANCE,
   ].join("\n")
 }

@@ -1,0 +1,5 @@
+node_modules/
+dist/
+dev/project/opencode.jsonc
+dev/state/
+.DS_Store

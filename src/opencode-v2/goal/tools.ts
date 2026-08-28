@@ -1,9 +1,11 @@
 import type { OrchestratorOptions } from "../../core/config.js"
+import { GOAL_TOOL_PERMISSION } from "../../core/permissions.js"
 import {
   goalStorageKey,
   newGoal,
   readGoal,
   stopStorageKey,
+  withSessionLock,
   type LocationLike,
   type StorageLike,
   type GoalRecord,
@@ -26,8 +28,9 @@ export function addGoalTools(
     name: "goal_get",
     description: "Read the active orchestration goal for this session.",
     input: emptyInput,
-    options: { namespace: "orchestrator" },
+    options: { namespace: "orchestrator", permission: GOAL_TOOL_PERMISSION },
     execute: async (_input, tool) => {
+      requireOrchestrator(tool.agent, options)
       const goal = await readGoal(storage, goalStorageKey(location, tool.sessionID))
       return result(goal ? JSON.stringify(goal) : "No active orchestration goal.")
     },
@@ -37,15 +40,17 @@ export function addGoalTools(
     name: "goal_set",
     description: "Create or replace the active orchestration goal.",
     input: setInput,
-    options: { namespace: "orchestrator" },
+    options: { namespace: "orchestrator", permission: GOAL_TOOL_PERMISSION },
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, options)
-      const objective = stringField(input, "objective")
-      if (!objective) return result("objective must be a non-empty string")
-      const goal = newGoal(tool.sessionID, objective)
-      await storage.set(goalStorageKey(location, tool.sessionID), goal)
-      await storage.remove(stopStorageKey(location, tool.sessionID))
-      return result(JSON.stringify(goal))
+      return withSessionLock(location, tool.sessionID, async () => {
+        const objective = stringField(input, "objective")
+        if (!objective) return result("objective must be a non-empty string")
+        const goal = newGoal(tool.sessionID, objective)
+        await storage.set(goalStorageKey(location, tool.sessionID), goal)
+        await storage.remove(stopStorageKey(location, tool.sessionID))
+        return result(JSON.stringify(goal))
+      })
     },
   })
 
@@ -53,38 +58,40 @@ export function addGoalTools(
     name: "goal_update",
     description: "Pause, resume, or complete the active goal; completion requires evidence.",
     input: updateInput,
-    options: { namespace: "orchestrator" },
+    options: { namespace: "orchestrator", permission: GOAL_TOOL_PERMISSION },
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, options)
-      const key = goalStorageKey(location, tool.sessionID)
-      const goal = await readGoal(storage, key)
-      if (!goal) return result("No active orchestration goal.")
+      return withSessionLock(location, tool.sessionID, async () => {
+        const key = goalStorageKey(location, tool.sessionID)
+        const goal = await readGoal(storage, key)
+        if (!goal) return result("No active orchestration goal.")
 
-      const status = stringField(input, "status")
-      if (status !== "active" && status !== "paused" && status !== "complete") {
-        return result("status must be active, paused, or complete")
-      }
-      const evidence = stringField(input, "evidence")
-      if (status === "complete" && evidence.length < 8) {
-        return result("completion requires at least eight characters of evidence")
-      }
+        const status = stringField(input, "status")
+        if (status !== "active" && status !== "paused" && status !== "complete") {
+          return result("status must be active, paused, or complete")
+        }
+        const evidence = stringField(input, "evidence")
+        if (status === "complete" && evidence.length < 8) {
+          return result("completion requires at least eight characters of evidence")
+        }
 
-      const now = Date.now()
-      const updated: GoalRecord = {
-        ...goal,
-        status,
-        updatedAt: now,
-      }
-      if (status === "complete") {
-        updated.completedAt = now
-        updated.completionEvidence = evidence
-      } else {
-        delete updated.completedAt
-        delete updated.completionEvidence
-      }
-      await storage.set(key, updated)
-      if (status === "active") await storage.remove(stopStorageKey(location, tool.sessionID))
-      return result(JSON.stringify(updated))
+        const now = Date.now()
+        const updated: GoalRecord = {
+          ...goal,
+          status,
+          updatedAt: now,
+        }
+        if (status === "complete") {
+          updated.completedAt = now
+          updated.completionEvidence = evidence
+        } else {
+          delete updated.completedAt
+          delete updated.completionEvidence
+        }
+        await storage.set(key, updated)
+        if (status === "active") await storage.remove(stopStorageKey(location, tool.sessionID))
+        return result(JSON.stringify(updated))
+      })
     },
   })
 }

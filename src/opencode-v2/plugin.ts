@@ -74,6 +74,9 @@ export const orchestratorPlugin = Plugin.define({
             text: [
               `Runtime role map: planning=${options.roles.planning}; research=${options.roles.research}; implementation=${options.roles.implementation}; review=${options.roles.review}.`,
               `Runtime parallelism ceiling: ${options.max_parallel}.`,
+              "Delegate with the child-task contract: Task, Expected outcome, Scope/file ownership, Must do, Must not do, Verification, and handoff.",
+              "Parallel writes require an exact disjoint write scope from every child; separate established facts from assumptions.",
+              "Use orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update for session goal state.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
             ].join("\n"),
           })

@@ -1,4 +1,10 @@
 import type { OrchestratorOptions } from "../core/config.js"
+import {
+  GOAL_TOOL_PERMISSION,
+  goalToolPermissionRule,
+  hasExactPermissionRule,
+  type PermissionRuleLike,
+} from "../core/permissions.js"
 import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
 import { requiredAgentIds, ROLE_DESCRIPTIONS, ROLE_NAMES, type RoleName } from "../core/roles.js"
 
@@ -24,6 +30,7 @@ type MutableAgentLike = {
   id: unknown
   system?: string
   description?: string
+  permissions?: PermissionRuleLike[]
 }
 
 export function validateAgentSet(agents: readonly AgentInfoLike[], options: OrchestratorOptions): string[] {
@@ -59,6 +66,10 @@ export function applyAgentTransform(draft: AgentDraftLike, options: Orchestrator
     draft.update(options.orchestrator, (agent) => {
       agent.description = appendOnce(agent.description, "Coordinates specialized agents and verifies their work.")
       agent.system = appendOnce(agent.system, buildOrchestratorSystem(options))
+      // The orchestrator may call the goal tools. Preserved agents that
+      // predate the shared permission action need the allow rule appended;
+      // an exact user rule for the action is never overridden.
+      agent.permissions = appendGoalToolPermission(agent.permissions, "allow")
     })
   }
 
@@ -68,10 +79,23 @@ export function applyAgentTransform(draft: AgentDraftLike, options: Orchestrator
     draft.update(id, (agent) => {
       agent.description = appendOnce(agent.description, roleDescription(role))
       agent.system = appendOnce(agent.system, buildWorkerSystem(role))
+      // Fail closed: workers must never see or drive goal tools, even when a
+      // preserved worker predates the explicit deny or lacks any deny-all.
+      agent.permissions = appendGoalToolPermission(agent.permissions, "deny")
     })
   }
 
   return missing
+}
+
+function appendGoalToolPermission(
+  permissions: PermissionRuleLike[] | undefined,
+  effect: "allow" | "deny",
+): PermissionRuleLike[] {
+  const existing = permissions ? [...permissions] : []
+  if (hasExactPermissionRule(existing, GOAL_TOOL_PERMISSION)) return existing
+  existing.push(goalToolPermissionRule(effect))
+  return existing
 }
 
 function appendOnce(existing: string | undefined, addition: string): string {

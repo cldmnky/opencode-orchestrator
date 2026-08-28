@@ -1,13 +1,10 @@
 import { COMMAND_NAMES, isCommandEnabled, type CommandName, type OrchestratorOptions } from "../../core/config.js"
+import type { CommandInvocation } from "@opencode-ai/plugin/promise/command"
 
 export { COMMAND_NAMES }
 export type { CommandName } from "../../core/config.js"
 
-export type CommandInvocationLike = {
-  sessionID: string
-  prompt: { text: string; [key: string]: unknown }
-  delivery: "steer" | "queue"
-}
+export type CommandInvocationLike = CommandInvocation
 
 export type CommandDefinitionLike = {
   name: string

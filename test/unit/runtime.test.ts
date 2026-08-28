@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Context } from "@opencode-ai/plugin/promise/plugin"
 import { parseOptions } from "../../src/core/config.js"
+import type { CommandInvocationLike } from "../../src/opencode-v2/commands/index.js"
 import { runCommand } from "../../src/opencode-v2/commands/runtime.js"
 import { goalStorageKey, runStorageKey, stopStorageKey } from "../../src/opencode-v2/goal/state.js"
 
@@ -102,15 +103,209 @@ describe("runtime commands", () => {
     expect(fixture.values.has(goalKey)).toBe(false)
     expect(fixture.values.has(stopKey)).toBe(false)
   })
+
+  test("rebuilds the prompt without explicit undefined attachments", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    await runCommand(
+      fixture.context,
+      parseOptions({}),
+      "orchestrate",
+      invocation("fix the bug", { files: undefined, agents: undefined, skills: undefined }),
+      undefined,
+    )
+
+    expect(fixture.prompts).toHaveLength(1)
+    const prompt = fixture.prompts[0]
+    expect(prompt.sessionID).toBe("session")
+    expect(prompt.delivery).toBe("queue")
+    expect(prompt.text).toContain("fix the bug")
+    expect("files" in prompt).toBe(false)
+    expect("agents" in prompt).toBe(false)
+    expect("skills" in prompt).toBe(false)
+  })
+
+  test("preserves attachment identities and metadata while dropping stale mentions", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    await runCommand(
+      fixture.context,
+      parseOptions({}),
+      "orchestrate",
+      invocation("fix src/index.ts", {
+        files: [
+          {
+            uri: "file:///workspace/src/index.ts",
+            name: "index.ts",
+            description: "Entry point",
+            mention: { start: 0, end: 10, text: "@src/index.ts" },
+          },
+        ],
+        agents: [{ name: "reviewer", mention: { start: 5, end: 8, text: "@reviewer" } }],
+        skills: [{ id: "skill-id", mention: { start: 9, end: 12, text: "@skill" } }],
+      }),
+      undefined,
+    )
+
+    expect(fixture.prompts).toHaveLength(1)
+    const prompt = fixture.prompts[0]
+    expect(prompt.files).toEqual([{ uri: "file:///workspace/src/index.ts", name: "index.ts", description: "Entry point" }])
+    expect(prompt.agents).toEqual([{ name: "reviewer" }])
+    expect(prompt.skills).toEqual([{ id: "skill-id" }])
+    // No stale mention offsets survive the rewritten text.
+    expect(JSON.stringify(prompt)).not.toContain("mention")
+  })
+
+  test("keeps empty attachment arrays that are present", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    await runCommand(
+      fixture.context,
+      parseOptions({}),
+      "orchestrate",
+      invocation("clean up", { files: [], agents: [], skills: [] }),
+      undefined,
+    )
+
+    expect(fixture.prompts).toHaveLength(1)
+    expect(fixture.prompts[0].files).toEqual([])
+    expect(fixture.prompts[0].agents).toEqual([])
+    expect(fixture.prompts[0].skills).toEqual([])
+  })
+
+  test("resumes a stored paused or active plan when multiple incomplete plans exist", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    mkdirSync(join(directory, ".orchestrator", "plans"), { recursive: true })
+    writeFileSync(join(directory, ".orchestrator", "plans", "alpha.md"), "# Alpha\n\n- Step\n")
+    writeFileSync(join(directory, ".orchestrator", "plans", "beta.md"), "# Beta\n\n- Step\n")
+    writeFileSync(join(directory, ".orchestrator", "plans", "gamma.md"), "# Gamma\n\n- Step\n")
+    const fixture = runtimeFixture(directory)
+    const key = runStorageKey(fixture.context.location, "session")
+
+    // A stored paused run is resumed even though three incomplete plans exist.
+    fixture.values.set(key, {
+      version: 1,
+      sessionID: "session",
+      plan: ".orchestrator/plans/alpha.md",
+      status: "paused",
+      createdAt: 1,
+      updatedAt: 1,
+    })
+    await runCommand(fixture.context, parseOptions({}), "run-plan", invocation(""), undefined)
+    expect(fixture.prompts[0].text).toContain(".orchestrator/plans/alpha.md")
+    expect(fixture.values.get(key)).toMatchObject({ plan: ".orchestrator/plans/alpha.md", status: "active" })
+
+    // A stored active run is likewise resumed rather than re-selected.
+    fixture.values.set(key, {
+      version: 1,
+      sessionID: "session",
+      plan: ".orchestrator/plans/gamma.md",
+      status: "active",
+      createdAt: 1,
+      updatedAt: 1,
+    })
+    await runCommand(fixture.context, parseOptions({}), "run-plan", invocation(""), undefined)
+    expect(fixture.prompts[1].text).toContain(".orchestrator/plans/gamma.md")
+    expect(fixture.values.get(key)).toMatchObject({ plan: ".orchestrator/plans/gamma.md", status: "active" })
+  })
+
+  test("pauses the selected run when orchestrator activation fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    mkdirSync(join(directory, ".orchestrator", "plans"), { recursive: true })
+    writeFileSync(join(directory, ".orchestrator", "plans", "release.md"), "# Release\n\n- Verify the build\n")
+    const fixture = runtimeFixture(directory)
+    ;(fixture.context as any).session.switchAgent = async () => {
+      throw new Error("agent unavailable")
+    }
+    const key = runStorageKey(fixture.context.location, "session")
+
+    await expect(
+      runCommand(fixture.context, parseOptions({}), "run-plan", invocation("release"), undefined),
+    ).rejects.toThrow("agent unavailable")
+
+    expect(fixture.prompts).toHaveLength(0)
+    expect(fixture.values.get(key)).toMatchObject({ plan: ".orchestrator/plans/release.md", status: "paused" })
+    expect(fixture.statuses[0]).toContain("Plan run paused")
+  })
+
+  test("pauses the selected run when prompt delivery fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    mkdirSync(join(directory, ".orchestrator", "plans"), { recursive: true })
+    writeFileSync(join(directory, ".orchestrator", "plans", "release.md"), "# Release\n\n- Verify the build\n")
+    const fixture = runtimeFixture(directory)
+    ;(fixture.context as any).session.prompt = async () => {
+      throw new Error("delivery failed")
+    }
+    const key = runStorageKey(fixture.context.location, "session")
+
+    await expect(
+      runCommand(fixture.context, parseOptions({}), "run-plan", invocation("release"), undefined),
+    ).rejects.toThrow("delivery failed")
+
+    expect(fixture.values.get(key)).toMatchObject({ plan: ".orchestrator/plans/release.md", status: "paused" })
+    expect(fixture.statuses[0]).toContain("Plan run paused")
+  })
+
+  test("rejects explicitly selected plans whose symlink escapes the plans directory", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    mkdirSync(join(directory, ".orchestrator", "plans"), { recursive: true })
+    // A symlink inside plans that points at a file outside of plans.
+    writeFileSync(join(directory, "outside.md"), "# Outside\n\n- Step\n")
+    try {
+      symlinkSync(join(directory, "outside.md"), join(directory, ".orchestrator", "plans", "evil.md"))
+    } catch {
+      // Environments without symlink permission still expect no plan to run.
+    }
+    const fixture = runtimeFixture(directory)
+
+    await runCommand(fixture.context, parseOptions({}), "run-plan", invocation("evil"), undefined)
+
+    expect(fixture.prompts).toHaveLength(0)
+    expect(fixture.statuses).toHaveLength(1)
+    expect(fixture.values.has(runStorageKey(fixture.context.location, "session"))).toBe(false)
+  })
+
+  test("allows plan symlinks that stay inside the plans directory", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    mkdirSync(join(directory, ".orchestrator", "plans"), { recursive: true })
+    writeFileSync(join(directory, ".orchestrator", "plans", "real.md"), "# Real\n\n- Step\n")
+    try {
+      symlinkSync(join(directory, ".orchestrator", "plans", "real.md"), join(directory, ".orchestrator", "plans", "alias.md"))
+    } catch {
+      // Skip the positive case where symlinks are unavailable.
+      return
+    }
+    const fixture = runtimeFixture(directory)
+
+    await runCommand(fixture.context, parseOptions({}), "run-plan", invocation("alias"), undefined)
+
+    expect(fixture.prompts).toHaveLength(1)
+    expect(fixture.prompts[0].text).toContain(".orchestrator/plans/alias.md")
+    expect(fixture.prompts[0].text).toContain("Real")
+  })
+
+  test("treats quoted YAML frontmatter status values as complete plans", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    mkdirSync(join(directory, ".orchestrator", "plans"), { recursive: true })
+    writeFileSync(join(directory, ".orchestrator", "plans", "double.md"), '---\nstatus: "complete"\n---\n# Double quoted\n')
+    writeFileSync(join(directory, ".orchestrator", "plans", "single.md"), "---\nstatus: 'done'\n---\n# Single quoted\n")
+    const fixture = runtimeFixture(directory)
+
+    await runCommand(fixture.context, parseOptions({}), "run-plan", invocation("double"), undefined)
+    await runCommand(fixture.context, parseOptions({}), "run-plan", invocation("single"), undefined)
+    // Auto-selection must also ignore quoted complete plans.
+    await runCommand(fixture.context, parseOptions({}), "run-plan", invocation(""), undefined)
+
+    expect(fixture.prompts).toHaveLength(0)
+    expect(fixture.statuses).toHaveLength(3)
+    expect(fixture.statuses.every((status) => status.includes("no sole incomplete plan"))).toBe(true)
+  })
 })
 
-function invocation(text: string) {
-  return { sessionID: "session", prompt: { text }, delivery: "queue" as const }
+function invocation(text: string, prompt: Record<string, unknown> = {}): CommandInvocationLike {
+  return { sessionID: "session", prompt: { text, ...prompt }, delivery: "queue" } as CommandInvocationLike
 }
 
 function runtimeFixture(directory: string) {
   const values = new Map<string, unknown>()
-  const prompts: Array<{ text: string }> = []
+  const prompts: Array<Record<string, unknown>> = []
   const statuses: string[] = []
   const context = {
     location: { directory, project: { id: "project" } },
@@ -124,7 +319,7 @@ function runtimeFixture(directory: string) {
     },
     session: {
       context: async () => [],
-      prompt: async (input: { text: string }) => void prompts.push(input),
+      prompt: async (input: Record<string, unknown>) => void prompts.push(input),
       synthetic: async (input: { text: string }) => void statuses.push(input.text),
       switchAgent: async () => undefined,
       switchModel: async () => undefined,

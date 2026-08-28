@@ -32,6 +32,7 @@ describe("server plugin contract", () => {
     const disposed: string[] = []
     const switches: string[] = []
     const prompts: any[] = []
+    let contextHook: ((event: any) => void) | undefined
 
     const registration = (name: string) => ({
       dispose: async () => {
@@ -78,7 +79,10 @@ describe("server plugin contract", () => {
         remove: async (key: string) => void storage.delete(key),
       },
       session: {
-        hook: async () => registration("session-hook"),
+        hook: async (name: string, callback: (event: any) => void) => {
+          if (name === "context") contextHook = callback
+          return registration("session-hook")
+        },
         switchAgent: async ({ agent }: { agent: string }) => void switches.push(`agent:${agent}`),
         switchModel: async ({ model }: { model: { id: string } }) => void switches.push(`model:${model.id}`),
         prompt: async (input: unknown) => void prompts.push(input),
@@ -103,6 +107,19 @@ describe("server plugin contract", () => {
       "orchestrator_goal_update",
     ])
     expect(agents.get("orchestrator")?.system).toContain("conductor")
+    expect(agents.get("orchestrator")?.system).toContain("Expected outcome")
+    expect(agents.get("orchestrator")?.system).toContain("exact disjoint write scope")
+
+    const contextText: string[] = []
+    contextHook?.({
+      agent: "orchestrator",
+      system: { push: (item: { text: string }) => void contextText.push(item.text) },
+    })
+    expect(contextText.join("\n")).toContain("orchestrator_goal_get")
+    expect(contextText.join("\n")).toContain("orchestrator_goal_set")
+    expect(contextText.join("\n")).toContain("orchestrator_goal_update")
+    expect(contextText.join("\n")).toContain("exact disjoint write scope")
+    expect(contextText.join("\n")).not.toMatch(/\bgoal_(get|set|update)\b/)
 
     await commands[0]?.execute({ sessionID: "session", prompt: { text: "fix the bug" }, delivery: "queue" })
     expect(switches).toEqual(["agent:orchestrator", "model:orchestrator-model"])

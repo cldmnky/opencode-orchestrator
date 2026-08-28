@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "opencode-orchestrator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A V2-only multi-agent orchestration plugin for OpenCode.",
   "type": "module",
   "exports": {

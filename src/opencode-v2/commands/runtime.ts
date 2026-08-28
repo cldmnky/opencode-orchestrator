@@ -61,15 +61,53 @@ export async function runCommand(
       : args
   if (validatedArguments === undefined) return
 
-  const model = orchestratorModel ?? (await configuredModel(context, options.orchestrator))
-  await activateOrchestrator(context, input.sessionID, options.orchestrator, model)
-  const commandArguments = planSelection ? `${planSelection.relativePath}\n\nValidated plan:\n${planSelection.content}` : validatedArguments
-  const prompt = {
-    ...input.prompt,
-    text: buildCommandPrompt(name, commandArguments),
-    delivery: input.delivery,
+  try {
+    const model = orchestratorModel ?? (await configuredModel(context, options.orchestrator))
+    await activateOrchestrator(context, input.sessionID, options.orchestrator, model)
+    const commandArguments = planSelection ? `${planSelection.relativePath}\n\nValidated plan:\n${planSelection.content}` : validatedArguments
+    await context.session.prompt({
+      sessionID: input.sessionID,
+      text: buildCommandPrompt(name, commandArguments),
+      delivery: input.delivery,
+      // Rebuild the prompt instead of spreading input.prompt: the native command
+      // invocation carries explicit undefined arrays for files/agents/skills, which
+      // the SessionPrompt schema rejects, and the rewritten text invalidates any
+      // mention offsets in the original text.
+      ...(Array.isArray(input.prompt.files) ? { files: rebuildFiles(input.prompt.files) } : {}),
+      ...(Array.isArray(input.prompt.agents) ? { agents: rebuildAgents(input.prompt.agents) } : {}),
+      ...(Array.isArray(input.prompt.skills) ? { skills: rebuildSkills(input.prompt.skills) } : {}),
+    })
+  } catch (error) {
+    // A selected plan is already recorded as active; never leave it falsely
+    // active when activation or delivery fails after that point.
+    if (planSelection) {
+      await pausePlanRunOnFailure(context, input.sessionID, planSelection, errorMessage(error))
+    }
+    throw error
   }
-  await context.session.prompt({ ...prompt, sessionID: input.sessionID })
+}
+
+type FileAttachmentLike = { uri: string; name?: string; description?: string; mention?: unknown }
+type AgentAttachmentLike = { name: string; mention?: unknown }
+type SkillAttachmentLike = { id: string; mention?: unknown }
+
+// Keep attachment identity and metadata fields allowed by PromptInput, but drop
+// `mention`: its start/end offsets point into the original text that
+// buildCommandPrompt replaced.
+function rebuildFiles(files: readonly FileAttachmentLike[]): Array<{ uri: string; name?: string; description?: string }> {
+  return files.map((file) => ({
+    uri: file.uri,
+    ...(typeof file.name === "string" ? { name: file.name } : {}),
+    ...(typeof file.description === "string" ? { description: file.description } : {}),
+  }))
+}
+
+function rebuildAgents(agents: readonly AgentAttachmentLike[]): Array<{ name: string }> {
+  return agents.map((agent) => ({ name: agent.name }))
+}
+
+function rebuildSkills(skills: readonly SkillAttachmentLike[]): Array<{ id: string }> {
+  return skills.map((skill) => ({ id: skill.id }))
 }
 
 async function runHandover(context: Context, sessionID: string, focus: string): Promise<void> {
@@ -330,11 +368,20 @@ type PlanSelection = {
 }
 
 async function startPlanRun(context: Context, sessionID: string, plan: string): Promise<PlanSelection | undefined> {
+  return withSessionLock(context.location, sessionID, () => mutateStartPlanRun(context, sessionID, plan))
+}
+
+async function mutateStartPlanRun(context: Context, sessionID: string, plan: string): Promise<PlanSelection | undefined> {
   const key = runStorageKey(context.location, sessionID)
   const current = await readPlanRun(context.storage, key)
-  const selected = await selectPlan(context.location.directory, plan || (current?.status === "active" ? current.plan ?? "" : ""))
+  const resumable = current && (current.status === "active" || current.status === "paused") ? current.plan ?? "" : ""
+  const selected = await selectPlan(context.location.directory, plan || resumable)
   if (!selected) {
-    await emitStatus(context, sessionID, "Specify one plan from .orchestrator/plans/; no sole incomplete plan was available.")
+    if (!plan && resumable) {
+      await emitStatus(context, sessionID, "The stored plan run could not be resumed; specify one plan from .orchestrator/plans/.")
+    } else {
+      await emitStatus(context, sessionID, "Specify one plan from .orchestrator/plans/; no sole incomplete plan was available.")
+    }
     return undefined
   }
   const now = Date.now()
@@ -348,6 +395,18 @@ async function startPlanRun(context: Context, sessionID: string, plan: string): 
   }
   await context.storage.set(key, run)
   return selected
+}
+
+async function pausePlanRunOnFailure(context: Context, sessionID: string, selection: PlanSelection, reason: string): Promise<void> {
+  await withSessionLock(context.location, sessionID, async () => {
+    const key = runStorageKey(context.location, sessionID)
+    const run = await readPlanRun(context.storage, key)
+    // Pause only the run this invocation activated; a concurrent command may
+    // have replaced or completed it since selection.
+    if (!run || run.status !== "active" || run.plan !== selection.relativePath) return
+    await context.storage.set(key, { ...run, status: "paused", updatedAt: Date.now() })
+    await emitStatus(context, sessionID, `Plan run paused; ${redact(reason)}`)
+  })
 }
 
 async function selectPlan(directory: string, requested: string): Promise<PlanSelection | undefined> {
@@ -365,6 +424,9 @@ async function selectPlan(directory: string, requested: string): Promise<PlanSel
   if (!withinPlanDirectory || withinPlanDirectory === ".." || withinPlanDirectory.startsWith(`..${pathSeparator()}`) || isAbsolute(withinPlanDirectory)) {
     return undefined
   }
+  // Resolve symlinks canonically so an explicitly selected plan cannot escape
+  // .orchestrator/plans through a link that lexically looks contained.
+  if (!(await isWithinCanonical(planDirectory, path))) return undefined
   let content: string
   try {
     content = await readFile(path, "utf8")
@@ -403,10 +465,22 @@ async function incompletePlans(directory: string): Promise<string[]> {
   return candidates.sort()
 }
 
+async function isWithinCanonical(root: string, target: string): Promise<boolean> {
+  const canonicalRoot = await realpath(root).catch(() => undefined)
+  const canonicalTarget = await realpath(target).catch(() => undefined)
+  if (!canonicalRoot || !canonicalTarget) return false
+  const remainder = relative(canonicalRoot, canonicalTarget)
+  return remainder !== ".." && !remainder.startsWith(`..${pathSeparator()}`) && !isAbsolute(remainder)
+}
+
 function isCompletePlan(content: string): boolean {
   const frontMatter = content.match(/^---\s*[\s\S]*?\nstatus\s*:\s*([^\s]+)[\s\S]*?\n---/i)?.[1]
   const heading = content.match(/^#+\s*status\s*\n+\s*([^\s]+)/im)?.[1]
-  return [frontMatter, heading].some((value) => value !== undefined && /^(complete|completed|done)$/i.test(value))
+  return [frontMatter, heading].some((value) => {
+    // YAML frontmatter may quote the status value, e.g. status: "complete".
+    const candidate = value?.trim().replace(/^["']|["']$/g, "")
+    return candidate !== undefined && /^(complete|completed|done)$/i.test(candidate)
+  })
 }
 
 function pathSeparator(): string {

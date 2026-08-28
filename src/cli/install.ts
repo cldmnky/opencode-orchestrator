@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { commandDefinitions } from "../opencode-v2/commands/index.js"
 import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
+import { GOAL_TOOL_PERMISSION } from "../core/permissions.js"
 import { DEFAULT_ROLES, type RoleName } from "../core/roles.js"
 import { parseOptions, type OrchestratorOptions } from "../core/config.js"
 
@@ -118,6 +119,9 @@ function agentDefinitions(options: OrchestratorOptions, modelReferences: AgentMo
 function orchestratorPermissions(options: OrchestratorOptions): Array<Record<string, string>> {
   return [
     { action: "*", resource: "*", effect: "deny" },
+    // Keep the goal tools visible and callable despite the deny-all above.
+    // They share one explicit permission action declared on each tool.
+    { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "allow" },
     { action: "read", resource: "*", effect: "allow" },
     { action: "glob", resource: "*", effect: "allow" },
     { action: "grep", resource: "*", effect: "allow" },
@@ -133,6 +137,9 @@ function orchestratorPermissions(options: OrchestratorOptions): Array<Record<str
 function workerPermissions(role: string): Array<Record<string, string>> {
   const common = [
     { action: "*", resource: "*", effect: "deny" },
+    // Workers must never see or drive orchestration goal tools, even when the
+    // installed allow rule above changes: the deny keeps them invisible.
+    { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "deny" },
     { action: "read", resource: "*", effect: "allow" },
     { action: "glob", resource: "*", effect: "allow" },
     { action: "grep", resource: "*", effect: "allow" },

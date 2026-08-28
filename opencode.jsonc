@@ -12,7 +12,14 @@
           "review": "reviewer"
         },
         "max_parallel": 4,
-        "strict_agents": true
+        "require_review": true,
+        "strict_agents": true,
+        "commands": {},
+        "goal": {
+          "auto_continue": true,
+          "max_continuations": 50,
+          "cooldown_ms": 1000
+        }
       }
     }
   ],

@@ -84,20 +84,25 @@ export function startGoalContinuation(context: ContinuationContext, options: Orc
   }
 
   async function admitContinuation(sessionID: string): Promise<void> {
-    await withSessionLock(context.location, sessionID, async () => {
-      const key = goalStorageKey(context.location, sessionID)
+    const key = goalStorageKey(context.location, sessionID)
+    const stopKey = stopStorageKey(context.location, sessionID)
+
+    // Reserve the turn under the session lock: the ceiling, cooldown, halt,
+    // and duplicate-idle checks all happen atomically here so concurrent idle
+    // edges cannot exceed the ceiling. The reservation itself is the only
+    // shared mutation performed while holding the lock.
+    const reserved = await withSessionLock(context.location, sessionID, async () => {
       const goal = await readGoal(context.storage, key)
-      if (!goal || goal.status !== "active") return
+      if (!goal || goal.status !== "active") return undefined
       if (goal.continuationCount >= options.goal.max_continuations) {
         console.warn(`opencode-orchestrator continuation ceiling reached for ${sessionID}`)
-        return
+        return undefined
       }
-      if (controller.signal.aborted || (await readAutomationStop(context.storage, stopStorageKey(context.location, sessionID)))) return
+      if (controller.signal.aborted || (await readAutomationStop(context.storage, stopKey))) return undefined
 
       const now = Date.now()
-      if (goal.lastContinuationAt !== undefined && now - goal.lastContinuationAt < options.goal.cooldown_ms) return
+      if (goal.lastContinuationAt !== undefined && now - goal.lastContinuationAt < options.goal.cooldown_ms) return undefined
 
-      // Reserve the turn before admission so duplicate idle edges cannot exceed the ceiling.
       const next: GoalRecord = {
         ...goal,
         continuationCount: goal.continuationCount + 1,
@@ -105,18 +110,24 @@ export function startGoalContinuation(context: ContinuationContext, options: Orc
         updatedAt: now,
       }
       await context.storage.set(key, next)
-      if (
-        controller.signal.aborted ||
-        (await readAutomationStop(context.storage, stopStorageKey(context.location, sessionID))) ||
-        (await readGoal(context.storage, key))?.status !== "active"
-      ) {
-        return
-      }
-      await context.session.prompt({
-        sessionID,
-        text: buildContinuationPrompt(goal.objective, next.continuationCount),
-        delivery: "queue",
-      })
+      return next
+    })
+    if (!reserved || controller.signal.aborted) return
+
+    // Admission gate, checked after the lock is released: the session prompt
+    // must never be queued while holding the lock, but we still re-read the
+    // goal and halt flag so a pause, completion, replacement, or /halt that
+    // raced the reservation fails closed. Only the exact record we reserved
+    // may be admitted.
+    if (await readAutomationStop(context.storage, stopKey)) return
+    const current = await readGoal(context.storage, key)
+    if (!current || current.status !== "active") return
+    if (current.continuationCount !== reserved.continuationCount) return
+
+    await context.session.prompt({
+      sessionID,
+      text: buildContinuationPrompt(reserved.objective, reserved.continuationCount),
+      delivery: "queue",
     })
   }
 }

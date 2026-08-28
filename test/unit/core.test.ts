@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { buildCommandPrompt, buildOrchestratorSystem } from "../../src/core/prompts.js"
+import {
+  buildCommandPrompt,
+  buildContinuationPrompt,
+  buildOrchestratorSystem,
+  buildWorkerSystem,
+} from "../../src/core/prompts.js"
 import { parseOptions } from "../../src/core/config.js"
 
 describe("configuration", () => {
@@ -21,6 +26,43 @@ describe("prompts", () => {
     expect(prompt).toContain("disjoint write scopes")
     expect(prompt).toContain("planner")
     expect(prompt).not.toContain("claude")
+  })
+
+  test("embeds the child-task contract with its required sections", () => {
+    const prompt = buildOrchestratorSystem(parseOptions({}))
+    for (const section of [
+      "Task:",
+      "Expected outcome",
+      "Scope/file ownership",
+      "Must do",
+      "Must not do",
+      "Verification:",
+      "Handoff:",
+    ]) {
+      expect(prompt).toContain(section)
+    }
+    expect(prompt).toContain("exact disjoint write scope")
+    expect(prompt).toContain("assumption")
+    expect(prompt).toContain("directly")
+  })
+
+  test("names only namespaced goal tools in system, command, and continuation prompts", () => {
+    const system = buildOrchestratorSystem(parseOptions({}))
+    const goal = buildCommandPrompt("goal", "pause")
+    const continuation = buildContinuationPrompt("objective", 2)
+    for (const prompt of [system, goal, continuation]) {
+      expect(prompt).toContain("orchestrator_goal_get")
+      expect(prompt).toContain("orchestrator_goal_set")
+      expect(prompt).toContain("orchestrator_goal_update")
+      expect(prompt).not.toMatch(/\bgoal_(get|set|update)\b/)
+    }
+  })
+
+  test("worker prompts carry the child-task contract and handoff format", () => {
+    const prompt = buildWorkerSystem("implementation")
+    expect(prompt).toContain("Expected outcome")
+    expect(prompt).toContain("Must not do")
+    expect(prompt).toContain("Worker handoff format:")
   })
 
   test("renders complete command arguments", () => {

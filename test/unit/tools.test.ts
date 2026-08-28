@@ -149,6 +149,44 @@ describe("goal tools", () => {
     expect(updated.objective).toBe("finish the work")
     expect(updated.continuationCount).toBe(0)
   })
+
+  test("goal tools stay keyed to the stable origin project across a session move", async () => {
+    // A session whose durable anchor records a different origin keeps its
+    // goal/run/halt state under the origin project, not the current one, so a
+    // /cd move never orphans the goal.
+    const sessionID = "moved-session"
+    const anchorKey = `session/v1/project/${sessionID}`
+    const { tools, values } = collectTools(
+      new Map<string, unknown>([
+        [anchorKey, {
+          version: 1,
+          sessionID,
+          originProjectID: "origin",
+          originDirectory: "/origin",
+          currentProjectID: "project",
+          currentDirectory: "/workspace",
+          updatedAt: 1,
+        }],
+        [goalStorageKey({ ...location, project: { id: "origin" } }, sessionID), newGoal(sessionID, "ship the change", 1)],
+      ]),
+    )
+
+    const read = await tools.get("goal_get")!.execute({}, toolContext(sessionID, "orchestrator"))
+    const goal = JSON.parse(read.content) as GoalRecord
+    expect(goal.objective).toBe("ship the change")
+
+    // goal_set writes under the origin project key, not the current one.
+    await tools.get("goal_set")!.execute({ objective: "replaced" }, toolContext(sessionID, "orchestrator"))
+    expect(values.has(goalStorageKey({ ...location, project: { id: "origin" } }, sessionID))).toBe(true)
+    expect(values.has(goalStorageKey(location, sessionID))).toBe(false)
+
+    // goal_update operates on the origin-keyed record.
+    const updated = await tools
+      .get("goal_update")!
+      .execute({ status: "complete", evidence: "verified by tests" }, toolContext(sessionID, "orchestrator"))
+    expect((JSON.parse(updated.content) as GoalRecord).status).toBe("complete")
+    expect((JSON.parse(updated.content) as GoalRecord).completionEvidence).toBe("verified by tests")
+  })
 })
 
 function toolContext(sessionID: string, agent: string): { sessionID: string; agent: string } {

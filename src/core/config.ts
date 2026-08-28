@@ -11,6 +11,7 @@ export const COMMAND_NAMES = [
   "handover",
   "polish",
   "stress-plan",
+  "cd",
 ] as const
 
 const agentId = z.string().trim().min(1)

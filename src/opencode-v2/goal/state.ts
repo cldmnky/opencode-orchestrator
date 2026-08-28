@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { readSessionAnchor } from "../session/state.js"
 
 export type GoalStatus = "active" | "paused" | "complete"
 
@@ -86,6 +87,28 @@ const automationStopSchema = z
 
 export function goalStorageKey(location: LocationLike, sessionID: string): string {
   return `goal/v1/${segment(location.project.id)}/${segment(sessionID)}`
+}
+
+/**
+ * Resolves the project ID durable goal/run/halt state is keyed under for a
+ * session: the session anchor's stable `originProjectID` when an anchor is
+ * present at the given location, otherwise the location's own project ID.
+ *
+ * A session that moved via `/cd` (or a native `session.moved` event) relocates
+ * its anchor to the *current* project, so reads here deliberately target the
+ * plugin's stable origin location: goal/run/halt records were created under
+ * that project and must remain findable after the move. Only an anchor that
+ * still lives at the origin project (and records a different origin) changes
+ * the answer. This keeps storage keys project-stable across moves.
+ */
+export async function stableProjectID(storage: StorageLike, location: LocationLike, sessionID: string): Promise<string> {
+  try {
+    const anchor = await readSessionAnchor(storage, location.project.id, sessionID)
+    if (anchor?.originProjectID) return anchor.originProjectID
+  } catch {
+    // Fall through to the location's own project ID.
+  }
+  return location.project.id
 }
 
 export function runStorageKey(location: LocationLike, sessionID: string): string {

@@ -5,6 +5,7 @@ import {
   readAutomationStop,
   readGoal,
   runStorageKey,
+  stableProjectID,
   stopStorageKey,
   withSessionLock,
   type GoalRecord,
@@ -61,11 +62,14 @@ export function startGoalContinuation(context: ContinuationContext, options: Orc
       // Serialize cleanup under the same per-session lock the reservation uses
       // so a delete cannot interleave with an in-flight reservation write and
       // leave stale run/halt state (or admit a prompt for a deleted session).
+      // Records are keyed by the session's stable origin project, so cleanup
+      // resolves that project first.
       await withSessionLock(context.location, sessionID, async () => {
+        const keyedLocation = { ...context.location, project: { id: await stableProjectID(context.storage, context.location, sessionID) } }
         await Promise.all([
-          context.storage.remove(goalStorageKey(context.location, sessionID)),
-          context.storage.remove(runStorageKey(context.location, sessionID)),
-          context.storage.remove(stopStorageKey(context.location, sessionID)),
+          context.storage.remove(goalStorageKey(keyedLocation, sessionID)),
+          context.storage.remove(runStorageKey(keyedLocation, sessionID)),
+          context.storage.remove(stopStorageKey(keyedLocation, sessionID)),
         ])
       })
       inFlight.delete(sessionID)
@@ -89,8 +93,11 @@ export function startGoalContinuation(context: ContinuationContext, options: Orc
   }
 
   async function admitContinuation(sessionID: string): Promise<void> {
-    const key = goalStorageKey(context.location, sessionID)
-    const stopKey = stopStorageKey(context.location, sessionID)
+    // Goal/run/halt records stay anchored to the session's stable origin
+    // project across `/cd` moves, so admit resolves the same project.
+    const keyedLocation = { ...context.location, project: { id: await stableProjectID(context.storage, context.location, sessionID) } }
+    const key = goalStorageKey(keyedLocation, sessionID)
+    const stopKey = stopStorageKey(keyedLocation, sessionID)
 
     // Reserve the turn under the session lock: the ceiling, cooldown, halt,
     // and duplicate-idle checks all happen atomically here so concurrent idle
@@ -173,6 +180,13 @@ function isEvent(value: unknown): value is SessionEvent {
 
 function matchesLocation(event: SessionEvent, location: LocationLike): boolean {
   if (!event.location) return true
-  if (event.location.directory !== location.directory) return false
-  return event.location.workspaceID === undefined || event.location.workspaceID === location.workspaceID
+  // A `/cd` move keeps the session in the same workspace but changes its
+  // directory; durable goal/run/halt state stays keyed by the stable origin
+  // project, so admission only needs workspace identity. Without a workspace
+  // to anchor on, fall back to exact directory matching (pre-move behavior).
+  if (event.location.workspaceID !== undefined) {
+    return event.location.workspaceID === location.workspaceID
+  }
+  if (location.workspaceID !== undefined) return true
+  return event.location.directory === location.directory
 }

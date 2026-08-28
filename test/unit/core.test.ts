@@ -8,6 +8,7 @@ import {
 import { parseOptions } from "../../src/core/config.js"
 import {
   DELEGATION_RULES,
+  MANAGED_WORKTREE_GUIDANCE,
   REMOTE_ORCHESTRATION_GUIDANCE,
   SECRET_HANDLING_GUIDANCE,
   TOOL_AVAILABILITY_GUIDANCE,
@@ -88,6 +89,7 @@ describe("remote orchestration policy", () => {
     "handover",
     "polish",
     "stress-plan",
+    "cd",
   ]
 
   function allPromptKinds(): Array<[string, string]> {
@@ -143,6 +145,28 @@ describe("remote orchestration policy", () => {
       expect(prompt).toContain("safe delegation is allowed whenever isolation is not required")
       expect(prompt).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
     }
+  })
+
+  test("every prompt kind distinguishes managed current-session worktrees from unavailable atomic child isolation", () => {
+    for (const [, prompt] of allPromptKinds()) {
+      expect(prompt).toContain("orchestrator_worktree_create")
+      expect(prompt).toContain("owned by the current session")
+      expect(prompt).toContain("not atomic child isolation")
+      expect(prompt).toContain("/cd moves the current session while preserving its ID and history")
+    }
+    // The remote GitHub guidance is still present alongside the worktree text.
+    expect(MANAGED_WORKTREE_GUIDANCE).toContain("orchestrator_worktree_cleanup")
+    expect(MANAGED_WORKTREE_GUIDANCE).toContain("current session only")
+    expect(REMOTE_ORCHESTRATION_GUIDANCE).toContain("inspect the tool catalog")
+    expect(REMOTE_ORCHESTRATION_GUIDANCE).toContain(MANAGED_WORKTREE_GUIDANCE)
+  })
+
+  test("the cd command prompt requires a real session move and rejects shell-shaped input", () => {
+    const prompt = buildCommandPrompt("cd", "subdir")
+    expect(prompt).toContain("session ID and history")
+    expect(prompt).toContain("existing directory")
+    expect(prompt).toContain("flag-shaped or shell-metacharacter")
+    expect(prompt).toContain("Do not run a shell or create a worktree")
   })
 
   test("never hard-codes deployment-specific GitHub tool names", () => {

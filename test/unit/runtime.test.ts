@@ -305,6 +305,41 @@ describe("runtime commands", () => {
     expect(fixture.statuses).toHaveLength(3)
     expect(fixture.statuses.every((status) => status.includes("no sole incomplete plan"))).toBe(true)
   })
+
+  test("run-plan selects plans from the session's current location after a move", async () => {
+    // The plugin loads in `directory` (no plans), but the session has moved to
+    // `moved` via /cd: plan selection must use the session's current location.
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    const moved = mkdtempSync(join(tmpdir(), "orchestrator-runtime-moved-"))
+    mkdirSync(join(moved, ".orchestrator", "plans"), { recursive: true })
+    writeFileSync(join(moved, ".orchestrator", "plans", "release.md"), "# Release\n\n- Verify the build\n")
+    const fixture = runtimeFixture(directory)
+    fixture.session.get = async () => ({ id: "session", projectID: "moved", location: { directory: moved } })
+
+    await runCommand(fixture.context, parseOptions({}), "run-plan", invocation("release"), undefined)
+
+    expect(fixture.prompts).toHaveLength(1)
+    expect(fixture.prompts[0].text).toContain(".orchestrator/plans/release.md")
+    expect(fixture.prompts[0].text).toContain("Verify the build")
+  })
+
+  test("handover reads VCS state at the session's current location after a move", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    const moved = mkdtempSync(join(tmpdir(), "orchestrator-runtime-moved-"))
+    const fixture = runtimeFixture(directory)
+    fixture.session.get = async () => ({ id: "session", projectID: "moved", location: { directory: moved, workspaceID: "ws-9" } })
+    const seenLocations: Array<{ directory: string; workspace?: string }> = []
+    ;(fixture.context as any).vcs.status = async (input: { location: { directory: string; workspace?: string } }) => {
+      seenLocations.push(input.location)
+      return []
+    }
+
+    await runCommand(fixture.context, parseOptions({}), "handover", invocation("wrap up"), undefined)
+
+    expect(seenLocations.length).toBeGreaterThan(0)
+    expect(seenLocations[0]).toEqual({ directory: moved, workspace: "ws-9" })
+    expect(fixture.statuses[0]).toContain("Working copy is clean.")
+  })
 })
 
 function invocation(text: string, prompt: Record<string, unknown> = {}): CommandInvocationLike {
@@ -323,6 +358,14 @@ function runtimeFixture(directory: string) {
   const values = new Map<string, unknown>()
   const prompts: Array<Record<string, unknown>> = []
   const statuses: string[] = []
+  const session = {
+    get: async () => ({ id: "session", projectID: "project", location: { directory } }),
+    context: async () => [],
+    prompt: async (input: Record<string, unknown>) => void prompts.push(input),
+    synthetic: async (input: { text: string }) => void statuses.push(input.text),
+    switchAgent: async () => undefined,
+    switchModel: async () => undefined,
+  }
   const context = {
     location: { directory, project: { id: "project" } },
     storage: {
@@ -333,17 +376,11 @@ function runtimeFixture(directory: string) {
     agent: {
       get: async () => ({ model: { id: "model", providerID: "provider" } }),
     },
-    session: {
-      context: async () => [],
-      prompt: async (input: Record<string, unknown>) => void prompts.push(input),
-      synthetic: async (input: { text: string }) => void statuses.push(input.text),
-      switchAgent: async () => undefined,
-      switchModel: async () => undefined,
-    },
+    session,
     vcs: {
       status: async () => [],
       diff: async () => [],
     },
   } as unknown as Context & { values: Map<string, unknown> }
-  return { context, values, prompts, statuses }
+  return { context, values, prompts, statuses, session }
 }

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { commandDefinitions } from "../opencode-v2/commands/index.js"
 import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
-import { GOAL_TOOL_PERMISSION } from "../core/permissions.js"
+import { GOAL_TOOL_PERMISSION, orchestratorOnlyPermissionRule } from "../core/permissions.js"
 import { DEFAULT_ROLES, type RoleName } from "../core/roles.js"
 import { parseOptions, type OrchestratorOptions } from "../core/config.js"
 import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../core/package-identity.js"
@@ -215,6 +215,10 @@ function orchestratorPermissions(options: OrchestratorOptions): Array<Record<str
     // Keep the goal tools visible and callable despite the deny-all above.
     // They share one explicit permission action declared on each tool.
     { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "allow" },
+    // Surface the orchestrator-only feature family (github/worktree/cd): one
+    // shared action per family declared on each tool, so a single rule grants
+    // or revokes the whole set while workers stay denied.
+    orchestratorOnlyPermissionRule("allow"),
     { action: "read", resource: "*", effect: "allow" },
     { action: "glob", resource: "*", effect: "allow" },
     { action: "grep", resource: "*", effect: "allow" },
@@ -230,9 +234,11 @@ function orchestratorPermissions(options: OrchestratorOptions): Array<Record<str
 function workerPermissions(role: string): Array<Record<string, string>> {
   const common = [
     { action: "*", resource: "*", effect: "deny" },
-    // Workers must never see or drive orchestration goal tools, even when the
-    // installed allow rule above changes: the deny keeps them invisible.
+    // Workers must never see or drive orchestration goal tools or the
+    // orchestrator-only feature tools, even when the installed allow rules
+    // above change: the denies keep them invisible.
     { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "deny" },
+    orchestratorOnlyPermissionRule("deny"),
     { action: "read", resource: "*", effect: "allow" },
     { action: "glob", resource: "*", effect: "allow" },
     { action: "grep", resource: "*", effect: "allow" },

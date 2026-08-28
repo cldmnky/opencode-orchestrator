@@ -5,6 +5,7 @@ import type { Model } from "@opencode-ai/schema/model"
 import type { CommandName, CommandInvocationLike } from "./index.js"
 import { commandDefinitions } from "./index.js"
 import { buildCommandPrompt } from "../../core/prompts.js"
+import { moveSessionToDirectory } from "../session/move.js"
 import {
   goalStorageKey,
   newGoal,
@@ -49,6 +50,10 @@ export async function runCommand(
   }
   if (name === "handover") {
     await runHandover(context, input.sessionID, args)
+    return
+  }
+  if (name === "cd") {
+    await runCdCommand(context, input.sessionID, args, input.delivery)
     return
   }
 
@@ -124,7 +129,8 @@ async function runHandover(context: Context, sessionID: string, focus: string): 
   }
 
   const vcs = context.vcs
-  const location = { location: { directory: context.location.directory, workspace: context.location.workspaceID } }
+  const sessionRoot = await sessionLocation(context, sessionID)
+  const location = { location: { directory: sessionRoot.directory, workspace: sessionRoot.workspaceID } }
   try {
     const status = await vcs.status(location)
     const files = arrayData(status).map((item) => {
@@ -148,13 +154,74 @@ async function runHandover(context: Context, sessionID: string, focus: string): 
   await emitStatus(context, sessionID, sections.join("\n\n").slice(0, 24_000))
 }
 
+async function runCdCommand(
+  context: Context,
+  sessionID: string,
+  args: string,
+  delivery: CommandInvocationLike["delivery"],
+): Promise<void> {
+  const outcome = await moveSessionToDirectory(
+    {
+      session: context.session,
+      storage: context.storage,
+      location: context.location,
+    },
+    { sessionID, target: args, delivery: delivery ?? null },
+  )
+  if (!outcome.ok) {
+    await emitStatus(context, sessionID, `/cd rejected: ${redact(outcome.reason)}`)
+    return
+  }
+  await emitStatus(
+    context,
+    sessionID,
+    `Session moved to ${outcome.session.location?.directory ?? "unknown"}; session ${outcome.session.id} and history preserved.`,
+  )
+}
+
+// Resolve the session's *current* location so post-move commands operate where
+// the session actually lives, falling back to the plugin's load-time location
+// when the session cannot be read (pre-created or unavailable sessions).
+async function sessionLocation(
+  context: Context,
+  sessionID: string,
+): Promise<{ directory: string; workspaceID?: string }> {
+  try {
+    const session = unwrapSession(await context.session.get({ sessionID }))
+    const directory = session?.location?.directory
+    if (typeof directory === "string" && directory.length > 0) {
+      const workspaceID = typeof session?.location?.workspaceID === "string" ? session.location.workspaceID : undefined
+      return { directory, ...(workspaceID !== undefined ? { workspaceID } : {}) }
+    }
+  } catch {
+    // Fall back to the plugin location; the model can still inspect the default scope.
+  }
+  return {
+    directory: context.location.directory,
+    ...(context.location.workspaceID !== undefined ? { workspaceID: context.location.workspaceID } : {}),
+  }
+}
+
+function unwrapSession(value: unknown): { location?: { directory?: unknown; workspaceID?: unknown } } | undefined {
+  if (!value || typeof value !== "object") return undefined
+  if (Array.isArray((value as { data?: unknown }).data)) return undefined
+  const source = (value as { data?: unknown }).data && typeof (value as { data: unknown }).data === "object"
+    ? (value as { data: unknown }).data
+    : value
+  if (!source || typeof source !== "object") return undefined
+  const session = source as { location?: unknown }
+  if (!session.location || typeof session.location !== "object") return undefined
+  return { location: session.location as { directory?: unknown; workspaceID?: unknown } }
+}
+
 async function polishScope(context: Context, args: string, sessionID: string): Promise<string | undefined> {
+  const sessionRoot = await sessionLocation(context, sessionID)
   if (args.trim()) {
     const scopes = args
       .split(/[\s,]+/)
       .map((value) => value.trim())
       .filter(Boolean)
-    const safeScopes = await Promise.all(scopes.map((scope) => isSafeProjectPath(context.location.directory, scope)))
+    const safeScopes = await Promise.all(scopes.map((scope) => isSafeProjectPath(sessionRoot.directory, scope)))
     if (scopes.length === 0 || scopes.some((scope, index) => scope.startsWith("--") || !safeScopes[index])) {
       await emitStatus(context, sessionID, "Polish scope must contain only relative paths inside the current project.")
       return undefined
@@ -162,7 +229,7 @@ async function polishScope(context: Context, args: string, sessionID: string): P
     return `Explicit scope: ${scopes.join(", ")}`
   }
   try {
-    const status = await context.vcs.status({ location: { directory: context.location.directory, workspace: context.location.workspaceID } })
+    const status = await context.vcs.status({ location: { directory: sessionRoot.directory, workspace: sessionRoot.workspaceID } })
     const files = arrayData(status).map((item) => asRecord(item)?.file).filter((value): value is string => typeof value === "string")
     if (files.length > 0) return `Changed files only: ${files.join(", ")}`
   } catch {
@@ -186,6 +253,7 @@ async function validateRestructure(
   args: string,
   sessionID: string,
 ): Promise<string | undefined> {
+  const sessionRoot = await sessionLocation(context, sessionID)
   const tokens = args.trim().split(/\s+/).filter(Boolean)
   let scope = "file"
   let risk = "conservative"
@@ -225,8 +293,8 @@ async function validateRestructure(
     return undefined
   }
   const projectRootTarget = scope === "project" && (targetText === "." || targetText === "project")
-  const resolvedTarget = resolve(context.location.directory, projectRootTarget ? "." : targetText)
-  const remainder = relative(context.location.directory, resolvedTarget)
+  const resolvedTarget = resolve(sessionRoot.directory, projectRootTarget ? "." : targetText)
+  const remainder = relative(sessionRoot.directory, resolvedTarget)
   if ((!remainder && !projectRootTarget) || remainder === ".." || remainder.startsWith(`..${pathSeparator()}`) || isAbsolute(remainder)) {
     await emitStatus(context, sessionID, "Restructure target must be a relative path inside the current project.")
     return undefined
@@ -236,7 +304,7 @@ async function validateRestructure(
     await emitStatus(context, sessionID, "Restructure target must exist and match the selected scope.")
     return undefined
   }
-  if (!(await isSafeProjectPath(context.location.directory, projectRootTarget ? "." : targetText))) {
+  if (!(await isSafeProjectPath(sessionRoot.directory, projectRootTarget ? "." : targetText))) {
     await emitStatus(context, sessionID, "Restructure target must remain inside the current project.")
     return undefined
   }
@@ -375,7 +443,8 @@ async function mutateStartPlanRun(context: Context, sessionID: string, plan: str
   const key = runStorageKey(context.location, sessionID)
   const current = await readPlanRun(context.storage, key)
   const resumable = current && (current.status === "active" || current.status === "paused") ? current.plan ?? "" : ""
-  const selected = await selectPlan(context.location.directory, plan || resumable)
+  const sessionRoot = await sessionLocation(context, sessionID)
+  const selected = await selectPlan(sessionRoot.directory, plan || resumable)
   if (!selected) {
     if (!plan && resumable) {
       await emitStatus(context, sessionID, "The stored plan run could not be resumed; specify one plan from .orchestrator/plans/.")

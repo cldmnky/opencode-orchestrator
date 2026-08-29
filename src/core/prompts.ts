@@ -46,6 +46,7 @@ export function buildCommandPrompt(name: string, argumentsText: string): string 
     handover: `Create a self-contained continuation handover for: ${args}. Read the current session context and VCS state, preserve user requirements accurately, redact secrets, separate established facts from assumptions, and include completed work, pending work, decisions, verification, and blockers.`,
     polish: `Polish the requested scope without changing behavior: ${args}. Inspect changed files, make only justified cleanup edits, verify each affected area, and request an independent aggregate review of the full change.`,
     "stress-plan": `Create a robust plan for: ${args}. Gather repository facts, draft the plan, obtain independent critiques covering correctness, scope, security, and feasibility, then synthesize one revised plan with an explicit phase order under .orchestrator/plans/.`,
+    cd: `Move the current session to a different directory: ${args}. Resolve a relative target from the session's current location, require an existing directory, reject flag-shaped or shell-metacharacter input, and keep the same session ID and history through the session move API. Do not run a shell or create a worktree for this.`,
   }
 
   return `${prompts[name] ?? `Execute ${name}: ${args}`}\n\n${common}`

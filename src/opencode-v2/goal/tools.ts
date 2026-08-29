@@ -4,6 +4,7 @@ import {
   goalStorageKey,
   newGoal,
   readGoal,
+  stableProjectID,
   stopStorageKey,
   withSessionLock,
   type LocationLike,
@@ -31,7 +32,7 @@ export function addGoalTools(
     options: { namespace: "orchestrator", permission: GOAL_TOOL_PERMISSION },
     execute: async (_input, tool) => {
       requireOrchestrator(tool.agent, options)
-      const goal = await readGoal(storage, goalStorageKey(location, tool.sessionID))
+      const goal = await readGoal(storage, await goalKey(storage, location, tool.sessionID))
       return result(goal ? JSON.stringify(goal) : "No active orchestration goal.")
     },
   })
@@ -47,8 +48,10 @@ export function addGoalTools(
         const objective = stringField(input, "objective")
         if (!objective) return result("objective must be a non-empty string")
         const goal = newGoal(tool.sessionID, objective)
-        await storage.set(goalStorageKey(location, tool.sessionID), goal)
-        await storage.remove(stopStorageKey(location, tool.sessionID))
+        const projectID = await stableProjectID(storage, location, tool.sessionID)
+        const stableLocation = stableLocationFor(projectID, location)
+        await storage.set(goalStorageKey(stableLocation, tool.sessionID), goal)
+        await storage.remove(stopStorageKey(stableLocation, tool.sessionID))
         return result(JSON.stringify(goal))
       })
     },
@@ -62,7 +65,9 @@ export function addGoalTools(
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, options)
       return withSessionLock(location, tool.sessionID, async () => {
-        const key = goalStorageKey(location, tool.sessionID)
+        const projectID = await stableProjectID(storage, location, tool.sessionID)
+        const stableLocation = stableLocationFor(projectID, location)
+        const key = goalStorageKey(stableLocation, tool.sessionID)
         const goal = await readGoal(storage, key)
         if (!goal) return result("No active orchestration goal.")
 
@@ -89,11 +94,22 @@ export function addGoalTools(
           delete updated.completionEvidence
         }
         await storage.set(key, updated)
-        if (status === "active") await storage.remove(stopStorageKey(location, tool.sessionID))
+        if (status === "active") await storage.remove(stopStorageKey(stableLocation, tool.sessionID))
         return result(JSON.stringify(updated))
       })
     },
   })
+}
+
+// Goal/run/halt keys stay anchored to the session's stable project so a
+// `/cd` move (which relocates the session anchor and the worktree index, but
+// never this state) cannot orphan the goal.
+async function goalKey(storage: StorageLike, location: LocationLike, sessionID: string): Promise<string> {
+  return goalStorageKey(stableLocationFor(await stableProjectID(storage, location, sessionID), location), sessionID)
+}
+
+function stableLocationFor(projectID: string, location: LocationLike): LocationLike {
+  return { ...location, project: { id: projectID } }
 }
 
 function requireOrchestrator(agent: string, options: OrchestratorOptions): void {

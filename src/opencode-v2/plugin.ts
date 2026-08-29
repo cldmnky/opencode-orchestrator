@@ -6,6 +6,10 @@ import { applyCommandTransform } from "./commands/index.js"
 import { runCommand } from "./commands/runtime.js"
 import { startGoalContinuation } from "./goal/continuation.js"
 import { addGoalTools } from "./goal/tools.js"
+import { addGhTools } from "./gh/tools.js"
+import { addWorktreeTools } from "./worktree/tools.js"
+import { startWorktreeEventSync } from "./worktree/events.js"
+import { SpawnRunner } from "./process/runner.js"
 import { DISTRIBUTION_NAME, RUNTIME_PLUGIN_ID } from "../core/package-identity.js"
 
 export const orchestratorPlugin = Plugin.define({
@@ -61,9 +65,12 @@ export const orchestratorPlugin = Plugin.define({
         console.warn(`${RUNTIME_PLUGIN_ID} omitted commands with unavailable roles: ${commandResult.unavailable.join(", ")}`)
       }
 
+      const runner = new SpawnRunner()
       registrations.push(
         await ctx.tool.transform((draft) => {
           addGoalTools(draft, ctx.storage, ctx.location, options)
+          addGhTools(draft, { storage: ctx.storage, runner, location: ctx.location, options })
+          addWorktreeTools(draft, { storage: ctx.storage, runner, location: ctx.location, options })
         }),
       )
 
@@ -78,6 +85,8 @@ export const orchestratorPlugin = Plugin.define({
               "Delegate with the child-task contract: Task, Expected outcome, Scope/file ownership, Must do, Must not do, Verification, and handoff.",
               "Parallel writes require an exact disjoint write scope from every child; separate established facts from assumptions.",
               "Use orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update for session goal state.",
+              "Move the current session with /cd; session ID and history are preserved and the durable anchor follows the session, while goal/plan/halt state stays keyed to the origin project.",
+              "Use orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_push, and orchestrator_worktree_cleanup only for the current session's managed worktree; delegated children get no atomic isolation.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
             ].join("\n"),
           })
@@ -91,6 +100,14 @@ export const orchestratorPlugin = Plugin.define({
           }
         }),
       )
+
+      // Anchor reconciliation for `session.moved` events (native moves and
+      // `/cd`): relocates the durable anchor to the new project, preserves the
+      // origin, and marks any tracked worktree owned by the moved session as
+      // moved.
+      registrations.push({
+        dispose: startWorktreeEventSync(ctx, options),
+      })
 
       const stopContinuation = options.goal.auto_continue ? startGoalContinuation(ctx, options) : undefined
       return async () => {

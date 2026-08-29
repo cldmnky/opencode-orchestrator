@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs"
+import { spawn } from "node:child_process"
 import { parse, type ParseError } from "jsonc-parser"
 import { COMMAND_NAMES, parseOptions } from "../core/config.js"
 import { requiredAgentIds } from "../core/roles.js"
@@ -17,6 +18,33 @@ export type DoctorReport = {
   agents: string[]
   configuredCommands: string[]
   runtimeCommands: string[]
+}
+
+/**
+ * Aggregates check statuses: any `fail` makes the report an error, otherwise
+ * any `warn` makes it a warning. Runtime checks are always `warn`-or-`pass`,
+ * so they can never escalate a report to `error`.
+ */
+export function mergeStatus(checks: readonly DoctorCheck[]): DoctorReport["status"] {
+  if (checks.some((check) => check.status === "fail")) return "error"
+  if (checks.some((check) => check.status === "warn")) return "warning"
+  return "ok"
+}
+
+export type DoctorProcessResult = { exitCode: number; stdout: string; stderr: string }
+
+/**
+ * Injectable local process probe for the advisory runtime checks. Tests inject
+ * fakes so no live git/gh is ever spawned; the CLI default is a soft spawn
+ * that never rejects.
+ */
+export type DoctorRunner = (cmd: string, args: readonly string[]) => Promise<DoctorProcessResult>
+
+export type RuntimeCheckOptions = {
+  /** Directory for local git/gh probes; defaults to `process.cwd()`. */
+  cwd?: string
+  /** Injectable process runner; defaults to `spawnSoft`. */
+  runner?: DoctorRunner
 }
 
 export function inspectConfig(path: string): DoctorReport {
@@ -129,12 +157,152 @@ export function inspectConfig(path: string): DoctorReport {
       "doctor inspects only static config presence and reports name-level guidance only; it cannot prove the host's merged MCP config, remote GitHub MCP reachability, live tool capability, authentication, or permission grants. Host-configured GitHub MCP is not a plugin feature — configure and verify it with the host (this plugin exposes no GitHub operation API). No headers, environment values, OAuth tokens, or other credentials are read or printed by doctor.",
   })
 
-  const status = checks.some((check) => check.status === "fail")
-    ? "error"
-    : checks.some((check) => check.status === "warn")
-      ? "warning"
-      : "ok"
+  const status = mergeStatus(checks)
   return { path, status, checks, agents: agentNames, configuredCommands, runtimeCommands }
+}
+
+/**
+ * Advisory local runtime checks (stage 5). These probe *this machine's* PATH
+ * and directory only — they can never prove what the remote server's session
+ * can do, so every check is `warn`-or-`pass` and the server-side
+ * `orchestrator_github_capabilities` probe plus worktree status tools remain
+ * authoritative. All `gh` output is suppressed: only exit codes and fixed
+ * wording are reported, so no headers, environment values, or tokens can leak
+ * into a report.
+ */
+export async function runtimeChecks(options: RuntimeCheckOptions = {}): Promise<DoctorCheck[]> {
+  const cwd = options.cwd ?? process.cwd()
+  const runner = options.runner ?? ((cmd, args) => spawnSoft(cmd, args, cwd))
+  const checks: DoctorCheck[] = []
+
+  const git = await runner("git", ["--version"])
+  if (git.exitCode !== 0) {
+    checks.push({
+      name: "git",
+      status: "warn",
+      message: "git is not available on this CLI's PATH; the server-side worktree tools are authoritative for the live session",
+    })
+  } else {
+    checks.push({ name: "git", status: "pass", message: `git available: ${firstLine(git.stdout)}` })
+  }
+
+  const gh = await runner("gh", ["--version"])
+  if (gh.exitCode !== 0) {
+    checks.push({
+      name: "gh",
+      status: "warn",
+      message: "gh is not available on this CLI's PATH; the server-side github tools are authoritative for the live session",
+    })
+  } else {
+    checks.push({ name: "gh", status: "pass", message: `gh available: ${firstLine(gh.stdout)}` })
+  }
+
+  if (gh.exitCode === 0) {
+    // Exit code only: `gh auth status` output can embed credential state, so
+    // it is never captured into the report.
+    const auth = await runner("gh", ["auth", "status"])
+    if (auth.exitCode === 0) {
+      checks.push({ name: "gh-auth", status: "pass", message: "gh auth status exited 0 (authenticated); command output is suppressed" })
+    } else {
+      checks.push({
+        name: "gh-auth",
+        status: "warn",
+        message: `gh auth status exited ${auth.exitCode}; gh may not be authenticated on this machine. Command output is suppressed — doctor prints no headers, environment values, or tokens. The server-side github_capabilities tool is authoritative for the live session.`,
+      })
+    }
+  }
+
+  if (gh.exitCode === 0 && checks.some((check) => check.name === "gh-auth" && check.status === "pass")) {
+    // Read-only probe of the repository behind the current directory.
+    const repo = await runner("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
+    if (repo.exitCode === 0) {
+      checks.push({ name: "gh-repo-view", status: "pass", message: `resolved ${firstLine(repo.stdout)} from ${cwd} via read-only gh repo view` })
+    } else {
+      checks.push({
+        name: "gh-repo-view",
+        status: "warn",
+        message: `could not resolve a GitHub repository from ${cwd} via read-only gh repo view; this is expected outside a repository checkout. Output is suppressed. The server-side github_capabilities tool is authoritative.`,
+      })
+    }
+  }
+
+  const worktree = await runner("git", ["worktree", "list", "--porcelain"])
+  if (worktree.exitCode === 0) {
+    checks.push({ name: "git-worktree-list", status: "pass", message: "local read-only git worktree list --porcelain succeeded" })
+  } else {
+    checks.push({
+      name: "git-worktree-list",
+      status: "warn",
+      message: `local git worktree list --porcelain failed (exit ${worktree.exitCode}); ${cwd} may not be a git repository. No output is printed. The server-side worktree tools are authoritative.`,
+    })
+  }
+
+  checks.push({
+    name: "runtime-authority",
+    status: "warn",
+    message:
+      "CLI doctor runtime checks are advisory: they probe this machine's PATH and directory, not the remote server's. The server-side github_capabilities tool and worktree status are authoritative for actual session availability, authentication, and permissions. No headers, environment values, OAuth tokens, or other credentials are read or printed by doctor.",
+  })
+
+  return checks
+}
+
+const RUNTIME_CHECK_TIMEOUT_MS = 10_000
+const RUNTIME_OUTPUT_CAP = 4096
+
+/**
+ * Soft spawn for advisory probes: never rejects. A spawn failure resolves with
+ * exit code -1, a timeout with exit code 124, and output is byte-capped per
+ * stream — users of the result decide what (if anything) is worth printing.
+ */
+function spawnSoft(cmd: string, args: readonly string[], cwd: string): Promise<DoctorProcessResult> {
+  return new Promise<DoctorProcessResult>((resolvePromise) => {
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const settle = (value: DoctorProcessResult): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolvePromise(value)
+    }
+
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(cmd, [...args], { shell: false, stdio: ["ignore", "pipe", "pipe"], cwd })
+    } catch (error) {
+      settle({ exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : String(error) })
+      return
+    }
+
+    let stdout = ""
+    let stderr = ""
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout = bounded(stdout, chunk)
+    })
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr = bounded(stderr, chunk)
+    })
+    child.on("error", () => settle({ exitCode: -1, stdout, stderr }))
+    child.on("close", (code) => settle({ exitCode: code ?? 1, stdout, stderr }))
+    timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL")
+      } catch {
+        // already gone
+      }
+      settle({ exitCode: 124, stdout, stderr })
+    }, RUNTIME_CHECK_TIMEOUT_MS)
+  })
+}
+
+function bounded(accumulated: string, chunk: Buffer): string {
+  if (accumulated.length >= RUNTIME_OUTPUT_CAP) return accumulated
+  return (accumulated + chunk.toString("utf8")).slice(0, RUNTIME_OUTPUT_CAP)
+}
+
+function firstLine(value: string): string {
+  const line = value.split(/\r?\n/, 1)[0].trim()
+  return line.length > 120 ? `${line.slice(0, 117)}...` : line
 }
 
 /**

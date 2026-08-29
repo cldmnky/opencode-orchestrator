@@ -1,8 +1,14 @@
 import type { OrchestratorOptions } from "../core/config.js"
 import {
+  GH_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
+  WORKTREE_TOOL_PERMISSION,
+  CD_TOOL_PERMISSION,
+  SESSION_MOVE_PERMISSION,
   goalToolPermissionRule,
   hasExactPermissionRule,
+  orchestratorOnlyPermissionRules,
+  type PermissionEffect,
   type PermissionRuleLike,
 } from "../core/permissions.js"
 import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
@@ -66,14 +72,15 @@ export function applyAgentTransform(draft: AgentDraftLike, options: Orchestrator
     draft.update(options.orchestrator, (agent) => {
       agent.description = appendOnce(agent.description, "Coordinates specialized agents and verifies their work.")
       agent.system = appendOnce(agent.system, buildOrchestratorSystem(options))
-      // The orchestrator may call the goal tools. Preserved agents that
-      // predate the shared permission action need the allow rule appended;
-      // an exact user rule for the action is never overridden. When the agent
-      // has no `permissions` field at all, V2 would normally fall back to a
-      // deny-all; we must seed that explicitly so the appended goal rule does
-      // not widen every other action. An explicit array — even `[]` — is the
+      // The orchestrator may call the goal tools and the orchestrator-only
+      // feature tools (github/worktree). Preserved agents that predate the
+      // shared permission actions need the allow rules appended; an exact user
+      // rule for an action is never overridden. When the agent has no
+      // `permissions` field at all, V2 would normally fall back to a
+      // deny-all; we must seed that explicitly so the appended rules do not
+      // widen every other action. An explicit array — even `[]` — is the
       // user's policy and is preserved as-is.
-      agent.permissions = appendGoalToolPermission(agent.permissions, "allow")
+      agent.permissions = appendFeaturePermissions(agent.permissions, "allow")
     })
   }
 
@@ -83,22 +90,23 @@ export function applyAgentTransform(draft: AgentDraftLike, options: Orchestrator
     draft.update(id, (agent) => {
       agent.description = appendOnce(agent.description, roleDescription(role))
       agent.system = appendOnce(agent.system, buildWorkerSystem(role))
-      // Fail closed by default: workers get goal tools denied unless an exact
-      // user-authored rule for the action already exists. The installer appends
-      // the deny rule only when no exact user rule is present, so an explicit
-      // user allow/ask remains authoritative. The same deny-all seeding applies
-      // so the deny target is not the only rule in a sparse array that would
+      // Fail closed by default: workers get the goal tools and the
+      // orchestrator-only feature tools denied unless an exact user-authored
+      // rule for the action already exists. The installer appends the deny
+      // rules only when no exact user rule is present, so an explicit user
+      // allow/ask remains authoritative. The same deny-all seeding applies so
+      // the deny targets are not the only rules in a sparse array that would
       // widen every other action.
-      agent.permissions = appendGoalToolPermission(agent.permissions, "deny")
+      agent.permissions = appendFeaturePermissions(agent.permissions, "deny")
     })
   }
 
   return missing
 }
 
-function appendGoalToolPermission(
+function appendFeaturePermissions(
   permissions: PermissionRuleLike[] | undefined,
-  effect: "allow" | "deny",
+  effect: PermissionEffect,
 ): PermissionRuleLike[] {
   // Pinned V2 permission semantics: with an explicit ruleset — even an empty
   // `[]` — a resource not matched by any rule defaults to effect `ask`, and
@@ -106,16 +114,22 @@ function appendGoalToolPermission(
   // `missingAgentPermissions` deny-all fallback. An explicit existing array —
   // including `[]` — is the user's policy and is preserved verbatim. So when
   // the field is missing we seed an explicit deny-all before appending the
-  // goal rule; otherwise the sparse one-rule array we would write widens every
-  // other action. When an existing array is present, leave it untouched and
-  // append the goal rule only when no exact user rule for that action already
-  // exists.
+  // goal and feature rules; otherwise the sparse one-rule array we would write
+  // widens every other action. When an existing array is present, leave it
+  // untouched and append each rule only when no exact user rule for that
+  // action already exists.
   if (permissions === undefined) {
-    return [{ action: "*", resource: "*", effect: "deny" }, goalToolPermissionRule(effect)]
+    return [
+      { action: "*", resource: "*", effect: "deny" },
+      goalToolPermissionRule(effect),
+      ...orchestratorOnlyPermissionRules(effect),
+    ]
   }
   const existing = [...permissions]
-  if (hasExactPermissionRule(existing, GOAL_TOOL_PERMISSION)) return existing
-  existing.push(goalToolPermissionRule(effect))
+  if (!hasExactPermissionRule(existing, GOAL_TOOL_PERMISSION)) existing.push(goalToolPermissionRule(effect))
+  for (const permission of orchestratorOnlyPermissionRules(effect)) {
+    if (!hasExactPermissionRule(existing, permission.action)) existing.push(permission)
+  }
   return existing
 }
 

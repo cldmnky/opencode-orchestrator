@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { inspectConfig } from "../../src/cli/doctor.js"
+import { inspectConfig, mergeStatus, runtimeChecks, type DoctorRunner } from "../../src/cli/doctor.js"
 import { configRelativePluginReference, installConfig, isLocalPluginReference, pluginEntryForRuntimeFile } from "../../src/cli/install.js"
 import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../../src/core/package-identity.js"
 import { GOAL_TOOL_PERMISSION } from "../../src/core/permissions.js"
@@ -446,6 +446,99 @@ describe("installer", () => {
     expect(rules.filter((rule) => rule.action === GOAL_TOOL_PERMISSION)).toEqual([
       { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "ask" },
     ])
+  })
+})
+
+describe("doctor runtime checks", () => {
+  // Healthy local environment: git and gh present, gh authenticated, a
+  // repository resolvable from cwd, and a valid worktree listing. Everything
+  // flows through the injected runner — no live git/gh is ever spawned.
+  const happyRunner: DoctorRunner = async (cmd, args) => {
+    if (cmd === "git" && args[0] === "--version") return { exitCode: 0, stdout: "git version 2.45.0\n", stderr: "" }
+    if (cmd === "gh" && args[0] === "--version") return { exitCode: 0, stdout: "gh version 2.55.0 (2024-09-11)\n", stderr: "" }
+    if (cmd === "gh" && args[0] === "auth") return { exitCode: 0, stdout: "", stderr: "" }
+    if (cmd === "gh" && args[0] === "repo") return { exitCode: 0, stdout: "acme/widgets\n", stderr: "" }
+    if (cmd === "git" && args[0] === "worktree") return { exitCode: 0, stdout: "worktree /main\n", stderr: "" }
+    return { exitCode: 0, stdout: "", stderr: "" }
+  }
+
+  test("passes when local git and gh look healthy, using only the mocked runner", async () => {
+    const calls: string[][] = []
+    const runner: DoctorRunner = async (cmd, args) => {
+      calls.push([cmd, ...args])
+      return happyRunner(cmd, args)
+    }
+
+    const checks = await runtimeChecks({ cwd: "/tmp/project", runner })
+
+    const byName = new Map(checks.map((check) => [check.name, check]))
+    expect(byName.get("git")?.status).toBe("pass")
+    expect(byName.get("gh")?.status).toBe("pass")
+    expect(byName.get("gh-auth")?.status).toBe("pass")
+    expect(byName.get("gh-repo-view")?.status).toBe("pass")
+    expect(byName.get("git-worktree-list")?.status).toBe("pass")
+    expect(checks.some((check) => check.status === "fail")).toBe(false)
+    expect(calls).toContainEqual(["git", "--version"])
+    expect(calls).toContainEqual(["gh", "auth", "status"])
+    expect(calls).toContainEqual(["git", "worktree", "list", "--porcelain"])
+  })
+
+  test("warns (never fails) when git or gh are missing and skips cascading gh checks", async () => {
+    const runner: DoctorRunner = async (cmd, args) => {
+      if (cmd === "git" && args[0] === "--version") return { exitCode: -1, stdout: "", stderr: "spawn git ENOENT" }
+      if (cmd === "gh" && args[0] === "--version") return { exitCode: -1, stdout: "", stderr: "spawn gh ENOENT" }
+      if (cmd === "git" && args[0] === "worktree") return { exitCode: -1, stdout: "", stderr: "not a git repository" }
+      return happyRunner(cmd, args)
+    }
+
+    const checks = await runtimeChecks({ cwd: "/tmp/project", runner })
+
+    const byName = new Map(checks.map((check) => [check.name, check]))
+    expect(byName.get("git")?.status).toBe("warn")
+    expect(byName.get("gh")?.status).toBe("warn")
+    expect(byName.get("git-worktree-list")?.status).toBe("warn")
+    // No cascading auth/repo checks when the gh binary is absent.
+    expect(byName.get("gh-auth")).toBeUndefined()
+    expect(byName.get("gh-repo-view")).toBeUndefined()
+    expect(checks.some((check) => check.status === "fail")).toBe(false)
+
+    const note = byName.get("runtime-authority")
+    expect(note?.status).toBe("warn")
+    expect(note?.message).toContain("authoritative")
+    expect(note?.message).toContain("No headers, environment values, OAuth tokens")
+  })
+
+  test("reports gh auth by exit code only and never leaks its output", async () => {
+    const runner: DoctorRunner = async (cmd, args) => {
+      if (cmd === "gh" && args[0] === "auth") {
+        return { exitCode: 1, stdout: "gh auth status: not logged in\npat_github_secret_value would never be printed", stderr: "" }
+      }
+      return happyRunner(cmd, args)
+    }
+
+    const checks = await runtimeChecks({ cwd: "/tmp/project", runner })
+
+    const auth = checks.find((check) => check.name === "gh-auth")
+    expect(auth?.status).toBe("warn")
+    expect(auth?.message).toContain("exited 1")
+    expect(auth?.message).not.toContain("not logged in")
+    expect(auth?.message).not.toContain("pat_github_secret")
+    // The repo probe is skipped when authentication did not pass.
+    expect(checks.find((check) => check.name === "gh-repo-view")).toBeUndefined()
+  })
+
+  test("runtime checks never escalate a static config failure to a different status", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-doctor-runtime-"))
+    const path = join(directory, "opencode.jsonc")
+    writeFileSync(path, JSON.stringify({ plugins: ["opencode-orchestrator"], agents: {} }))
+
+    const report = inspectConfig(path)
+    expect(report.status).toBe("error")
+
+    const runtime = await runtimeChecks({ cwd: directory, runner: happyRunner })
+    const checks = [...report.checks, ...runtime]
+    expect(mergeStatus(checks)).toBe("error")
+    expect(runtime.some((check) => check.status === "fail")).toBe(false)
   })
 })
 

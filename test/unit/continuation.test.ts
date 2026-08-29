@@ -370,17 +370,76 @@ describe("goal continuation", () => {
     expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 2))
     stop()
   })
+
+  test("continues a goal keyed to the stable origin project after a move", async () => {
+    // After /cd the anchor records the origin project, and goal/run/halt state
+    // stays keyed to that origin: admission must find and reserve the goal
+    // under the origin-project key, not abandon it after the move.
+    const location = { directory: "/workspace", project: { id: "project" } }
+    const originKey = goalStorageKey({ ...location, project: { id: "origin" } }, "session")
+    const values = new Map<string, unknown>([
+      [originKey, newGoal("session", "ship the change", 1)],
+      // Anchor at the current project records the stable origin.
+      ["session/v1/project/session", {
+        version: 1,
+        sessionID: "session",
+        originProjectID: "origin",
+        originDirectory: "/origin",
+        currentProjectID: "project",
+        currentDirectory: "/workspace",
+        updatedAt: 1,
+      }],
+    ])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-origin", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 1)
+    expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 1))
+    // The reservation advanced the origin-keyed record, not a project-keyed one.
+    expect((values.get(originKey) as { continuationCount: number }).continuationCount).toBe(1)
+    expect(values.has(goalStorageKey(location, "session"))).toBe(false)
+    stop()
+  })
+
+  test("continues a session whose idle events carry the moved directory", async () => {
+    // A /cd move changes the session directory but keeps the workspace; idle
+    // events for the moved session must still be admitted.
+    const location = { directory: "/workspace", project: { id: "project-here" }, workspaceID: "ws-1" }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({
+      id: "idle-moved",
+      type: "session.idle",
+      data: { sessionID: "session" },
+      location: { directory: "/moved/elsewhere", workspaceID: "ws-1" },
+    })
+    await waitFor(() => prompts.length === 1)
+    expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 1))
+    stop()
+  })
 })
 
 function fixture(
-  location: { directory: string; project: { id: string } },
+  location: { directory: string; project: { id: string }; workspaceID?: string },
   values: Map<string, unknown>,
   prompts: Array<{ text: string }>,
   stream: ReturnType<typeof createStream>,
   storageOverride?: StorageLike,
 ): {
   event: { subscribe: () => ReturnType<typeof createStream> }
-  location: { directory: string; project: { id: string } }
+  location: { directory: string; project: { id: string }; workspaceID?: string }
   storage: StorageLike
   session: {
     get(): Promise<unknown>

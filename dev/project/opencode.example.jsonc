@@ -12,7 +12,16 @@
           "review": "reviewer"
         },
         "max_parallel": 4,
-        "strict_agents": true
+        "strict_agents": true,
+        "github": {
+          "enabled": false,
+          "allow_mutations": false
+        },
+        "worktree": {
+          "enabled": false,
+          "allow_mutations": false,
+          "root": null
+        }
       }
     }
   ],

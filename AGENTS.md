@@ -8,6 +8,7 @@
 - Put a CLI-only plugin in global `cli.json`, not project `opencode.json(c)`; this is the form that remains active when the TUI connects to a remote server. Add the OpenTUI/Solid peer dependencies only when rendering JSX.
 - In a CLI plugin, use `context.client` for the connected server and `context.data.on`/`listen` for typed events. Return cleanup functions for subscriptions, slots, routes, renderers, and other owned resources.
 - Treat `https://opencode.ai/v2/openapi.json` as the HTTP contract. For local inspection use `opencode2 api <method> <path>` so service discovery and authentication match the TUI; do not construct a separate unauthenticated localhost client.
+- The GitHub (via `gh`), git worktree, and `/cd` tool families are orchestrator-only and disabled by default (`github.enabled`, `worktree.enabled`). `src/cli/doctor.ts` adds advisory local runtime checks (git/gh presence, `gh auth status` exit-code-only, read-only `gh repo view`, `git worktree list --porcelain`); they never fail the report, never print `gh` output, and the server-side `orchestrator_github_capabilities` probe is authoritative for live session PATH/auth/permissions.
 
 ## Layout
 
@@ -26,7 +27,7 @@ bun test
 bun run build
 ```
 
-- Run one test file with `bun test test/unit/core.test.ts` or `bun test test/unit/installer.test.ts`; focus a test by name with `bun test -t 'is idempotent'`.
+- Run one test file with `bun test test/unit/core.test.ts` or `bun test test/unit/installer.test.ts`; focus a test by name with `bun test -t 'is idempotent'`. `test/unit/installer.test.ts` also covers `doctor`'s runtime checks with an injected fake runner — tests never invoke live git/gh.
 - There is no configured lint or formatter command. Do not claim lint verification.
 - Use `bun run dev:setup && bun run dev:v2` for an isolated `opencode2 --standalone` harness. It redirects XDG config/data/cache under `dev/state` and does not exercise global config or the shared service.
 

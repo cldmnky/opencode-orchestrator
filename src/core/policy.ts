@@ -56,10 +56,16 @@ export const WORKTREE_BOUNDARY_GUIDANCE = [
   "Retain native role delegation; safe delegation is allowed whenever isolation is not required.",
 ].join("\n")
 
+export const MANAGED_WORKTREE_GUIDANCE = [
+  "Managed worktree tools (orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_push, orchestrator_worktree_cleanup) create and track one git worktree owned by the current session, with durable records and git-verified results; /cd moves the current session while preserving its ID and history.",
+  "That managed ownership covers the current session only; it is not atomic child isolation, and parallel children still share the parent filesystem.",
+].join("\n")
+
 export const REMOTE_ORCHESTRATION_GUIDANCE = [
   TOOL_AVAILABILITY_GUIDANCE,
   SECRET_HANDLING_GUIDANCE,
   WORKTREE_BOUNDARY_GUIDANCE,
+  MANAGED_WORKTREE_GUIDANCE,
 ].join("\n")
 
 export function orchestrationRules(maxParallel: number, requireReview: boolean): string {
@@ -75,6 +81,7 @@ export function orchestrationRules(maxParallel: number, requireReview: boolean):
     TOOL_AVAILABILITY_GUIDANCE,
     SECRET_HANDLING_GUIDANCE,
     WORKTREE_BOUNDARY_GUIDANCE,
+    MANAGED_WORKTREE_GUIDANCE,
     "Start independent read-only work in parallel/background mode.",
     "Record the original branch, HEAD, changed files, commits, and verification in the task ledger when those facts are available.",
     "Do not claim automated GitHub issue or pull request coordination unless the user explicitly performs and verifies those steps.",

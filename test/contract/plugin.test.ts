@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import type { Context } from "@opencode-ai/plugin/promise/plugin"
-import { GOAL_TOOL_PERMISSION } from "../../src/core/permissions.js"
+import {
+  GH_TOOL_PERMISSION,
+  GOAL_TOOL_PERMISSION,
+  WORKTREE_TOOL_PERMISSION,
+} from "../../src/core/permissions.js"
 import { orchestratorPlugin } from "../../src/index.js"
 
 describe("server plugin contract", () => {
@@ -38,6 +42,7 @@ describe("server plugin contract", () => {
     const switches: string[] = []
     const prompts: any[] = []
     let contextHook: ((event: any) => void) | undefined
+    const stream = eventStream()
 
     const registration = (name: string) => ({
       dispose: async () => {
@@ -54,7 +59,11 @@ describe("server plugin contract", () => {
     }
     const storage = new Map<string, unknown>()
     const context = {
-      options: { goal: { auto_continue: false } },
+      options: {
+        goal: { auto_continue: false },
+        github: { enabled: true, allow_mutations: true },
+        worktree: { enabled: true, allow_mutations: true, root: "/srv/worktrees" },
+      },
       location: { directory: "/workspace", project: { id: "project" } },
       agent: {
         list: async () => [...agents.values()],
@@ -77,6 +86,9 @@ describe("server plugin contract", () => {
           return registration("tool")
         },
         hook: async () => registration("hook"),
+      },
+      event: {
+        subscribe: () => stream,
       },
       storage: {
         get: async (key: string) => storage.get(key),
@@ -105,17 +117,44 @@ describe("server plugin contract", () => {
       "handover",
       "polish",
       "stress-plan",
+      "cd",
     ])
-    expect(tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)).toEqual([
+    const commandNames = new Set(commands.map((command) => command.name))
+    expect(commandNames.has("cd")).toBe(true)
+
+    // The tool transform registers the goal family plus the orchestrator-only
+    // github and worktree families with their shared permission actions.
+    const allToolNames = tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)
+    expect(allToolNames).toEqual([
       "orchestrator_goal_get",
       "orchestrator_goal_set",
       "orchestrator_goal_update",
+      "orchestrator_github_capabilities",
+      "orchestrator_github_repo_view",
+      "orchestrator_github_issue_view",
+      "orchestrator_github_issue_list",
+      "orchestrator_github_issue_create",
+      "orchestrator_github_pr_view",
+      "orchestrator_github_pr_list",
+      "orchestrator_github_pr_create",
+      "orchestrator_worktree_list",
+      "orchestrator_worktree_create",
+      "orchestrator_worktree_status",
+      "orchestrator_worktree_push",
+      "orchestrator_worktree_cleanup",
     ])
+    expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBeGreaterThanOrEqual(8)
+    expect(tools.filter((tool) => tool.options?.permission === WORKTREE_TOOL_PERMISSION).length).toBe(5)
+    const goalTools = tools.filter((tool) => tool.options?.permission === GOAL_TOOL_PERMISSION)
+    expect(goalTools).toHaveLength(3)
     // Every registered goal tool must declare the shared permission action so
     // a single rule grants or revokes the whole family.
-    expect(tools).toHaveLength(3)
-    for (const tool of tools) {
+    for (const tool of goalTools) {
       expect(tool.options?.permission).toBe(GOAL_TOOL_PERMISSION)
+    }
+    // The orchestrator-only feature families share one permission action each.
+    for (const tool of tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION)) {
+      expect(tool.options?.namespace).toBe("orchestrator")
     }
     expect(agents.get("orchestrator")?.system).toContain("conductor")
     expect(agents.get("orchestrator")?.system).toContain("Expected outcome")
@@ -129,6 +168,8 @@ describe("server plugin contract", () => {
     expect(contextText.join("\n")).toContain("orchestrator_goal_get")
     expect(contextText.join("\n")).toContain("orchestrator_goal_set")
     expect(contextText.join("\n")).toContain("orchestrator_goal_update")
+    expect(contextText.join("\n")).toContain("/cd")
+    expect(contextText.join("\n")).toContain("orchestrator_worktree_create")
     expect(contextText.join("\n")).toContain("exact disjoint write scope")
     expect(contextText.join("\n")).not.toMatch(/\bgoal_(get|set|update)\b/)
 
@@ -139,5 +180,34 @@ describe("server plugin contract", () => {
 
     await cleanup?.()
     expect(disposed).toEqual(["hook", "session-hook", "tool", "command", "agent"])
+    // The worktree event sync registered its own real dispose, which closed
+    // the subscribed event stream.
+    expect(stream.closed).toBe(true)
   })
 })
+
+// Minimal async event stream: holds `next()` until `return()` resolves it with
+// `done`, so the plugin's event subscriptions can be torn down without a live
+// server.
+function eventStream(): AsyncIterable<any> & { closed: boolean } {
+  const waiters: Array<(result: IteratorResult<unknown>) => void> = []
+  let closed = false
+  const iterator = {
+    next: () => {
+      if (closed) return Promise.resolve({ done: true, value: undefined })
+      return new Promise<IteratorResult<unknown>>((resolve) => waiters.push(resolve))
+    },
+    return: async () => {
+      closed = true
+      for (const resolve of waiters.splice(0)) resolve({ done: true, value: undefined })
+      return { done: true, value: undefined }
+    },
+    [Symbol.asyncIterator]() {
+      return this
+    },
+    get closed() {
+      return closed
+    },
+  }
+  return iterator
+}

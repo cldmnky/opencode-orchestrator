@@ -4,6 +4,7 @@ import type { Info as ToolInfo } from "@opencode-ai/plugin/promise/tool"
 import { createRedactor } from "../process/redact.js"
 import type { ProcessRunner } from "../process/runner.js"
 import {
+  canonicalPath,
   gitLsRemote,
   gitPush,
   gitStatus,
@@ -55,6 +56,12 @@ export type WorktreeToolsDeps = {
   options: OrchestratorOptions
   secrets?: readonly string[]
   pathExists?: (directory: string) => Promise<boolean>
+  /**
+   * Optional canonical path resolver shared with the git client. Defaults to
+   * realpath with nearest-existing-ancestor resolution so `/tmp` vs
+   * `/private/tmp` aliases of the same directory compare equal.
+   */
+  realpath?: (directory: string) => Promise<string | undefined>
 }
 
 export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps): void {
@@ -63,8 +70,12 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
   const git: GitContext = {
     runner: deps.runner,
     pathExists: deps.pathExists,
+    realpath: deps.realpath,
     redact: createRedactor(deps.secrets),
   }
+
+  /** Canonicalize through the shared resolver, falling back to the fs default. */
+  const canon = (directory: string): Promise<string> => canonicalPath(git.realpath, directory)
 
   draft.add({
     name: "worktree_list",
@@ -105,19 +116,24 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
       if (root === null) {
         return result("worktree.root must be configured to create worktrees")
       }
-      if (!isPathInside(directory, root)) {
+      // Containment compares canonically so a symlink alias of the configured
+      // root (e.g. `/tmp` vs `/private/tmp` on macOS) still accepts the target.
+      if (!isPathInside(await canon(directory), await canon(root))) {
         return result(`worktree directory must be inside worktree.root (${root})`)
       }
 
       try {
         const addResult = await gitWorktreeAdd(git, { repoRoot, branch, directory, base })
+        // Persist the canonical forms so later status/cleanup/ownership
+        // comparisons match `git worktree list` output regardless of aliases.
+        const [canonicalRepoRoot, canonicalDir] = await Promise.all([canon(repoRoot), canon(directory)])
         const record: WorktreeRecord = {
           ...newWorktree({
             owner: tool.sessionID,
             sessionID: tool.sessionID,
             originProjectID: deps.location.project.id,
-            repoRoot,
-            dir: directory,
+            repoRoot: canonicalRepoRoot,
+            dir: canonicalDir,
             branch,
             base,
           }),
@@ -152,15 +168,29 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
       try {
         const entries = await gitWorktreeList(git, repoRoot)
         const dirtyText = await gitStatus(git, record?.dir ?? repoRoot)
-        const present = record ? entries.some((entry) => entry.directory === record.dir) : true
+        // Presence is compared canonically so a record stored under one alias
+        // (e.g. `/private/tmp/...`) matches porcelain output under another
+        // (`/tmp/...`).
+        let present = true
+        if (record) {
+          const canonicalRecordDir = await canon(record.dir)
+          present = false
+          for (const entry of entries) {
+            if ((await canon(entry.directory)) === canonicalRecordDir) {
+              present = true
+              break
+            }
+          }
+        }
         let status: WorktreeRecord["status"] = record?.status ?? "pending"
         if (!present) status = "orphaned"
         else if (dirtyText.length > 0) status = "dirty"
         else if (record) status = "ready"
+        let current = record
         if (record && status !== record.status) {
-          await writeWorktree(deps.storage, { ...record, status })
+          current = await writeWorktree(deps.storage, { ...record, status })
         }
-        return result(JSON.stringify({ record, status, dirty: dirtyText.length > 0, worktrees: entries }))
+        return result(JSON.stringify({ record: current, status, dirty: dirtyText.length > 0, worktrees: entries }))
       } catch (error) {
         return result(`worktree status failed: ${message(error)}`)
       }
@@ -214,18 +244,23 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
       if (!repoRoot || !directory) return result("repoRoot and directory are required")
 
       try {
-        const otherOwner = (await listWorktrees(deps.storage)).find(
-          (candidate) =>
-            candidate.dir === directory &&
-            candidate.sessionID !== tool.sessionID,
-        )
+        // Ownership is compared canonically: two aliases of the same directory
+        // belong to the same session.
+        const canonicalDirectory = await canon(directory)
+        let otherOwner: WorktreeRecord | undefined
+        for (const candidate of await listWorktrees(deps.storage)) {
+          if ((await canon(candidate.dir)) === canonicalDirectory && candidate.sessionID !== tool.sessionID) {
+            otherOwner = candidate
+            break
+          }
+        }
         if (otherOwner) {
           return result(`worktree cleanup refused: worktree is owned by session ${otherOwner.sessionID}`)
         }
 
         const entries = await gitWorktreeList(git, repoRoot)
         const main = entries[0]
-        if (main && main.directory === directory) {
+        if (main && (await canon(main.directory)) === canonicalDirectory) {
           return result("worktree cleanup refused: cannot remove the main worktree")
         }
         const dirty = await gitStatus(git, directory)

@@ -60,7 +60,36 @@ describe("runtime commands", () => {
     expect(fixture.prompts).toHaveLength(0)
     expect(fixture.statuses[0]).toContain("keep the API stable")
     expect(fixture.statuses[0]).toContain("src/index.ts")
-    expect(fixture.statuses[0]).toContain("API_KEY=[redacted]")
+    expect(fixture.statuses[0]).toContain("API_KEY: [redacted]")
+    expect(fixture.statuses[0]).not.toContain("hidden")
+  })
+
+  test("redacts central known secret shapes across every handover section", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    const fixture = runtimeFixture(directory)
+    // Synthetic fake shapes only: API key, bearer credential, GitHub token,
+    // Slack token, and a credential query parameter spread over history,
+    // assistant, shell, compaction, and VCS diff content.
+    ;(fixture.context as any).session.context = async () => [
+      { type: "user", text: "rotate the API_KEY=sk_test_12345 now" },
+      { type: "assistant", content: [{ type: "text", text: "Authorization: Bearer faketoken12345 recorded" }] },
+      { type: "shell", output: { output: "pushed ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAK for review" } },
+      { type: "compaction", summary: "slack token xoxb-FAKE-TOKEN-FOR-TEST-EXAMPLE rotated" },
+    ]
+    ;(fixture.context as any).vcs.status = async () => [{ file: "src/client.ts", status: "modified" }]
+    ;(fixture.context as any).vcs.diff = async () => [
+      { file: "src/client.ts", patch: "+curl 'https://example.com/cb?access_token=secret123&state=ok'" },
+    ]
+
+    await runCommand(fixture.context, parseOptions({}), "handover", invocation("ship the release"), undefined)
+
+    const output = fixture.statuses[0]
+    expect(output).toContain("[redacted]")
+    expect(output).not.toContain("sk_test_12345")
+    expect(output).not.toContain("faketoken12345")
+    expect(output).not.toContain("ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAK")
+    expect(output).not.toContain("xoxb-FAKE-TOKEN-FOR-TEST-EXAMPLE")
+    expect(output).not.toContain("secret123")
   })
 
   test("halts a stored plan run without deleting it", async () => {

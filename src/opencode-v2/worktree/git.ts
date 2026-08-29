@@ -1,16 +1,29 @@
 import path from "node:path"
+import { realpath as fsRealpath } from "node:fs/promises"
 import type { ProcessResult, ProcessRunner } from "../process/runner.js"
 
 /**
  * Tracked git worktree lifecycle client (stage 2).
  *
- * Every operation goes through an injected `ProcessRunner` (shell off, 1 MiB
- * output bound, 30s default timeout) so tests never touch the filesystem or
- * spawn real git. Path safety is enforced caller-side, before any runner
- * call: invalid branches, bare or linked repos, existing worktree paths,
- * existing local branches, and directories inside the main checkout are all
- * rejected up front. Creates are verified afterwards via
- * `git worktree list --porcelain` and `git rev-parse`.
+ * Every git invocation goes through an injected `ProcessRunner` (shell off,
+ * 1 MiB output bound, 30s default timeout). Path safety is enforced
+ * caller-side, before any runner call: invalid branches, bare or linked
+ * repos, existing worktree paths, existing local branches, and directories
+ * inside the main checkout are all rejected up front. Creates are verified
+ * afterwards via `git worktree list --porcelain` and `git rev-parse`.
+ *
+ * Path *comparisons* (overlap detection, post-add verification, main-checkout
+ * identity) are canonical: each side is resolved through an optional injected
+ * `realpath` resolver, defaulting to realpath with nearest-existing-ancestor
+ * fallback for targets that do not exist yet. That keeps `/tmp/...` and
+ * `/private/tmp/...` aliases of the same directory comparable. The resolver
+ * probes the filesystem read-only; tests inject fakes or use throwaway temp
+ * fixtures. Lexical input safety (absolute, NUL-free, branch format, inside
+ * the main checkout) is intentionally preserved on the raw inputs.
+ *
+ * A nonzero `git worktree add` exits immediately: the (already redacted)
+ * stderr/stdout is raised, and no post-add list/ref verification or ready
+ * state is produced.
  *
  * All runner invocations funnel through a fixed allowlist of git subcommand
  * families (`assertGitFamilyAllowed`), so an untrusted field can never smuggle
@@ -37,7 +50,16 @@ export type GitContext = {
   pathExists?: (directory: string) => Promise<boolean>
   /** Optional redactor applied to every returned/raised text. */
   redact?: (text: string) => string
+  /**
+   * Optional canonical path resolver. `undefined` from a resolver (or an
+   * absent resolver) falls back to realpath with nearest-existing-ancestor
+   * resolution, so not-yet-created create targets stay comparable.
+   */
+  realpath?: (directory: string) => Promise<string | undefined>
 }
+
+/** Injected canonical path resolver used by `canonicalPath`. */
+export type RealpathResolver = (directory: string) => Promise<string | undefined>
 
 export type WorktreeEntry = {
   directory: string
@@ -132,10 +154,59 @@ export function isPathInside(child: string, parent: string): boolean {
 }
 
 /**
+ * Canonicalize an absolute path with nearest-existing-ancestor resolution:
+ * `realpath` succeeds when the path exists; otherwise walk up to the closest
+ * existing ancestor, canonicalize it, and re-append the missing tail. A path
+ * under a plain (non-symlinked) prefix canonicalizes to its lexical form, so
+ * synthetic paths in tests resolve to themselves. `realpath` failures other
+ * than missing paths degrade to the lexical form too.
+ */
+export async function resolveRealpath(target: string): Promise<string> {
+  const absolute = path.resolve(target)
+  try {
+    return await fsRealpath(absolute)
+  } catch {
+    // Fall through to the ancestor walk.
+  }
+  let current = absolute
+  const tail: string[] = []
+  for (;;) {
+    const parent = path.dirname(current)
+    if (parent === current) {
+      // Nothing above the root exists; the lexical form is all we can know.
+      return absolute
+    }
+    try {
+      const canonicalAncestor = await fsRealpath(current)
+      return tail.length === 0 ? canonicalAncestor : path.resolve(canonicalAncestor, ...tail.reverse())
+    } catch {
+      tail.push(path.basename(current))
+      current = parent
+    }
+  }
+}
+
+/**
+ * Canonicalize `directory` using the injected resolver when provided;
+ * otherwise use realpath with nearest-existing-ancestor fallback. A resolver
+ * returning `undefined` also falls back to the default resolution.
+ */
+export async function canonicalPath(resolver: RealpathResolver | undefined, directory: string): Promise<string> {
+  const resolved = path.resolve(directory)
+  if (resolver) {
+    const canonical = await resolver(resolved)
+    if (canonical !== undefined) return canonical
+  }
+  return resolveRealpath(resolved)
+}
+
+/**
  * Create a linked worktree. Safety checks run strictly before the add:
  * bare/linked repo, existing local branch, existing path, and overlap with an
  * existing worktree are all rejected; afterwards the create is verified via
- * `worktree list --porcelain` and `rev-parse` of the new branch.
+ * `worktree list --porcelain` and `rev-parse` of the new branch. Path
+ * comparisons are canonical; a nonzero `git worktree add` raises immediately
+ * with the redacted output and produces no verification or ready state.
  */
 export async function gitWorktreeAdd(ctx: GitContext, input: WorktreeAddInput): Promise<WorktreeAddResult> {
   const validation = validateWorktreeCreate(input)
@@ -149,9 +220,13 @@ export async function gitWorktreeAdd(ctx: GitContext, input: WorktreeAddInput): 
   if (gitDir === undefined) throw new Error("worktree create rejected: not a git repository")
   // `--git-dir` may be relative to the runner cwd (repoRoot) with cwd-bound git
   // (e.g. `.git` on a normal main checkout); resolve it against repoRoot, never
-  // against the server process cwd, before comparing to the main checkout.
+  // against the server process cwd, before comparing to the main checkout. The
+  // comparison is canonical so a symlink alias of repoRoot (e.g. `/tmp` vs
+  // `/private/tmp` on macOS) still matches the same main checkout.
   const resolvedGitDir = path.isAbsolute(gitDir) ? path.resolve(gitDir) : path.resolve(input.repoRoot, gitDir)
-  if (resolvedGitDir !== path.resolve(input.repoRoot, ".git")) {
+  const canonicalGitDir = await canonicalize(ctx, resolvedGitDir)
+  const mainGitDir = await canonicalize(ctx, path.resolve(input.repoRoot, ".git"))
+  if (canonicalGitDir !== mainGitDir) {
     throw new Error("worktree create rejected: repoRoot is a linked worktree; create from the main checkout")
   }
 
@@ -166,16 +241,32 @@ export async function gitWorktreeAdd(ctx: GitContext, input: WorktreeAddInput): 
 
   const before = await gitWorktreeList(ctx, input.repoRoot)
   const target = path.resolve(input.directory)
-  if (before.some((entry) => conflictsWith(entry.directory, target))) {
-    throw new Error(`worktree create rejected: directory overlaps an existing worktree: ${input.directory}`)
+  const canonicalTarget = await canonicalize(ctx, target)
+  for (const entry of before) {
+    if (conflictsWith(await canonicalize(ctx, entry.directory), canonicalTarget)) {
+      throw new Error(`worktree create rejected: directory overlaps an existing worktree: ${input.directory}`)
+    }
   }
 
   const args = ["worktree", "add", "-b", input.branch, "--", input.directory, input.base]
   assertGitFamilyAllowed(args)
-  const result = await ctx.runner.run(GIT_CMD, args, { cwd: input.repoRoot, timeoutMs: input.timeoutMs })
+  // Runs through `run` so stdout/stderr are redacted before they can leave.
+  const result = await run(ctx, input.repoRoot, args, input.timeoutMs)
+  if (result.exitCode !== 0) {
+    const detail = [result.stderr, result.stdout].filter((part) => part.length > 0).join(" ").trim()
+    const suffix = detail.length > 0 ? `: ${detail}` : ""
+    throw new Error(`worktree create failed: git worktree add exited with code ${result.exitCode}${suffix}`)
+  }
 
+  // Only reach here on a successful add.
   const after = await gitWorktreeList(ctx, input.repoRoot)
-  const listed = after.some((entry) => path.resolve(entry.directory) === target)
+  let listed = false
+  for (const entry of after) {
+    if ((await canonicalize(ctx, entry.directory)) === canonicalTarget) {
+      listed = true
+      break
+    }
+  }
   const branchResolved = (await gitRevParse(ctx, input.repoRoot, `refs/heads/${input.branch}`)) !== undefined
   if (!listed || !branchResolved) {
     throw new Error("worktree create failed verification after git worktree add")
@@ -298,4 +389,9 @@ function conflictsWith(entryDirectory: string, target: string): boolean {
 
 function isAbsoluteSafe(value: string): boolean {
   return value.length > 0 && path.isAbsolute(value) && !value.includes("\0")
+}
+
+/** Canonicalize via the injected resolver when present, else the fs default. */
+function canonicalize(ctx: GitContext, directory: string): Promise<string> {
+  return canonicalPath(ctx.realpath, directory)
 }

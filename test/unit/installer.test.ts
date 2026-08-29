@@ -359,6 +359,8 @@ describe("installer", () => {
     expect(check?.message).toContain("merged")
     expect(check?.message).toContain("authentication")
     expect(check?.message).toContain("permission grants")
+    expect(check?.message).toContain("server-side `gh` tools")
+    expect(check?.message).toContain("github_capabilities")
     expect(check?.message).toContain("No headers, environment values, OAuth tokens, or other credentials are read or printed by doctor")
   })
 

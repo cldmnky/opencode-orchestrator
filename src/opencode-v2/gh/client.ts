@@ -197,7 +197,7 @@ export function assertPullShape(value: unknown): PullInfo {
     html_url: pull.html_url,
     title: typeof pull.title === "string" ? pull.title : "",
     state: typeof pull.state === "string" ? pull.state : "",
-    merged: pull.merged === true,
+    merged: mergedOf(pull),
     user: loginOf(pull.user),
     head:
       head && typeof head.ref === "string" && typeof head.sha === "string" ? { ref: head.ref, sha: head.sha } : undefined,
@@ -414,6 +414,17 @@ function loginOf(value: unknown): { login: string } | undefined {
   if (!value || typeof value !== "object") return undefined
   const login = (value as Record<string, unknown>).login
   return typeof login === "string" && login.length > 0 ? { login } : undefined
+}
+
+/**
+ * GitHub expresses merge state differently across pull payloads: the direct
+ * pull endpoint returns a boolean `merged`, while the list endpoint omits it
+ * and only sets `merged_at` (a timestamp when merged, null otherwise). A
+ * non-empty `merged_at` therefore counts as merged; an explicit boolean wins.
+ */
+function mergedOf(pull: Record<string, unknown>): boolean {
+  if (typeof pull.merged === "boolean") return pull.merged
+  return typeof pull.merged_at === "string" && pull.merged_at.length > 0
 }
 
 function defaultBranchOf(value: unknown): string | null {

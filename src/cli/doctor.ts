@@ -154,7 +154,7 @@ export function inspectConfig(path: string): DoctorReport {
     name: "mcp-github",
     status: "warn",
     message:
-      "doctor inspects only static config presence and reports name-level guidance only; it cannot prove the host's merged MCP config, remote GitHub MCP reachability, live tool capability, authentication, or permission grants. Host-configured GitHub MCP is not a plugin feature — configure and verify it with the host (this plugin exposes no GitHub operation API). No headers, environment values, OAuth tokens, or other credentials are read or printed by doctor.",
+      "doctor inspects only static config presence and reports name-level guidance only; it cannot prove the host's merged MCP config, remote GitHub MCP reachability, live tool capability, authentication, or permission grants. Host-configured GitHub MCP is separate from this plugin's opt-in server-side `gh` tools and must be configured and verified with the host; for the plugin's own tools, the server-side `github_capabilities` probe is authoritative. No headers, environment values, OAuth tokens, or other credentials are read or printed by doctor.",
   })
 
   const status = mergeStatus(checks)

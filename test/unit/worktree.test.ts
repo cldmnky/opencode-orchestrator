@@ -88,6 +88,7 @@ function createSuccessScript(
   directory = "/srv/worktrees/feature",
   repoRoot = "/repo",
   branch = "feature",
+  gitDir = "/repo/.git",
 ): (call: Call, calls: Call[]) => ProcessResult | undefined {
   let listCalls = 0
   let refChecks = 0
@@ -96,7 +97,7 @@ function createSuccessScript(
       case "rev-parse": {
         const target = call.args[1]
         if (target === "--is-bare-repository") return ok("false")
-        if (target === "--git-dir") return ok("/repo/.git")
+        if (target === "--git-dir") return ok(gitDir)
         if (target === `refs/heads/${branch}`) {
           refChecks += 1
           return refChecks > 1 ? ok("f1c2dc0abc") : fail("unknown revision")
@@ -373,6 +374,34 @@ describe("gitWorktreeAdd", () => {
       if (call.args[0] !== "rev-parse") return undefined
       if (call.args[1] === "--is-bare-repository") return ok("false")
       if (call.args[1] === "--git-dir") return ok("/repo/.git/worktrees/other")
+      return undefined
+    })
+    await expect(
+      gitWorktreeAdd({ runner }, { repoRoot: "/repo", branch: "feature", directory: "/srv/worktrees/feature", base: "main" }),
+    ).rejects.toThrow(/linked worktree/)
+  })
+
+  test("accepts a normal main checkout whose --git-dir is relative (.git)", async () => {
+    // Regression: a cwd-bound `git rev-parse --git-dir` on a plain checkout
+    // returns `.git`, relative to repoRoot. It must not be resolved against the
+    // server process cwd (which would reject every normal checkout as linked).
+    const { runner, calls } = scriptedGit(createSuccessScript(undefined, undefined, undefined, ".git"))
+    const result = await gitWorktreeAdd(
+      { runner, pathExists: async () => false },
+      { repoRoot: "/repo", branch: "feature", directory: "/srv/worktrees/feature", base: "main" },
+    )
+    expect(result.verified).toBe(true)
+    expect(result.verification).toEqual({ listed: true, branchResolved: true })
+    const addCall = calls.find((call) => call.args[1] === "add")
+    expect(addCall?.cwd).toBe("/repo")
+    expect(addCall?.args).toEqual(["worktree", "add", "-b", "feature", "--", "/srv/worktrees/feature", "main"])
+  })
+
+  test("rejects a linked worktree with a relative --git-dir", async () => {
+    const { runner } = scriptedGit((call) => {
+      if (call.args[0] !== "rev-parse") return undefined
+      if (call.args[1] === "--is-bare-repository") return ok("false")
+      if (call.args[1] === "--git-dir") return ok(".git/worktrees/other")
       return undefined
     })
     await expect(

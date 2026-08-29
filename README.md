@@ -46,7 +46,7 @@ npm pack --pack-destination "$TMPDIR"      # writes a fresh tarball to your temp
 cd ../your-project
 
 # 2. Install the freshly built tarball as a project-local dependency
-npm install --save-dev "$TMPDIR/opencode-v2-agent-orchestrator-0.1.1.tgz"
+npm install --save-dev "$TMPDIR/opencode-v2-agent-orchestrator-0.1.3.tgz"
 
 # 3. Run the installer; with per-agent models
 ./node_modules/.bin/opencode-v2-agent-orchestrator install \
@@ -283,8 +283,8 @@ Isolated harness: `dev/project/opencode.jsonc` and `dev/state/*` are gitignored 
 
 Tested against:
 
-- `@opencode-ai/plugin` `0.0.0-beta-18414`
-- `@opencode-ai/sdk` `0.0.0-dev-18560` (integration tests only)
+- `@opencode-ai/plugin` `0.0.0-beta-18684`
+- `@opencode-ai/sdk` `0.0.0-dev-18683` (integration tests only)
 
 Main plugin sets `tui: true` and publishes `./tui` for the TUI command layer. CLI-only plugin config belongs in global `cli.json`; this package is dual-surface and normally enabled through the main plugin registration.
 

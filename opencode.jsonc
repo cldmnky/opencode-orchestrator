@@ -19,6 +19,15 @@
           "auto_continue": true,
           "max_continuations": 50,
           "cooldown_ms": 1000
+        },
+        "github": {
+          "enabled": true,
+          "allow_mutations": false
+        },
+        "worktree": {
+          "enabled": true,
+          "allow_mutations": true,
+          "root": "/Users/mbengtss/code/src/github.com/cldmnky/opencode-orchestrator-worktrees"
         }
       }
     }

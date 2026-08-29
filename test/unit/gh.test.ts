@@ -343,6 +343,60 @@ describe("gh pulls", () => {
     expect(calls[0]?.args).toEqual(["api", "--method", "GET", "repos/acme/widgets/pulls", "-f", "state=closed"])
   })
 
+  // Live shapes from the orchestrator repo: the direct pull endpoint carries the
+  // boolean `merged`, while the list endpoint omits it and only sets `merged_at`.
+  const MERGED_PULL = {
+    id: 4386918944,
+    number: 4,
+    html_url: "https://github.com/cldmnky/opencode-orchestrator/pull/4",
+    title: "Fix the live PR list merge state",
+    state: "closed",
+    merged_at: "2026-08-29T10:12:34Z",
+    user: { login: "octocat" },
+    head: { ref: "fix", sha: "deadbeef" },
+    base: { ref: "main" },
+  }
+
+  test("viewPull reports a merged PR from the direct payload's merged boolean", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify({ ...MERGED_PULL, number: 7, merged: true }))
+      return undefined
+    })
+    const pull = await viewPull({ runner }, { owner: "acme", repo: "widgets", number: 7 })
+    expect(pull.id).toBe(4386918944)
+    expect(pull.html_url).toBe("https://github.com/cldmnky/opencode-orchestrator/pull/4")
+    expect(pull.merged).toBe(true)
+  })
+
+  test("listPulls derives merged=true from a non-null merged_at on the list payload", async () => {
+    const { runner, calls } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/pulls")) return ok(JSON.stringify([MERGED_PULL]))
+      return undefined
+    })
+    const pulls = await listPulls({ runner }, { owner: "acme", repo: "widgets", state: "all" })
+    expect(pulls).toHaveLength(1)
+    expect(pulls[0]?.id).toBe(4386918944)
+    expect(pulls[0]?.html_url).toBe("https://github.com/cldmnky/opencode-orchestrator/pull/4")
+    expect(pulls[0]?.merged).toBe(true)
+    expect(calls[0]?.args).toEqual(["api", "--method", "GET", "repos/acme/widgets/pulls", "-f", "state=all"])
+  })
+
+  test("listPulls keeps merged=false when the list payload has a null merged_at", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/pulls"))
+        return ok(JSON.stringify([{ ...MERGED_PULL, merged_at: null }]))
+      return undefined
+    })
+    const pulls = await listPulls({ runner }, { owner: "acme", repo: "widgets", state: "all" })
+    expect(pulls).toHaveLength(1)
+    expect(pulls[0]?.merged).toBe(false)
+  })
+
+  test("assertPullShape honors the explicit merged boolean over merged_at", () => {
+    expect(assertPullShape({ ...MERGED_PULL, merged: false }).merged).toBe(false)
+    expect(assertPullShape({ ...MERGED_PULL, merged: true }).merged).toBe(true)
+  })
+
   test("assertPullShape validates id, number, and html_url", () => {
     expect(() => assertPullShape({ id: 1, number: 2 })).toThrow(/"html_url"/)
     expect(() => assertPullShape([PULL])).toThrow(/not an object/)

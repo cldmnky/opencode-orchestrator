@@ -147,7 +147,11 @@ export async function gitWorktreeAdd(ctx: GitContext, input: WorktreeAddInput): 
 
   const gitDir = await gitRevParse(ctx, input.repoRoot, "--git-dir")
   if (gitDir === undefined) throw new Error("worktree create rejected: not a git repository")
-  if (path.resolve(gitDir) !== path.resolve(input.repoRoot, ".git")) {
+  // `--git-dir` may be relative to the runner cwd (repoRoot) with cwd-bound git
+  // (e.g. `.git` on a normal main checkout); resolve it against repoRoot, never
+  // against the server process cwd, before comparing to the main checkout.
+  const resolvedGitDir = path.isAbsolute(gitDir) ? path.resolve(gitDir) : path.resolve(input.repoRoot, gitDir)
+  if (resolvedGitDir !== path.resolve(input.repoRoot, ".git")) {
     throw new Error("worktree create rejected: repoRoot is a linked worktree; create from the main checkout")
   }
 

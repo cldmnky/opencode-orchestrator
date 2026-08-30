@@ -27,9 +27,16 @@
         "worktree": {
           "enabled": true,
           "allow_mutations": true,
-          "root": "/tmp/opencode-orchestrator-worktrees"
+          "root": "/private/tmp/opencode-orchestrator-worktrees"
         }
       }
+    }
+  ],
+  "permissions": [
+    {
+      "action": "external_directory",
+      "resource": "/private/tmp/opencode-orchestrator-worktrees/*",
+      "effect": "allow"
     }
   ],
   "agents": {

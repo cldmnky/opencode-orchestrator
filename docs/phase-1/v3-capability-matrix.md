@@ -1,0 +1,145 @@
+# V3 — Host-Tool Preflight and Capability Authority Matrix
+
+**Date:** 2026-08-30
+**Status:** Phase-1 design document (proposal V3 in `docs/orchestrator-improvements-plan.md`)
+**Scope:** `docs/phase-1/v3-capability-matrix.md` only. No source, test, package, or README changes.
+**Purpose:** One authority matrix that distinguishes **static**, **local (advisory)**, **live server (plugin probe)**, **host GitHub MCP**, **plugin gh/worktree registration**, **storage**, and **documented V2** capabilities — without overclaiming any of them.
+
+## 1. Authority model and layer definitions
+
+| Layer | Meaning | Who can produce evidence |
+|---|---|---|
+| `static` | Facts provable by reading repository source/config at a pinned version | Any reader; `doctor` `inspectConfig` |
+| `registration` | What the plugin registers (agents, commands, tools, permissions) at setup | Plugin `setup` (`ctx.agent/command/tool.transform`) |
+| `local-advisory` | Probes of *this machine's* PATH/cwd run by `doctor` | `src/cli/doctor.ts` `runtimeChecks` |
+| `live-host` | The connected host's merged tool catalog as the session actually sees it | The live server/host only; `doctor` cannot |
+| `host-mcp` | GitHub MCP servers configured by the host | The host + remote MCP server only; `doctor` cannot |
+| `live-server` | The plugin's server-side `orchestrator_github_capabilities` probe, run in the session | `probeCapabilities` in `src/opencode-v2/gh/client.ts` |
+| `storage` | `ctx.storage` surface as pinned, plus how the repository uses it | Plugin code against the pinned `StorageDomain` |
+| `documented-v2` | Pinned beta declarations vs official current docs | Repository + installed `node_modules/@opencode-ai/plugin` |
+
+Ground rules that apply to every row below:
+
+1. `doctor` runtime checks are **local and advisory** only; they never fail the report and never prove what the remote server session can do [S4, S20].
+2. `orchestrator_github_capabilities` is **authoritative only for the gh fields it actually tests** (binary, auth status/hosts, resolved repo), never for mutation permission, host MCP, or anything untested [S6, S20].
+3. A **missing live capability stays `unknown`** and is **never inferred from an MCP server name or status** [S5, S10].
+4. Auth checks expose **exit code / status only**; no headers, environment values, or tokens are ever captured [S4, S6, S16].
+5. **No raw credentials** are requested, resolved, logged, pasted, or copied [S10].
+6. **Durable worktree records do not prove child isolation**; managed ownership covers the current session only [S10, S12, S13].
+
+## 2. Authority matrix
+
+Columns: **Capability | Layer | Authority | Freshness | Success evidence | Failure mode | Credential exposure | Tested by / verification source | Phase-1 boundary**
+
+| Capability | Layer | Authority | Freshness | Success evidence | Failure mode | Credential exposure | Tested by / verification source | Phase-1 boundary |
+|---|---|---|---|---|---|---|---|---|
+| Static config / options | `static` | `parseOptions` zod schema is the only validator; invalid options throw at setup/doctor [S1][S2][S3] | Config load / doctor run | `parseOptions` passes; full default set documented (`max_parallel` 1–8 default 4, `require_review` true, `strict_agents` true, `github.enabled`/`allow_mutations` false, `worktree.*` off, `root` null) [S1] | Invalid JSONC, missing plugin entry, missing agents, bad options → `doctor` `fail`, or plugin setup throw under `strict_agents` [S3][S9] | None | `test/unit/core.test.ts` (schema); `test/unit/installer.test.ts:256-348` (`inspectConfig`) | Documents defaults and validity only; does not prove the server applied them |
+| Required agent / command registration | `registration` | Plugin `setup`: `agent.transform`, `command.transform`; config-backed agents may materialize later (`agent.updated`) [S9][S18] | Startup + late `agent.updated` events | Orchestrator + role agents present; enabled commands registered with required roles; no collisions/unavailable [S9][S18] | `strict_agents` throw; command collisions preserved/dropped with warning; unavailable roles omit commands [S9] | None | `test/unit/agents.test.ts`; `test/unit/runtime.test.ts`; `test/unit/tools.test.ts`; live: `opencode2 api get /api/plugin` (location-scoped, run from repo `cwd`) [S20] | Registration presence ≠ runtime enforcement of the *behavior* those commands prompt for |
+| Actual connected-host tool catalog | `live-host` | Only the connected host's session-visible catalog. Pinned `SessionContext.tools: Record<string,{description,input}>` is the in-session view [P5]; `ToolDraft.list()` lists the *draft being transformed*, not the merged catalog [P6]. Policy mandates inspecting the catalog before any GitHub tool use [S10] | Per session / tool reload | Tool present with expected name/namespace/input schema in the session-visible catalog | Tool absent or signature differs → treat as unavailable; **never infer from MCP name/status** [S5][S10] | None | Not deterministically unit-testable — live host only; policy preflight text [S10]; `Context.catalog` surface exists [P2] | Documented as a runtime-only fact; `doctor` cannot produce it |
+| Host GitHub MCP availability | `host-mcp` | Host-configured MCP servers; pinned `MCPDomain`/`MCPDraft` exposes config list/transform, not remote reachability, auth, or permissions [P7][P2] | Host config load/reload; not provable locally | Cannot be produced by `doctor`; only a live host tool result counts | `doctor` reports name-level guidance only: merged config, remote reachability, live capability, auth, and permission grants are **not provable** [S5] | None captured; remote auth stays with the host/MCP server | `doctor` `mcp-github` warn [S5]; `test/unit/installer.test.ts:349-358` asserts the note | Explicitly out of plugin authority scope; separate from the plugin's own `orchestrator_github_*` tools |
+| Local git presence | `local-advisory` | `doctor` `git --version` on this machine's PATH only [S4] | Doctor run (snapshot) | Exit 0 → `pass` | Exit ≠ 0 → `warn`; server-side worktree tools authoritative [S4] | None (version first line only) | `test/unit/installer.test.ts:474-540` via injected fake runner (never live git) | This machine only; never proof of the server session |
+| Local gh presence | `local-advisory` | `doctor` `gh --version` [S4] | Doctor run | Exit 0 → `pass` | Exit ≠ 0 → `warn`; server-side github tools authoritative [S4] | None | `test/unit/installer.test.ts:474-540` | Local PATH only |
+| Local gh auth state | `local-advisory` | `doctor` `gh auth status` **exit code only**; output suppressed [S4] | Doctor run | Exit 0 → "authenticated"; no output printed | Exit ≠ 0 → `warn`; server `github_capabilities` authoritative [S4][S20] | Exit code/status only — docs state no headers, environment values, or tokens are read/printed [S4] | `test/unit/installer.test.ts` (repo probe is skipped when auth fails at :528) | Local-machine auth ≠ server-session auth |
+| Local repo resolution | `local-advisory` | `doctor` read-only `gh repo view --json nameWithOwner` [S4] | Doctor run | Exit 0 + resolved `nameWithOwner` | `warn`, expected outside a checkout; output suppressed; server probe authoritative [S4] | Exit code + one repo name field only | `test/unit/installer.test.ts:474-540` | Resolves from the local `cwd` only |
+| Local worktree listing | `local-advisory` | `doctor` read-only `git worktree list --porcelain` [S4] | Doctor run | Exit 0 → `pass` | `warn` on failure or non-repo; server worktree tools authoritative [S4] | None (no output printed) | `test/unit/installer.test.ts:474-540` | Local listing only; carries no ownership/isolation proof |
+| Server `github_capabilities` | `live-server` | **Authoritative only for tested gh fields**: binary presence/version, auth status + host names, resolved repo (or `null`). Probe degrades to `false`/`null`, never throws [S6] | Per invocation (each tool call probes live) | Probe JSON: `gh.available`, `gh.version`, `auth.authenticated`, `auth.hosts`, `repo` (`id`, `nameWithOwner`, `url`, `defaultBranch`) or `null` [S6] | Missing gh binary / failed auth / unresolvable repo → corresponding `false`/`null`, not an error [S6] | All raw process text redacted at the source (known patterns + caller secrets) [S6][S16]; hosts are derived only from `Logged in to <host>` lines [S6]; no token capture | `test/unit/gh.test.ts:439-482` (probe degradation/version/auth/repo); registration [T2]; AGENTS.md names it authoritative for live session PATH/auth/permissions [S20] | Does **not** test mutation permission, host MCP, or any other gh operation |
+| Server GitHub mutation permission | `live-server` | Not probed by any capability tool. Enforced by config gates (`github.enabled` + `allow_mutations` + literal `confirm: true`) and the runtime orchestrator-agent check; real GitHub-side permission is proven **only** by a successful mutation response [S7] | Per mutation attempt | Validated typed evidence: numeric `id`, `number`, `html_url` (+ `url` for repos) with `verified: true` [S6][S7] | Config gate returns a message; `GhError` with redacted exit/stderr; non-orchestrator agent rejected at the execute handler regardless of visibility [S7][S8] | Process output redacted; POST bodies written to a mode-0600 temp file removed after the call [S6]; no credentials in evidence | `test/unit/gh.test.ts` (client asserts shape); `test/unit/tools.test.ts` (registration/gates) | No dry-run grant check; permission is only ever established by executing the mutation |
+| Plugin GitHub tool registration / orchestrator access | `registration` | `tool.transform` registers the family only when `github.enabled`; shared `orchestrator_gh` permission action; visibility rules control visibility only; runtime agent check enforces orchestrator-only [S7][S8][S9] | Plugin setup; permission reload | `orchestrator_github_*` registered under the orchestrator namespace; non-orchestrator agents denied at the execute handler | Family absent when disabled; an `ask` permission rule affects visibility only — no interactive runtime prompt is produced by the public Promise API [S8] | None | `test/unit/tools.test.ts` (registration, permission rules); `test/unit/gh.test.ts:493,613` | Registration + runtime agent gate ≠ GitHub API permission |
+| Worktree config / root containment | `static` + `live-server` | `worktree.root` must be an absolute POSIX path or `null`; creation requires canonical `isPathInside(root)` containment on the configured root [S2][S12] | Config load + per-create canonical resolution | Create accepted with `root != null` and containable directory; `git worktree add` verified and durable record written [S12] | `root === null` → "worktree.root must be configured"; out-of-root → "must be inside worktree.root" [S12] | None (redaction applied to git output) [S12][S16] | `test/unit/worktree.test.ts` | Container-root validation ≠ OS-level isolation |
+| Current-session worktree status | `live-server` | `orchestrator_worktree_status` = durable record (origin-project/session key, `worktree/v2` namespace) + live `git worktree list --porcelain` + `git status`; lifecycle `pending→ready→moved/dirty/orphaned→…` with `cleanup-failed` [S12][S13] | Per tool call (live git checks) | Status `ready`/`dirty`/`moved`/`orphaned` + record + worktrees entries | Errors returned as messages; cleanup refused for other owners, main worktree, or dirty trees [S12] | Redacted git output only [S12][S16] | `test/unit/worktree.test.ts`; `test/unit/session-state.test.ts` (v1 namespace kept separate) [S13] | Records are current-session bookkeeping; they do **not** prove child isolation |
+| Atomic child isolation | `policy` (declared non-capability) | Explicitly **not provided** by the native V2 child-session API; policy and session-context text both state it [S9][S10]; `doctor` `workflow-boundary` warn [S3] | n/a | n/a — isolation is absent by design; safe native delegation retained | Parallel children share the parent filesystem; managed worktree ownership is current-session only [S10] | n/a | Policy tests in `test/unit/core.test.ts`; plan assumptions A3/A12 [S19] | Phase-1 makes no isolation claim and refuses to infer one from records |
+| `max_parallel` runtime enforcement | `static` / prompt-only | Config schema bounds 1–8 (default 4) [S2]; consumed **only** in prompt/system text (`Runtime parallelism ceiling`) [S9][S11]; no scheduler or semaphore exists | Config load | Prompt states the ceiling; rules cap "at most N" in prompt text [S10][S11] | No runtime counter; enforcement depends on the model following the prompt; plan assumption A4 [S19] | None | `test/unit/core.test.ts` (schema); `test/unit/runtime.test.ts` | Documented as prompt-only; **runtime enforcement is not claimed** |
+| `require_review` runtime enforcement | `static` / prompt-only | Config default `true` [S2]; consumed only in policy/prompt text (`Implementation is incomplete until the review role audits…`) [S10][S11]; no completion gate | Config load | Prompt requires an aggregate review pass | No runtime gate prevents completion without a reviewer result; plan assumption A5 [S19] | None | `test/unit/core.test.ts` (schema/policy) | Documented as prompt-only; **runtime gate is not claimed** |
+| Storage transactions / CAS / cross-process lock | `storage` | Pinned `StorageDomain` exposes `get`/`set`/`remove`/`scan` only — no transactions, no compare-and-set, no cross-process primitives [P3]. Repository adds a **process-local, in-memory** `withSessionLock` map only [S14] | Per operation | Keyed round-trips; versioned zod schemas reject malformed records as `undefined` [S14][S13] | No atomic multi-key updates; `scan` optional (repo returns `[]` when absent); cross-process races unbounded; crash semantics unverified [S14][S19] | None; no session token statistics are stored (see next row) | `test/unit/continuation.test.ts`; `test/unit/session-state.test.ts`; `test/unit/worktree.test.ts` (in-memory fakes) | Durability/transactionality **not claimed**; exactly-once never claimed [S19] |
+| Documented V2 storage surface | `documented-v2` | Pinned `StorageDomain`: `get`, `set`, `remove`, `scan(prefix, after?, limit?)` [P3]; repository's `StorageLike` mirrors it [S14] | Pinned at install; immutable until deps change | Typechecks against pinned `d.ts`; used by goal/run/halt/worktree/anchor records [S14][S13][S17] | Official live docs may differ from pinned beta (API is beta/experimental) [S20][S19] | None | `bun run typecheck`; unit tests; `package.json:37` pin | Pinned declaration is the tested truth; official docs are directional [S20] |
+| Documented V2 VCS surface | `documented-v2` | Pinned `VcsDomain`: `info`, `base`, `branches`, `status`, `diff`, `reload`, `transform`; `VcsScope` (directory/worktree/canonical) [P4] | Pinned at install | Surfaces compile against pinned `d.ts` [P4] | Beta drift against official docs; plugin currently does not consume VCS domain beyond session/`/cd` context [S20] | None | `bun run typecheck`; plugin context exposes `vcs` [P2] | Declared as an available surface; consumption is not assumed |
+| Documented V2 session-statistics surface | `documented-v2` | **Absent**: no `statistics`, `tokenCount`, or `usage` surface exists anywhere in the pinned plugin `dist/*.d.ts` (grep found none); pinned `SessionDomain` = `create/get/switchAgent/switchModel/prompt/generate/command/synthetic/interrupt/rename/move/wait/context` + hooks [P5] | n/a | n/a — surface does not exist in the pinned package | Any token-statistics claim would be an invention; the repository never consumes session token stats [P5][S19] | n/a | `grep` over `node_modules/@opencode-ai/plugin/dist`; `bun run typecheck` | Phase-1 records the surface as **absent in the pinned package**, not merely unused |
+
+## 3. Mandatory boundary statements (asserted by this matrix)
+
+- **Doctor is local/advisory.** Every `doctor` runtime check is `warn`-or-`pass`, probes this machine's PATH/cwd, and explicitly defers to server-side tools [S4]. `doctor` can never prove merged MCP config, remote reachability, live tool capability, authentication, or permission grants [S5].
+- **`github_capabilities` is authoritative only for the gh fields it tests**: binary availability/version, auth status + host names, and repo resolution. It says nothing about mutation permission, host-configured GitHub MCP, or any other gh operation [S6][S7].
+- **Missing live capability stays `unknown`.** Availability is never inferred from an MCP server name or status; if the connected host does not expose the needed tools, the orchestrator stops and asks the user [S5][S10].
+- **Auth checks expose exit code / status only.** `gh auth status` output is suppressed in `doctor`, and the server probe reduces it to `authenticated: boolean` + `hosts` derived from hostname lines [S4][S6].
+- **No raw credentials.** No headers, environment values, OAuth tokens, or secrets are requested, captured, logged, or printed; all process text passes the redactor, and mutation bodies use mode-0600 temp files removed after the call [S4][S6][S10][S16].
+- **Worktree records do not prove child isolation.** Durable `worktree/v2` records track the current session's ownership; prompt-level disjoint write scopes are not filesystem isolation [S10][S12][S13].
+- **Host GitHub tools are known only by inspecting the connected tool catalog**, never by repository config or plugin registration [S5][S10].
+
+## 4. Preflight decision flow (usable by orchestrator validation)
+
+Run in order; any `blocked` verdict stops before using the capability. Verdicts: `ready` | `degraded` | `blocked` | `not-claimed`.
+
+1. **Config gate (static).** `parseOptions` must succeed; `github.enabled` / `worktree.enabled` must be true for the respective families; mutations additionally require `allow_mutations` + literal `confirm: true` [S1][S7][S12]. Otherwise → `blocked`.
+2. **Registration gate (live, per session).** Confirm the tool family is actually present in the session-visible tool catalog (`SessionContext.tools`) and that the agent is the configured orchestrator [P5][S7]. If absent → `blocked` (do not attempt). Note: `doctor` **cannot** run this gate [S5].
+3. **Plugin-gh authority probe (live server).** Call `orchestrator_github_capabilities`. Accept its fields as authoritative **for those fields only** [S6]. If `gh.available` is false or `auth.authenticated` is false, and the task needs issue/PR automation → `blocked`; record local `doctor` evidence as `degraded` context, never as authorization [S4].
+4. **Host GitHub MCP gate (live host).** Inspect the connected tool catalog for the actual host tools (e.g. `github.*` MCP tools). Never infer from the MCP server name or status [S10]. If the needed tools are absent → `blocked` and ask the user [S10]. `doctor` can only have contributed a name-level warning [S5].
+5. **Mutation gate (live server).** For any mutation, apply config gates + orchestrator-agent check, then treat the validated response (`id`/`number`/`html_url`, `verified: true`) as the only proof of GitHub-side permission [S6][S7]. Without it → `blocked`; never report completion on a worker self-report [S10].
+6. **Worktree gate (live server).** Verify configured `worktree.root` containment canonically, then use status to check ownership/dirtiness before create/push/cleanup [S12]. Records never license claims about child isolation [S10].
+7. **Record the verdict with an evidence marker** (Section 5). Anything not directly tested at steps 3–6 is recorded as `unknown`, never inferred.
+
+## 5. Evidence vocabulary (for orchestrator validation)
+
+Assign to every capability claim before it is admitted to a ledger/handoff:
+
+| Marker | Meaning | Required sourcing | Credential rule |
+|---|---|---|---|
+| `EVIDENCE_LIVE` | Result captured from a live server tool or host catalog invocation in the current session | Tool result object with its identifier; for issues/PRs also `html_url`/`url` [S6] | Redacted only [S16] |
+| `EVIDENCE_REGISTERED` | Tool present in the session-visible catalog with name/namespace/input schema | Session context or live catalog inspection [P5][P6] | n/a |
+| `EVIDENCE_MUTATION` | Validated typed response proving an external mutation | Object `id` + URL after execution [S6][S7] | No raw process text; redacted [S6] |
+| `EVIDENCE_LOCAL` | `doctor` local probe result | `runtimeChecks` output; advisory only [S4] | Exit code / fixed wording only [S4] |
+| `EVIDENCE_STATIC` | Verified by reading config/source/declarations at a pinned version | Exact paths + line ranges; pinned package path [S1][P*] | None |
+| `UNKNOWN` | Not directly tested; must not be inferred from MCP name/status | Explicit `unknown` label [S10] | n/a |
+
+Freshness markers: `per-invocation` (live probe), `per-session` (catalog), `config-load`, `startup+events`, `doctor-run`, `install-snapshot` (pinned), `live-doc` (directional). Authority markers: `authoritative-for-tested-fields`, `advisory`, `documented-pinned`, `documented-live`, `declared-absent`.
+
+Validation rule: a claim whose authority is `advisory` or `documented-live` **cannot** authorize a live, mutating action; only a `EVIDENCE_LIVE`/`EVIDENCE_MUTATION` result from the current session can [S10].
+
+## 6. Citations index
+
+### Repository source (exact paths and line ranges)
+
+- [S1] `src/core/config.ts:47-110` — `OrchestratorOptionsSchema` + `parseOptions` (throws on invalid options).
+- [S2] `src/core/config.ts:24-28` (`absolutePosixPath`), `:51-52` (`max_parallel`, `require_review`), `:62-74` (github/worktree option blocks, defaults off, `root` default `null`).
+- [S3] `src/cli/doctor.ts:50-162` — `inspectConfig` static checks; `:148-152` `workflow-boundary` warn; `:153-158` `mcp-github` warn.
+- [S4] `src/cli/doctor.ts:164-248` — advisory `runtimeChecks`; `:178-187` git; `:189-198` gh; `:200-213` auth exit-code-only; `:215-227` read-only repo view; `:229-238` worktree list; `:240-245` authority warn; `:250-306` soft spawn (caps, no raw output).
+- [S5] `src/cli/doctor.ts:153-158` — doctor cannot prove merged MCP config / reachability / live capability / auth / permissions.
+- [S6] `src/opencode-v2/gh/client.ts:301-345` — `probeCapabilities` (never throws; degrades to `false`/`null`); `:326-331` host extraction; `:371-378` run redacts; `:387-392` mode-0600 temp bodies; `:408-411` `redactText`; `:166-206` issue/pull/repo shape asserts.
+- [S7] `src/opencode-v2/gh/tools.ts:51-73` (gating + `github_capabilities` registration), `:230-234` `requireOrchestrator` runtime agent check, `:236-241` `requireMutations`, `:142-158` `github_issue_create`, `:206-227` `github_pr_create`.
+- [S8] `src/core/permissions.ts:12-17` (`ask` = visibility only; no interactive runtime prompt), `:30-33` `orchestrator_gh`/`orchestrator_worktree` actions.
+- [S9] `src/opencode-v2/plugin.ts:24-31` (strict_agents), `:34-40`/`:158-232` (late agent setup on `agent.updated`), `:44-47` (agent.transform), `:49-66` (command.transform), `:68-75` (tool.transform: goal/gh/worktree), `:77-94` (session context incl. `Runtime parallelism ceiling` at `:84`, "delegated children get no atomic isolation" at `:89`).
+- [S10] `src/core/policy.ts:41-46` (inspect catalog, never infer from MCP name/status, stop-and-ask), `:48-51` (secrets), `:53-57` (worktree boundary), `:59-62` (managed ownership is not atomic child isolation), `:90` (review text).
+- [S11] `src/core/prompts.ts:16` — `orchestrationRules(options.max_parallel, options.require_review)` embedded in prompts.
+- [S12] `src/opencode-v2/worktree/tools.ts:67-68` (family gating), `:115-123` (canonical root containment), `:126-151` (create + durable record), `:158-198` (status), `:231-284` (cleanup refusals: other owner `:246-260`, main worktree `:261-265`, dirty `:266-269`), `:287-298` (`requireOrchestrator`/`requireMutations`).
+- [S13] `src/opencode-v2/worktree/state.ts:22` (lifecycle enum), `:109-117` (`worktree/v2` keys), `:171-184` (scan-based enumeration, `[]` when scanning is unavailable).
+- [S14] `src/opencode-v2/goal/state.ts:36-44` (`StorageLike` get/set/remove/scan?), `:88-120` (goal/run/halt keys), `:122-140` (`withSessionLock` — process-local `Map`), `:170-184` (versioned strict parse).
+- [S15] `src/opencode-v2/process/runner.ts:13-16,58-131` — `shell:false`, 1 MiB per-stream bound, 30 s default timeout; `SpawnRunner`.
+- [S16] `src/opencode-v2/process/redact.ts:13-36` (known patterns), `:42-56` (exact secrets incl. URI-encoded), `:59-60` (`createRedactor`).
+- [S17] `src/opencode-v2/session/state.ts:133-141` — `session/v1` anchor and legacy `worktree/v1` keys.
+- [S18] `src/opencode-v2/commands/index.ts:22-56` — enabled command registration with required roles; collisions/unavailable handling.
+- [S19] `docs/orchestrator-improvements-plan.md:537-581` (proposal V3), `:1022-1039` (Phase 1 exit evidence: "capability matrix with explicit unknowns"), `:1095-1108` (assumptions A1, A3, A4, A5, A6, A7, A9, A12).
+- [S20] `AGENTS.md:5-11,51` — official docs URLs (plugin guide, CLI plugin guide, HTTP API reference, `https://opencode.ai/v2/openapi.json` as HTTP contract), pins (`@opencode-ai/plugin` `0.0.0-beta-18684`, `@opencode-ai/sdk` `0.0.0-dev-18683`), `doctor` advisory + `orchestrator_github_capabilities` authoritative, `opencode2 api get /api/plugin` location-scoped verification.
+
+### Pinned declarations (installed package — the tested truth)
+
+- [P1] `node_modules/@opencode-ai/plugin/package.json` — version `0.0.0-beta-18684`; exports map; `package.json:37` (repo pin) and `package.json:45` (`@opencode-ai/sdk` `0.0.0-dev-18683`).
+- [P2] `node_modules/@opencode-ai/plugin/dist/promise/plugin.d.ts:23-48` — `Context` with `mcp` (:36), `session` (:41), `storage` (:44), `tool` (:45), `vcs` (:46), `catalog` (:28).
+- [P3] `node_modules/@opencode-ai/plugin/dist/promise/storage.d.ts:3-8` (`get`/`set`/`remove`/`scan`) and `node_modules/@opencode-ai/plugin/dist/storage.d.ts:1-14` (scan options; no transaction/CAS surface).
+- [P4] `node_modules/@opencode-ai/plugin/dist/promise/vcs.d.ts:5-15` (`VcsScope`), `:40-50` (`VcsDomain`: `info`/`base`/`branches`/`status`/`diff`/`transform`/`reload`).
+- [P5] `node_modules/@opencode-ai/plugin/dist/promise/session.d.ts:19-32` (`SessionContext` incl. `tools: Record<string,{description,input}>` at `:25-28`), `:75-77` (`SessionDomain`); no `statistics`/`tokenCount`/`usage` surface anywhere in `dist/*.d.ts` (grep, no matches).
+- [P6] `node_modules/@opencode-ai/plugin/dist/promise/tool.d.ts:15-26` (`ToolDraft.list/get/add/update/remove` — draft-scoped), `:51-55` (`ToolDomain`).
+- [P7] `node_modules/@opencode-ai/plugin/dist/promise/mcp.d.ts:5-14` — `MCPDraft`/`MCPDomain` (config list/transform/reload; no reachability/auth/permission surface).
+
+### Official current docs (live, beta — directional, per AGENTS.md)
+
+- [O1] `https://opencode.ai/v2/docs/build/plugins` — current plugin guide.
+- [O2] `https://opencode.ai/v2/docs/build/plugins/cli` — current CLI plugin guide.
+- [O3] `https://opencode.ai/v2/docs/api` — current HTTP API reference.
+- [O4] `https://opencode.ai/v2/openapi.json` — treated as the HTTP contract for local inspection via `opencode2 api` [S20].
+
+**Official docs vs pinned declarations:** the official docs are live and beta/experimental and may drift from the installed package; the pinned declarations ([P1]–[P7]) are what `bun run typecheck` and the unit tests run against and are therefore the tested truth for this repository. Where they differ, this matrix cites the pinned declaration and flags the doc as directional [S20][S19].
+
+## 7. Phase-1 boundary summary
+
+- **In scope for Phase 1:** this matrix, the preflight flow, and the evidence vocabulary — used to keep `doctor` advisory, keep `github_capabilities` authoritative only for tested fields, and keep every untested live capability recorded as `unknown`.
+- **Explicitly not claimed:** runtime enforcement of `max_parallel`/`require_review`; atomic child isolation; storage transactions/CAS/cross-process locking; regardless of any plugin prompt text or durable records.
+- **Out of scope:** any change to `src/`, `test/`, `package.json`, README, or live GitHub/host operations; no raw credentials at any point.

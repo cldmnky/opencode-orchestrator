@@ -1,0 +1,235 @@
+{
+  "artifact": "D4",
+  "name": "Start-Simple Complexity Gate — Decision Table",
+  "version": 1,
+  "status": "design-only",
+  "date": "2026-08-30",
+  "runtimeEnforced": false,
+  "purpose": "Recommend, for an incoming task, whether direct execution or some level of orchestration is the proportionate starting point. The table is a design artifact for proposal D4 in docs/orchestrator-improvements-plan.md; it is not loaded by any runtime code.",
+  "recommendationBoundary": {
+    "produces": "A recommendation only: direct-execution-candidate, orchestrate-candidate, orchestrate-serialized, orchestrate-with-review, or collect-facts.",
+    "neverProduces": [
+      "Runtime enforcement or hard blocking of any command or delegation",
+      "Automatic delegation to subagents",
+      "A decision the user cannot override",
+      "Measured results or telemetry"
+    ],
+    "override": "Every recommendation can be overridden by an explicit user decision; the gate never silently changes how a task is executed.",
+    "evidence": "Recommendations are advisory guidance produced from task facts; they carry no verification power until the evaluation protocol in d4-evaluation-template.json is run and results are collected."
+  },
+  "dimensions": [
+    {
+      "id": "independent_subtasks",
+      "label": "Independent subtasks",
+      "question": "How many child tasks could run with disjoint read/write scopes and no dependency on one another?",
+      "inputType": "count",
+      "unknownHandling": "collect-facts",
+      "sourceReference": "docs/orchestrator-improvements-plan.md D4 (independent subtasks); src/core/policy.ts DELEGATION_RULES parallelSafe"
+    },
+    {
+      "id": "dependent_stages",
+      "label": "Dependent stages",
+      "question": "How many sequential steps must complete in order (e.g., schema change before prompt wiring before tests)?",
+      "inputType": "count",
+      "unknownHandling": "collect-facts",
+      "sourceReference": "docs/orchestrator-improvements-plan.md D4 (dependent stages); D1 proposal (dependency IDs, topological execution)"
+    },
+    {
+      "id": "files_modules",
+      "label": "Files/modules touched",
+      "question": "How many files or modules are expected to change, and do any writers overlap?",
+      "inputType": "count",
+      "unknownHandling": "collect-facts",
+      "sourceReference": "src/core/policy.ts orchestrationRules (disjoint write scope, serialize overlapping implementation)"
+    },
+    {
+      "id": "independent_review",
+      "label": "Independent review needed",
+      "question": "Should a separate reviewer audit the change before it is reported complete (default require_review=true already demands this for orchestrated runs)?",
+      "inputType": "boolean",
+      "unknownHandling": "collect-facts",
+      "sourceReference": "src/core/config.ts:52 require_review; src/core/policy.ts:90"
+    },
+    {
+      "id": "external_side_effects",
+      "label": "External side effects",
+      "question": "Does the task reach outside the working tree — network, remote repositories, GitHub, worktrees, services, or the published package?",
+      "inputType": "boolean",
+      "unknownHandling": "collect-facts",
+      "sourceReference": "src/opencode-v2/github tools, src/opencode-v2/worktree; docs/orchestrator-improvements-plan.md D4 (external side effects)"
+    },
+    {
+      "id": "shared_mutable_state",
+      "label": "Shared mutable state",
+      "question": "Would parallel writers contend for the same file, module, generated artifact, or storage key?",
+      "inputType": "boolean",
+      "unknownHandling": "collect-facts",
+      "sourceReference": "src/core/policy.ts orchestrationRules (no two children claim the same file or area); WORKTREE_BOUNDARY_GUIDANCE (prompt-level rules do not enforce isolation)"
+    },
+    {
+      "id": "security_compliance_risk",
+      "label": "Security/compliance risk",
+      "question": "Does the change touch credentials, redaction, secrets handling, permission semantics, worktree roots, or remotely mutating tools?",
+      "inputType": "boolean",
+      "unknownHandling": "collect-facts",
+      "sourceReference": "src/core/policy.ts SECRET_HANDLING_GUIDANCE; src/opencode-v2/process/redact.ts; docs/orchestrator-improvements-plan.md D4 (security/compliance risk)"
+    },
+    {
+      "id": "expected_parallelism_value",
+      "label": "Expected value of parallelism",
+      "question": "Would running children concurrently save meaningful wall-clock time versus the added model cost, coordination, and failure surface?",
+      "inputType": "enum(none|low|medium|high)",
+      "unknownHandling": "collect-facts",
+      "sourceReference": "docs/orchestrator-improvements-plan.md D4 (expected parallelism value); D1 scaling heuristics (breadth-first tasks justify more workers only when expected value justifies cost)"
+    }
+  ],
+  "unknownHandling": {
+    "policy": "If any dimension is unknown at admission time, the gate must not guess: it recommends collect-facts (read-only exploration or a direct user question) before classification.",
+    "collectFactsOutcome": "collect-facts",
+    "appliesTo": "every dimension; an unknown high-risk or shared-state dimension must not be treated as 'no'."
+  },
+  "labels": {
+    "high-risk": {
+      "definition": "Security/compliance risk or external side effects with material blast radius are present.",
+      "precedence": 1,
+      "recommendation": "orchestrate-with-review",
+      "note": "Highest precedence: any high-risk signal wins over shared-state, multi-step, or trivial signals."
+    },
+    "shared-state": {
+      "definition": "Parallel writers would contend for the same mutable files, modules, generated artifacts, or storage keys.",
+      "precedence": 2,
+      "recommendation": "orchestrate-serialized",
+      "note": "Serialized orchestration keeps disjoint write scopes enforced per stage; parallelizing overlapping writers is not recommended."
+    },
+    "multi-step": {
+      "definition": "Multiple dependent stages or several mostly-independent subtasks across more than a couple of files, with no high-risk or shared-state signal.",
+      "precedence": 3,
+      "recommendation": "orchestrate-candidate",
+      "note": "Orchestration is a candidate because coordination buys decomposition and a maker-checker review; parallelism only when expected_parallelism_value is medium or high."
+    },
+    "trivial": {
+      "definition": "One file, one or two local edits, no review obligation, no external side effects, no shared or security concerns.",
+      "precedence": 4,
+      "recommendation": "direct-execution-candidate",
+      "note": "Matches README.md:30 — skip the orchestrator for single-file trivial edits."
+    },
+    "incomplete-facts": {
+      "definition": "One or more dimensions cannot be assessed from the request.",
+      "precedence": 0,
+      "recommendation": "collect-facts",
+      "note": "Precondition for classification: when facts are incomplete the gate emits collect-facts before applying any other precedence rule, and reclassifies only when the missing facts are known."
+    }
+  },
+  "precedenceRules": [
+    {
+      "order": 0,
+      "condition": "Any dimension unknown",
+      "outcome": "collect-facts",
+      "rationale": "Guessing can under-delegate hidden complexity or over-delegate trivial work; exploration is cheaper than either error."
+    },
+    {
+      "order": 1,
+      "condition": "security_compliance_risk = true OR (external_side_effects = true AND blast radius is material)",
+      "outcome": "orchestrate-with-review",
+      "rationale": "High-risk changes must be planned and independently reviewed before completion."
+    },
+    {
+      "order": 2,
+      "condition": "shared_mutable_state = true",
+      "outcome": "orchestrate-serialized",
+      "rationale": "Overlapping writers must be serialized or isolated; prompt-level rules do not enforce filesystem isolation."
+    },
+    {
+      "order": 3,
+      "condition": "dependent_stages > 1 OR independent_subtasks > 1 OR files_modules > 2",
+      "outcome": "orchestrate-candidate",
+      "rationale": "Coordination adds value when work decomposes or stages depend on each other."
+    },
+    {
+      "order": 4,
+      "condition": "single file, no side effects, no shared state, no security concern, no review obligation",
+      "outcome": "direct-execution-candidate",
+      "rationale": "README.md:30 already advises prompting the model directly for such edits."
+    },
+    {
+      "order": 5,
+      "condition": "No rule above fires cleanly",
+      "outcome": "collect-facts",
+      "rationale": "Ambiguity between labels resolves conservatively toward gathering facts, not toward a guessed label."
+    }
+  ],
+  "decisionOutcomes": [
+    {
+      "id": "collect-facts",
+      "meaning": "Read-only exploration (planning/research roles) or a direct user question before recommending an execution path."
+    },
+    {
+      "id": "direct-execution-candidate",
+      "meaning": "Prompt the model directly, no delegation; the README default for trivial single-file edits."
+    },
+    {
+      "id": "orchestrate-candidate",
+      "meaning": "Orchestration is appropriate; parallelize only when expected_parallelism_value is medium/high and write scopes are disjoint."
+    },
+    {
+      "id": "orchestrate-serialized",
+      "meaning": "Orchestrate with implementation serialized across overlapping writable scopes."
+    },
+    {
+      "id": "orchestrate-with-review",
+      "meaning": "Orchestrate and require an independent reviewer pass before reporting completion (require_review=true default)."
+    }
+  ],
+  "sourceReferences": [
+    {
+      "id": "README",
+      "type": "repository",
+      "path": "README.md",
+      "line": 30,
+      "note": "Advises skipping the orchestrator for single-file trivial edits — the direct-execution candidate rule."
+    },
+    {
+      "id": "plan-D4",
+      "type": "repository",
+      "path": "docs/orchestrator-improvements-plan.md",
+      "section": "D4 — Start-Simple Complexity Gate (lines ~400-438)",
+      "note": "Defines the eight dimensions and the recommendation semantics this table formalizes."
+    },
+    {
+      "id": "config",
+      "type": "repository",
+      "path": "src/core/config.ts",
+      "line": 51,
+      "note": "max_parallel integer 1..8 default 4 — the ceiling context for parallelism-value reasoning."
+    },
+    {
+      "id": "policy",
+      "type": "repository",
+      "path": "src/core/policy.ts",
+      "lines": "71-91",
+      "note": "orchestrationRules(): prompt-guidance-only constraints (disjoint write scopes, serialize overlapping implementation, review before completion). This table inherits the same advisory boundary."
+    },
+    {
+      "id": "policy-guidance",
+      "type": "repository",
+      "path": "src/core/policy.ts",
+      "lines": "53-62",
+      "note": "WORKTREE_BOUNDARY_GUIDANCE / MANAGED_WORKTREE_GUIDANCE: prompt rules and managed worktrees do not provide atomic child isolation — shared-state serialization is required, not assumed."
+    },
+    {
+      "id": "R1",
+      "type": "web-research",
+      "url": "https://www.anthropic.com/engineering/multi-agent-research-system",
+      "role": "Plan source R1 for D4",
+      "note": "Directional evidence on multi-agent cost and the value of decomposition; cited by the parent plan, not a validation of this table."
+    },
+    {
+      "id": "R4",
+      "type": "web-research",
+      "url": "https://beam.ai/agentic-insights/multi-agent-orchestration-patterns-production",
+      "role": "Plan source R4 for D4",
+      "note": "Directional evidence on orchestration patterns; the secondary '64% single-agent sufficiency' claim must be validated independently before use."
+    }
+  ],
+  "designOnlyStatement": "This artifact is design-only: it makes no runtime changes, is not referenced by plugin code, enforces nothing, and contains no measured results or telemetry."
+}

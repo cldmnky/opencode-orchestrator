@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "taskId": "issue-8-d2-handoff-schema-draft",
+  "status": "completed",
+  "outcome": "Drafted the D2 versioned structured-handoff contract: a Draft 2020-12 JSON Schema (docs/phase-1/d2-handoff.schema.json), one illustrative example that validates against it (docs/phase-1/d2-handoff.example.json), and a compatibility document mapping the envelope to the existing five-field prose handoff (docs/phase-1/d2-handoff.md). Confirmed HANDOFF_FORMAT remains text-only: no runtime parser, prompt change, or adoption claim is included in this draft.",
+  "facts": [
+    {
+      "statement": "HANDOFF_FORMAT in src/core/policy.ts defines five fields (Outcome, Files, Verification, Risks, Follow-up) and is embedded verbatim into orchestration prompts.",
+      "evidence": [
+        "src/core/policy.ts#L19-25",
+        "src/core/policy.ts#L94",
+        "src/core/prompts.ts#L28"
+      ]
+    },
+    {
+      "statement": "The repository has no structured handoff parser or runtime gate; every match for 'handoff' in src/ is a prompt string or a text constant.",
+      "evidence": [
+        "src/core/policy.ts",
+        "src/core/prompts.ts",
+        "src/opencode-v2/plugin.ts#L85"
+      ]
+    },
+    {
+      "statement": "D2 of docs/orchestrator-improvements-plan.md proposes a 13-field versioned JSON envelope: version, taskId, status, outcome, facts, assumptions, filesRead, filesChanged, verification, risks, followUp, artifactRefs, reviewState.",
+      "evidence": ["docs/orchestrator-improvements-plan.md#L313-329"]
+    },
+    {
+      "statement": "At base commit f7f45176096c2346957cdf52493017185eda3946, docs/phase-1 had no tracked files and was absent from the git tree; the schema, example, and mapping document are among the Phase 1 additions to that directory.",
+      "evidence": ["docs/phase-1"]
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "assumption-token-reduction",
+      "statement": "A structured handoff envelope reduces token cost versus raw transcript passing by 'at least 40%' as claimed by the npm package linked from the plan.",
+      "status": "Not supported",
+      "evidence": ["docs/orchestrator-improvements-plan.md#L331"]
+    },
+    {
+      "id": "assumption-design-only",
+      "statement": "Issue #8 is design-only, so this draft requires no runtime code change to be accepted.",
+      "status": "Verified",
+      "evidence": ["docs/orchestrator-improvements-plan.md#L346-348"]
+    }
+  ],
+  "filesRead": [
+    {
+      "path": "src/core/policy.ts",
+      "scope": "Confirmed HANDOFF_FORMAT fields (lines 19-25) and CHILD_TASK_CONTRACT; no edits made."
+    },
+    {
+      "path": "src/core/prompts.ts",
+      "scope": "Confirmed HANDOFF_FORMAT is embedded verbatim; no prompt changes made."
+    },
+    {
+      "path": "docs/orchestrator-improvements-plan.md",
+      "scope": "Read plan item D2 (lines 305-356) for the proposed field list and design constraints."
+    },
+    {
+      "path": "docs/phase-1",
+      "scope": "Listed the directory and confirmed via git ls-tree at base commit f7f45176096c2346957cdf52493017185eda3946 that docs/phase-1 had no tracked files (it was absent from the git tree)."
+    }
+  ],
+  "filesChanged": [
+    {
+      "path": "docs/phase-1/d2-handoff.schema.json",
+      "scope": "Written: Draft 2020-12 JSON Schema for the versioned structured handoff envelope (version 1)."
+    },
+    {
+      "path": "docs/phase-1/d2-handoff.example.json",
+      "scope": "Written: illustrative handoff that validates against the schema."
+    },
+    {
+      "path": "docs/phase-1/d2-handoff.md",
+      "scope": "Written: field mapping to the five-field prose handoff, added-field rationale, and rendering notes."
+    }
+  ],
+  "verification": [
+    {
+      "command": "bun run typecheck && bun test && bun run build",
+      "status": "not-run",
+      "result": "Not run: this task changed no runtime code; the full suite remains the ship gate for the later implementation work."
+    },
+    {
+      "command": "JSON.parse on schema and example",
+      "status": "pass",
+      "result": "Both documents parse as valid JSON without errors.",
+      "evidence": [
+        "docs/phase-1/d2-handoff.schema.json",
+        "docs/phase-1/d2-handoff.example.json"
+      ]
+    },
+    {
+      "command": "Example validation against schema (ephemeral Bun script: minimal deterministic validator + Zod cross-check)",
+      "status": "pass",
+      "result": "The example satisfies required fields, enums, const version 1, additionalProperties=false object invariants, minItems evidence, and path/URL patterns; twelve targeted negative mutations each failed as expected.",
+      "evidence": [
+        "docs/phase-1/d2-handoff.schema.json",
+        "docs/phase-1/d2-handoff.example.json"
+      ]
+    },
+    {
+      "command": "git diff --check on owned files",
+      "status": "pass",
+      "result": "No whitespace errors reported for the three phase-1 files.",
+      "evidence": ["docs/phase-1"]
+    }
+  ],
+  "risks": [
+    {
+      "severity": "medium",
+      "statement": "additionalProperties=false on the envelope and every object definition means the draft cannot add fields without a version bump; a future runtime that treats unknown fields as hard validation errors would break forward compatibility with older writers."
+    },
+    {
+      "severity": "low",
+      "statement": "The kind-dependent artifactRef path/URL patterns use if/then applicators, which only 2020-12-capable validators enforce; older validator implementations may skip them silently."
+    },
+    {
+      "severity": "low",
+      "statement": "The 'at least 40% token reduction' figure from the plan's linked npm package remains an unverified external claim and must not be repeated as a measured result."
+    }
+  ],
+  "followUp": "If this draft is accepted, implement a runtime contract module (candidate src/core/contracts.ts) that validates handoffs against the schema and emit the structured envelope from prompt generation, keeping the five-field prose rendering for humans.",
+  "artifactRefs": [
+    {
+      "kind": "file",
+      "reference": "docs/phase-1/d2-handoff.schema.json",
+      "description": "Draft 2020-12 JSON Schema (version 1) for the structured handoff envelope."
+    },
+    {
+      "kind": "file",
+      "reference": "docs/phase-1/d2-handoff.example.json",
+      "description": "Valid illustrative example handoff."
+    },
+    {
+      "kind": "file",
+      "reference": "docs/phase-1/d2-handoff.md",
+      "description": "Mapping from the five-field prose handoff to the structured fields, plus rendering and evolution notes."
+    },
+    {
+      "kind": "url",
+      "reference": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The Draft 2020-12 metaschema that d2-handoff.schema.json declares conformance to."
+    }
+  ],
+  "reviewState": "not-requested"
+}

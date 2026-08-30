@@ -41,7 +41,7 @@ bun run build
 
 - Verify first: `bun run typecheck && bun test && bun run build`. `build` emits `dist/index.js`, `dist/tui.js`, `dist/commands.js`, `dist/installer.js`, `dist/cli/index.js`; `dist/` is gitignored but included in `npm pack`.
 - Commit/push: `git add -A && git commit -m "chore: ..."` then `git push origin main`.
-- The distribution name is `opencode-v2-agent-orchestrator`; the runtime plugin ID stays `opencode-orchestrator` (`src/opencode-v2/plugin.ts`, `src/tui.ts`) for compatibility. Local source-build/`npm pack` installation is verified; npm publication is not claimed. Do not publish to the registry, tag releases, or claim availability.
+- The distribution name is `opencode-v2-agent-orchestrator`; the runtime plugin ID stays `opencode-orchestrator` (`src/opencode-v2/plugin.ts`, `src/tui.ts`) for compatibility. Local source-build/`npm pack` installation is verified. Tagging releases (`git tag vX.Y.Z && git push origin vX.Y.Z`, `gh release create`) and publishing to the npm registry (`npm publish`) are supported when cutting a release.
 
 ## Known Verification Traps
 

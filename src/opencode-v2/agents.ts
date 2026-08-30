@@ -3,8 +3,6 @@ import {
   GH_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
-  CD_TOOL_PERMISSION,
-  SESSION_MOVE_PERMISSION,
   goalToolPermissionRule,
   hasExactPermissionRule,
   orchestratorOnlyPermissionRules,

@@ -153,7 +153,7 @@ describe("goal tools", () => {
   test("goal tools stay keyed to the stable origin project across a session move", async () => {
     // A session whose durable anchor records a different origin keeps its
     // goal/run/halt state under the origin project, not the current one, so a
-    // /cd move never orphans the goal.
+    // session move never orphans the goal.
     const sessionID = "moved-session"
     const anchorKey = `session/v1/project/${sessionID}`
     const { tools, values } = collectTools(

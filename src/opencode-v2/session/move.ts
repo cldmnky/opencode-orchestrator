@@ -19,9 +19,9 @@ import {
 /**
  * Reusable session-move primitive (stage 4).
  *
- * `/cd` and the worktree move path share one helper so both preserve the
- * durable session anchor, the worktree session index, and the tracked
- * worktree ownership when a session changes directory:
+ * `orchestrator_worktree_enter` and native session moves share one helper so
+ * both preserve the durable session anchor, the worktree session index, and
+ * the tracked worktree ownership when a session changes directory:
  *
  * - The target is resolved against the session's *current* location (from
  *   `session.get`), not the plugin's load-time location, so a session that
@@ -159,7 +159,7 @@ async function relocateAnchor(
       updatedAt: now,
     }
     if (oldProjectID === newProjectID) {
-      // Same-project move (e.g. /cd into a subdir of the same repository):
+      // Same-project move (e.g. into a subdir of the same repository):
       // `moveSessionAnchor` would set-then-remove the *same* key and destroy
       // the record, so rewrite it in place with the origin preserved.
       anchor = await writeSessionAnchor(storage, movedRecord, now)

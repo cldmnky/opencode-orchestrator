@@ -71,7 +71,7 @@ export const orchestratorPlugin = Plugin.define({
         await ctx.tool.transform((draft) => {
           addGoalTools(draft, ctx.storage, ctx.location, options)
           addGhTools(draft, { storage: ctx.storage, runner, location: ctx.location, options })
-          addWorktreeTools(draft, { storage: ctx.storage, runner, location: ctx.location, options })
+          addWorktreeTools(draft, { storage: ctx.storage, runner, location: ctx.location, options, session: ctx.session })
           addOrchestrationTools(draft, {
             options,
             location: ctx.location,
@@ -92,8 +92,8 @@ export const orchestratorPlugin = Plugin.define({
               "Delegate with the child-task contract: Task, Expected outcome, Scope/file ownership, Must do, Must not do, Verification, and handoff.",
               "Parallel writes require an exact disjoint write scope from every child; separate established facts from assumptions.",
               "Use orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update for session goal state.",
-              "Move the current session with /cd; session ID and history are preserved and the durable anchor follows the session, while goal/plan/halt state stays keyed to the origin project.",
-              "Use orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_push, and orchestrator_worktree_cleanup only for the current session's managed worktree; delegated children get no atomic isolation.",
+              "Use orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_enter, orchestrator_worktree_push, and orchestrator_worktree_cleanup only for the current session's managed worktree; delegated children get no atomic isolation.",
+              "When managed worktrees are used for implementation, the required order is orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer. orchestrator_worktree_enter moves only the current session into its tracked worktree (session ID and history preserved); children delegated afterward inherit or start from that context, while no atomic child isolation is guaranteed.",
               "Use orchestrator_task_complexity_classify (advisory, user-overridable), orchestrator_handoff_validate (callable, not an automatic gate), and orchestrator_admission_transition (stateless) to classify complexity, validate worker handoffs before downstream use, and track admission state.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
             ].join("\n"),
@@ -110,9 +110,9 @@ export const orchestratorPlugin = Plugin.define({
       )
 
       // Anchor reconciliation for `session.moved` events (native moves and
-      // `/cd`): relocates the durable anchor to the new project, preserves the
-      // origin, and marks any tracked worktree owned by the moved session as
-      // moved.
+      // orchestrator_worktree_enter): relocates the durable anchor to the new
+      // project, preserves the origin, and marks any tracked worktree owned by
+      // the moved session as moved.
       registrations.push({
         dispose: startWorktreeEventSync(ctx, options),
       })

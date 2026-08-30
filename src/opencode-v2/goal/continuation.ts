@@ -94,7 +94,7 @@ export function startGoalContinuation(context: ContinuationContext, options: Orc
 
   async function admitContinuation(sessionID: string): Promise<void> {
     // Goal/run/halt records stay anchored to the session's stable origin
-    // project across `/cd` moves, so admit resolves the same project.
+    // project across session moves, so admit resolves the same project.
     const keyedLocation = { ...context.location, project: { id: await stableProjectID(context.storage, context.location, sessionID) } }
     const key = goalStorageKey(keyedLocation, sessionID)
     const stopKey = stopStorageKey(keyedLocation, sessionID)
@@ -180,7 +180,7 @@ function isEvent(value: unknown): value is SessionEvent {
 
 function matchesLocation(event: SessionEvent, location: LocationLike): boolean {
   if (!event.location) return true
-  // A `/cd` move keeps the session in the same workspace but changes its
+  // A session move keeps the session in the same workspace but changes its
   // directory; durable goal/run/halt state stays keyed by the stable origin
   // project, so admission only needs workspace identity. Without a workspace
   // to anchor on, fall back to exact directory matching (pre-move behavior).

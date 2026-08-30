@@ -5,7 +5,8 @@ import {
   buildOrchestratorSystem,
   buildWorkerSystem,
 } from "../../src/core/prompts.js"
-import { parseOptions } from "../../src/core/config.js"
+import { COMMAND_NAMES, parseOptions } from "../../src/core/config.js"
+import { commandDefinitions } from "../../src/opencode-v2/commands/index.js"
 import {
   DELEGATION_RULES,
   HANDOFF_FORMAT,
@@ -28,6 +29,31 @@ describe("configuration", () => {
 
   test("rejects an unsafe parallelism limit", () => {
     expect(() => parseOptions({ max_parallel: 9 })).toThrow()
+  })
+
+  test("accepts legacy commands.cd but ignores it completely", () => {
+    // Strict option parsing keeps accepting `commands: { cd: true|false }` for
+    // backward compatibility, but the parsed legacy key never surfaces in
+    // COMMAND_NAMES, command definitions, or registered commands.
+    for (const value of [true, false]) {
+      const options = parseOptions({ commands: { cd: value } })
+      expect(options.commands.cd).toBe(value)
+      expect(COMMAND_NAMES).not.toContain("cd")
+    }
+    const definitions = commandDefinitions(parseOptions({ commands: { cd: true } }))
+    expect(definitions.map((definition) => definition.name)).toEqual([
+      "orchestrate",
+      "goal",
+      "restructure",
+      "run-plan",
+      "halt",
+      "handover",
+      "polish",
+      "stress-plan",
+    ])
+    expect(definitions.map((definition) => definition.name)).not.toContain("cd")
+    // An unknown command key is still rejected by the strict schema.
+    expect(() => parseOptions({ commands: { not_a_command: true } })).toThrow()
   })
 })
 
@@ -113,7 +139,6 @@ describe("remote orchestration policy", () => {
     "handover",
     "polish",
     "stress-plan",
-    "cd",
   ]
 
   function allPromptKinds(): Array<[string, string]> {
@@ -174,9 +199,13 @@ describe("remote orchestration policy", () => {
   test("every prompt kind distinguishes managed current-session worktrees from unavailable atomic child isolation", () => {
     for (const [, prompt] of allPromptKinds()) {
       expect(prompt).toContain("orchestrator_worktree_create")
+      expect(prompt).toContain("orchestrator_worktree_enter")
       expect(prompt).toContain("owned by the current session")
       expect(prompt).toContain("not atomic child isolation")
-      expect(prompt).toContain("/cd moves the current session while preserving its ID and history")
+      expect(prompt).toContain("required order is orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer")
+      expect(prompt).toContain("moves only the current session")
+      expect(prompt).toContain("children delegated afterward inherit or start from that context")
+      expect(prompt).not.toMatch(/\/cd/)
     }
     // The remote GitHub guidance is still present alongside the worktree text.
     expect(MANAGED_WORKTREE_GUIDANCE).toContain("orchestrator_worktree_cleanup")
@@ -185,12 +214,11 @@ describe("remote orchestration policy", () => {
     expect(REMOTE_ORCHESTRATION_GUIDANCE).toContain(MANAGED_WORKTREE_GUIDANCE)
   })
 
-  test("the cd command prompt requires a real session move and rejects shell-shaped input", () => {
-    const prompt = buildCommandPrompt("cd", "subdir")
-    expect(prompt).toContain("session ID and history")
-    expect(prompt).toContain("existing directory")
-    expect(prompt).toContain("flag-shaped or shell-metacharacter")
-    expect(prompt).toContain("Do not run a shell or create a worktree")
+  test("no command prompt renders /cd and no default prompt mentions the slash command", () => {
+    for (const [, prompt] of allPromptKinds()) {
+      expect(prompt).not.toMatch(/\/cd/)
+    }
+    expect(buildCommandPrompt("orchestrate", "use a managed worktree")).toContain("orchestrator_worktree_enter")
   })
 
   test("never hard-codes deployment-specific GitHub tool names", () => {

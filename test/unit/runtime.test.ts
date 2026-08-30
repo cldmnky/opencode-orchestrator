@@ -337,7 +337,7 @@ describe("runtime commands", () => {
 
   test("run-plan selects plans from the session's current location after a move", async () => {
     // The plugin loads in `directory` (no plans), but the session has moved to
-    // `moved` via /cd: plan selection must use the session's current location.
+    // `moved` via a session move: plan selection must use the session's current location.
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
     const moved = mkdtempSync(join(tmpdir(), "orchestrator-runtime-moved-"))
     mkdirSync(join(moved, ".orchestrator", "plans"), { recursive: true })

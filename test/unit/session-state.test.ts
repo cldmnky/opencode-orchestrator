@@ -1,10 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { parseOptions, type OrchestratorOptions } from "../../src/core/config.js"
 import {
-  CD_TOOL_PERMISSION,
   GH_TOOL_PERMISSION,
   ORCHESTRATION_TOOL_PERMISSION,
-  SESSION_MOVE_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
   orchestratorOnlyPermissionRule,
 } from "../../src/core/permissions.js"
@@ -86,11 +84,9 @@ describe("configuration feature policy", () => {
 })
 
 describe("permission constants", () => {
-  test("exports goal-style orchestrator-only actions for gh/worktree/cd/session move/validation", () => {
+  test("exports goal-style orchestrator-only actions for gh/worktree/validation without dead cd actions", () => {
     expect(GH_TOOL_PERMISSION).toBe("orchestrator_gh")
     expect(WORKTREE_TOOL_PERMISSION).toBe("orchestrator_worktree")
-    expect(CD_TOOL_PERMISSION).toBe("orchestrator_cd")
-    expect(SESSION_MOVE_PERMISSION).toBe("orchestrator_session_move")
     expect(ORCHESTRATION_TOOL_PERMISSION).toBe("orchestrator_validation")
   })
 
@@ -101,12 +97,13 @@ describe("permission constants", () => {
     for (const action of [
       GH_TOOL_PERMISSION,
       WORKTREE_TOOL_PERMISSION,
-      CD_TOOL_PERMISSION,
-      SESSION_MOVE_PERMISSION,
       ORCHESTRATION_TOOL_PERMISSION,
     ]) {
       expect(rule.action).toContain(action)
     }
+    // The legacy /cd and session-move actions are no longer emitted.
+    expect(rule.action).not.toContain("orchestrator_cd")
+    expect(rule.action).not.toContain("orchestrator_session_move")
   })
 })
 

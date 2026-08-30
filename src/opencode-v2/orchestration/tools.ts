@@ -156,7 +156,7 @@ function resolveValidationDeps(deps: OrchestrationToolsDeps): ValidationDeps {
   }
 }
 
-/** Resolve the session's current post-/cd location, falling back to the plugin load-time location. */
+/** Resolve the session's current post-move location, falling back to the plugin load-time location. */
 async function resolveSessionLocation(
   sessionLike: SessionLike,
   sessionID: string,

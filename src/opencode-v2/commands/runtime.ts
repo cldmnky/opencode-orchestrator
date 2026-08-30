@@ -5,7 +5,6 @@ import type { Model } from "@opencode-ai/schema/model"
 import type { CommandName, CommandInvocationLike } from "./index.js"
 import { commandDefinitions } from "./index.js"
 import { buildCommandPrompt } from "../../core/prompts.js"
-import { moveSessionToDirectory } from "../session/move.js"
 import { redact } from "../process/redact.js"
 import {
   goalStorageKey,
@@ -51,10 +50,6 @@ export async function runCommand(
   }
   if (name === "handover") {
     await runHandover(context, input.sessionID, args)
-    return
-  }
-  if (name === "cd") {
-    await runCdCommand(context, input.sessionID, args, input.delivery)
     return
   }
 
@@ -153,31 +148,6 @@ async function runHandover(context: Context, sessionID: string, focus: string): 
     sections.push(`## Current diff\nUnavailable: ${redact(errorMessage(error))}`)
   }
   await emitStatus(context, sessionID, redact(sections.join("\n\n")).slice(0, 24_000))
-}
-
-async function runCdCommand(
-  context: Context,
-  sessionID: string,
-  args: string,
-  delivery: CommandInvocationLike["delivery"],
-): Promise<void> {
-  const outcome = await moveSessionToDirectory(
-    {
-      session: context.session,
-      storage: context.storage,
-      location: context.location,
-    },
-    { sessionID, target: args, delivery: delivery ?? null },
-  )
-  if (!outcome.ok) {
-    await emitStatus(context, sessionID, `/cd rejected: ${redact(outcome.reason)}`)
-    return
-  }
-  await emitStatus(
-    context,
-    sessionID,
-    `Session moved to ${outcome.session.location?.directory ?? "unknown"}; session ${outcome.session.id} and history preserved.`,
-  )
 }
 
 // Resolve the session's *current* location so post-move commands operate where

@@ -185,6 +185,52 @@ function memStorage(initial: Map<string, unknown> = new Map()): StorageLike & { 
   }
 }
 
+type SessionState = {
+  id: string
+  projectID: string
+  directory: string
+  workspaceID?: string
+}
+
+// Fake session mirroring the real Session.Info shape. It records every move
+// and advances its own location so the move helper's re-read verification
+// observes the moved session; the project ID is preserved across moves unless
+// `projectIDFor` derives a new one from the destination directory.
+function sessionFixture(
+  initial: SessionState,
+  projectIDFor?: (directory: string) => string,
+): {
+  state(): SessionState
+  moves: Array<Record<string, unknown>>
+  get(input: { sessionID: string }): Promise<{ id: string; projectID: string; location: { directory: string; workspaceID?: string } }>
+  move(input: Record<string, unknown>): Promise<void>
+} {
+  let current = { ...initial }
+  const moves: Array<Record<string, unknown>> = []
+  return {
+    state: () => current,
+    moves,
+    get: async () => ({
+      id: current.id,
+      projectID: current.projectID,
+      location: {
+        directory: current.directory,
+        ...(typeof current.workspaceID === "string" ? { workspaceID: current.workspaceID } : {}),
+      },
+    }),
+    move: async (input) => {
+      moves.push(input)
+      const directory = String(input.directory)
+      current = {
+        id: initial.id,
+        projectID: projectIDFor ? projectIDFor(directory) : current.projectID,
+        directory,
+        workspaceID: typeof input.workspaceID === "string" ? input.workspaceID : initial.workspaceID,
+      }
+    },
+  }
+}
+
 function wTreeOptions(overrides: Record<string, unknown> = {}): OrchestratorOptions {
   return parseOptions({ worktree: { enabled: true, allow_mutations: true, root: "/srv/worktrees" }, ...overrides })
 }
@@ -194,6 +240,7 @@ function collectWorktreeTools(deps: {
   values?: Map<string, unknown>
   runner?: ProcessRunner
   pathExists?: (directory: string) => Promise<boolean>
+  session?: Parameters<typeof addWorktreeTools>[1]["session"]
 } = {}): { tools: Map<string, ToolLike>; values: Map<string, unknown> } {
   const values = deps.values ?? new Map<string, unknown>()
   const storage = memStorage(values)
@@ -210,6 +257,7 @@ function collectWorktreeTools(deps: {
       runner,
       location,
       options: deps.options ?? wTreeOptions(),
+      session: deps.session ?? sessionFixture({ id: "session-1", projectID: "origin", directory: "/workspace" }),
       pathExists: deps.pathExists,
       secrets: ["supersecret-token"],
     },
@@ -735,7 +783,7 @@ describe("worktree durable state", () => {
 })
 
 describe("worktree tools", () => {
-  test("registers the five orchestrator_worktree tools with the shared permission", () => {
+  test("registers the six orchestrator_worktree tools with the shared permission", () => {
     const { tools } = collectWorktreeTools()
     expect([...tools.keys()]).toEqual([
       "worktree_list",
@@ -743,6 +791,7 @@ describe("worktree tools", () => {
       "worktree_status",
       "worktree_push",
       "worktree_cleanup",
+      "worktree_enter",
     ])
     for (const tool of tools.values()) {
       expect(tool.options?.namespace).toBe("orchestrator")
@@ -750,9 +799,10 @@ describe("worktree tools", () => {
     }
   })
 
-  test("registers nothing when worktree.enabled is false", () => {
+  test("registers nothing when worktree.enabled is false, including worktree_enter", () => {
     const { tools } = collectWorktreeTools({ options: parseOptions({}) })
     expect(tools.size).toBe(0)
+    expect(tools.has("worktree_enter")).toBe(false)
   })
 
   test("gates every tool to the orchestrator agent", async () => {
@@ -762,6 +812,140 @@ describe("worktree tools", () => {
     await expect(
       tools.get("worktree_create")!.execute({ confirm: true }, worker),
     ).rejects.toThrow(/only to the orchestrator/)
+    await expect(
+      tools.get("worktree_enter")!.execute({}, worker),
+    ).rejects.toThrow(/only to the orchestrator/)
+  })
+
+  test("worktree_enter requires no confirm flag and no allow_mutations", async () => {
+    const { tools } = collectWorktreeTools({
+      options: wTreeOptions({ worktree: { enabled: true, allow_mutations: false, root: "/srv/worktrees" } }),
+    })
+    // No tracked record: with allow_mutations off the tool still runs (it
+    // never runs git) and answers truthfully instead of failing the gate.
+    const output = await tools.get("worktree_enter")!.execute({}, toolContext("session-1", "orchestrator"))
+    expect(output.content).toContain("no tracked worktree for this session")
+  })
+
+  describe("worktree_enter", () => {
+    test("moves the invoking parent session into its tracked ready worktree with verified durable state", async () => {
+      const tracked = await mkdtemp(path.join(tmpdir(), "orchestrator-enter-"))
+      const session = sessionFixture({ id: "session-1", projectID: "origin", directory: "/workspace", workspaceID: "ws-1" })
+      const { tools, values } = collectWorktreeTools({ session })
+      seedRecord(values, { dir: tracked })
+
+      const output = await tools.get("worktree_enter")!.execute({}, toolContext("session-1", "orchestrator"))
+      const parsed = JSON.parse(output.content) as {
+        entered: boolean
+        directory: string
+        record: WorktreeRecord
+        anchor: SessionAnchor
+        session: { id: string; location: { directory: string } }
+        evidence: EvidenceRecord
+      }
+
+      expect(parsed.entered).toBe(true)
+      const canonical = await resolveRealpath(tracked)
+      expect(parsed.directory).toBe(canonical)
+      // The tracked directory comes only from the durable record; the
+      // invoking parent tool.sessionID is the session that moved.
+      expect(session.moves).toHaveLength(1)
+      expect(session.moves[0]?.sessionID).toBe("session-1")
+      expect(session.moves[0]?.directory).toBe(canonical)
+      expect(parsed.session.id).toBe("session-1")
+      expect(parsed.session.location?.directory).toBe(canonical)
+
+      // Helper-updated durable state: anchor, session index, and worktree
+      // record are all verified after the move.
+      const anchor = values.get(sessionAnchorStorageKey("origin", "session-1")) as SessionAnchor | undefined
+      expect(anchor?.currentProjectID).toBe("origin")
+      expect(anchor?.currentDirectory).toBe(canonical)
+      const index = values.get(sessionIndexStorageKey("session-1")) as SessionIndexRecord | undefined
+      expect(index?.projectID).toBe("origin")
+      expect(index?.directory).toBe(canonical)
+      expect(parsed.record.status).toBe("moved")
+      expect((values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord).status).toBe("moved")
+
+      // Live per-invocation evidence bound to the invoking parent session;
+      // the result never claims child isolation.
+      expect(parsed.evidence).toMatchObject({
+        marker: "EVIDENCE_LIVE",
+        freshness: "per-invocation",
+        authority: "authoritative-for-tested-fields",
+        source: "opencode-orchestrator.worktree.enter",
+        sessionID: "session-1",
+      })
+      expect(evidenceSchema.safeParse(parsed.evidence).success).toBe(true)
+      expect(JSON.stringify(parsed)).not.toContain("isolat")
+    })
+
+    test("reports truthfully when no tracked worktree exists", async () => {
+      const { tools } = collectWorktreeTools()
+      const output = await tools.get("worktree_enter")!.execute({}, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("no tracked worktree for this session")
+      expect(output.content).not.toContain("evidence")
+    })
+
+    test("refuses non-ready lifecycle states truthfully", async () => {
+      for (const status of ["pending", "moved", "dirty", "orphaned", "cleanup-failed"] as const) {
+        const session = sessionFixture({ id: "session-1", projectID: "origin", directory: "/workspace" })
+        const { tools, values } = collectWorktreeTools({ session })
+        seedRecord(values, { status })
+        const output = await tools.get("worktree_enter")!.execute({}, toolContext("session-1", "orchestrator"))
+        expect(output.content, `status=${status}`).toContain(`tracked worktree is ${status}`)
+        expect(output.content, `status=${status}`).toContain("only a ready worktree can be entered")
+        expect(session.moves).toHaveLength(0)
+        expect(output.content).not.toContain("evidence")
+      }
+    })
+
+    test("rejects a tracked record whose directory no longer exists", async () => {
+      const session = sessionFixture({ id: "session-1", projectID: "origin", directory: "/workspace" })
+      const { tools, values } = collectWorktreeTools({ session })
+      seedRecord(values, { dir: "/nonexistent-enter-target-xyz" })
+      const output = await tools.get("worktree_enter")!.execute({}, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("worktree_enter failed")
+      expect(output.content).toContain("does not exist")
+      expect(session.moves).toHaveLength(0)
+    })
+
+    test("surfaces a native session.move failure redacted", async () => {
+      const tracked = await mkdtemp(path.join(tmpdir(), "orchestrator-enter-"))
+      const base = sessionFixture({ id: "session-1", projectID: "origin", directory: "/workspace" })
+      const failing = {
+        get: base.get,
+        move: async () => {
+          throw new Error("boom client_secret=leaked-value")
+        },
+      }
+      const { tools, values } = collectWorktreeTools({ session: failing })
+      seedRecord(values, { dir: tracked })
+      const output = await tools.get("worktree_enter")!.execute({}, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("worktree_enter failed")
+      expect(output.content).toContain("session move failed")
+      expect(output.content).not.toContain("leaked-value")
+      expect(output.content).toContain("[redacted]")
+      expect(output.content).not.toContain("evidence")
+    })
+
+    test("reports helper verification failure without durable writes", async () => {
+      const tracked = await mkdtemp(path.join(tmpdir(), "orchestrator-enter-"))
+      const base = sessionFixture({ id: "session-1", projectID: "origin", directory: "/workspace" })
+      let reads = 0
+      const rogue = {
+        get: async () => {
+          reads += 1
+          if (reads > 1) return { ...base.state(), location: { directory: "/somewhere-else" } }
+          return base.get({ sessionID: "session-1" })
+        },
+        move: base.move,
+      }
+      const { tools, values } = collectWorktreeTools({ session: rogue })
+      seedRecord(values, { dir: tracked })
+      const output = await tools.get("worktree_enter")!.execute({}, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("verification failed")
+      expect(output.content).not.toContain("evidence")
+    })
   })
 
   test("requires allow_mutations for create but not for list", async () => {

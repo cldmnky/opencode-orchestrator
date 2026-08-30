@@ -94,10 +94,11 @@ export function goalStorageKey(location: LocationLike, sessionID: string): strin
  * session: the session anchor's stable `originProjectID` when an anchor is
  * present at the given location, otherwise the location's own project ID.
  *
- * A session that moved via `/cd` (or a native `session.moved` event) relocates
- * its anchor to the *current* project, so reads here deliberately target the
- * plugin's stable origin location: goal/run/halt records were created under
- * that project and must remain findable after the move. Only an anchor that
+ * A session that moved via `orchestrator_worktree_enter` (or a native
+ * `session.moved` event) relocates its anchor to the *current* project, so
+ * reads here deliberately target the plugin's stable origin location:
+ * goal/run/halt records were created under that project and must remain
+ * findable after the move. Only an anchor that
  * still lives at the origin project (and records a different origin) changes
  * the answer. This keeps storage keys project-stable across moves.
  */

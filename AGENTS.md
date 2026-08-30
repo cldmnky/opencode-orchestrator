@@ -8,7 +8,7 @@
 - Put a CLI-only plugin in global `cli.json`, not project `opencode.json(c)`; this is the form that remains active when the TUI connects to a remote server. Add the OpenTUI/Solid peer dependencies only when rendering JSX.
 - In a CLI plugin, use `context.client` for the connected server and `context.data.on`/`listen` for typed events. Return cleanup functions for subscriptions, slots, routes, renderers, and other owned resources.
 - Treat `https://opencode.ai/v2/openapi.json` as the HTTP contract. For local inspection use `opencode2 api <method> <path>` so service discovery and authentication match the TUI; do not construct a separate unauthenticated localhost client.
-- The GitHub (via `gh`), git worktree, and `/cd` tool families are orchestrator-only and disabled by default (`github.enabled`, `worktree.enabled`). `src/cli/doctor.ts` adds advisory local runtime checks (git/gh presence, `gh auth status` exit-code-only, read-only `gh repo view`, `git worktree list --porcelain`); they never fail the report, never print `gh` output, and the server-side `orchestrator_github_capabilities` probe is authoritative for live session PATH/auth/permissions.
+- The GitHub (via `gh`) and git worktree tool families are orchestrator-only and disabled by default (`github.enabled`, `worktree.enabled`). `src/cli/doctor.ts` adds advisory local runtime checks (git/gh presence, `gh auth status` exit-code-only, read-only `gh repo view`, `git worktree list --porcelain`); they never fail the report, never print `gh` output, and the server-side `orchestrator_github_capabilities` probe is authoritative for live session PATH/auth/permissions.
 
 ## Layout
 
@@ -41,7 +41,7 @@ bun run build
 
 - Verify first: `bun run typecheck && bun test && bun run build`. `build` emits `dist/index.js`, `dist/tui.js`, `dist/commands.js`, `dist/installer.js`, `dist/cli/index.js`; `dist/` is gitignored but included in `npm pack`.
 - Commit/push: `git add -A && git commit -m "chore: ..."` then `git push origin main`.
-- The distribution name is `opencode-v2-agent-orchestrator`; the runtime plugin ID stays `opencode-orchestrator` (`src/opencode-v2/plugin.ts`, `src/tui.ts`) for compatibility. Local source-build/`npm pack` installation is verified; npm publication is not claimed. Do not publish to the registry, tag releases, or claim availability.
+- The distribution name is `opencode-v2-agent-orchestrator`; the runtime plugin ID stays `opencode-orchestrator` (`src/opencode-v2/plugin.ts`, `src/tui.ts`) for compatibility. Local source-build/`npm pack` installation is verified. Tagging releases (`git tag vX.Y.Z && git push origin vX.Y.Z`, `gh release create`) and publishing to the npm registry (`npm publish`) are supported when cutting a release.
 
 ## Known Verification Traps
 

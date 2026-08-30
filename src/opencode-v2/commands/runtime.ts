@@ -6,6 +6,7 @@ import type { CommandName, CommandInvocationLike } from "./index.js"
 import { commandDefinitions } from "./index.js"
 import { buildCommandPrompt } from "../../core/prompts.js"
 import { moveSessionToDirectory } from "../session/move.js"
+import { redact } from "../process/redact.js"
 import {
   goalStorageKey,
   newGoal,
@@ -123,7 +124,7 @@ async function runHandover(context: Context, sessionID: string, focus: string): 
       .map(messageText)
       .filter((text): text is string => Boolean(text))
       .slice(-8)
-    if (messages.length > 0) sections.push("## Recent session context", messages.join("\n\n").slice(0, 8_000))
+    if (messages.length > 0) sections.push("## Recent session context", redact(messages.join("\n\n")).slice(0, 8_000))
   } catch (error) {
     sections.push(`## Session context\nUnavailable: ${redact(errorMessage(error))}`)
   }
@@ -137,7 +138,7 @@ async function runHandover(context: Context, sessionID: string, focus: string): 
       const value = asRecord(item)
       return value ? `${value.status ?? "changed"} ${value.file ?? "unknown"}` : undefined
     }).filter((value): value is string => Boolean(value))
-    sections.push("## VCS status", files.length > 0 ? files.join("\n") : "Working copy is clean.")
+    sections.push("## VCS status", files.length > 0 ? redact(files.join("\n")) : "Working copy is clean.")
   } catch (error) {
     sections.push(`## VCS status\nUnavailable: ${redact(errorMessage(error))}`)
   }
@@ -151,7 +152,7 @@ async function runHandover(context: Context, sessionID: string, focus: string): 
   } catch (error) {
     sections.push(`## Current diff\nUnavailable: ${redact(errorMessage(error))}`)
   }
-  await emitStatus(context, sessionID, sections.join("\n\n").slice(0, 24_000))
+  await emitStatus(context, sessionID, redact(sections.join("\n\n")).slice(0, 24_000))
 }
 
 async function runCdCommand(
@@ -588,10 +589,6 @@ function messageText(value: unknown): string | undefined {
     return summary ? `compaction: ${redact(summary)}` : undefined
   }
   return undefined
-}
-
-function redact(value: string): string {
-  return value.replace(/(api[_-]?key|token|secret|password)\s*[:=]\s*\S+/gi, "$1=[redacted]")
 }
 
 function errorMessage(error: unknown): string {

@@ -1,3 +1,6 @@
+import path from "node:path"
+import { mkdtemp, mkdir, rm, symlink } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { describe, expect, test } from "bun:test"
 import { parseOptions, type OrchestratorOptions } from "../../src/core/config.js"
 import { WORKTREE_TOOL_PERMISSION } from "../../src/core/permissions.js"
@@ -13,6 +16,7 @@ import {
   isPathInside,
   isValidBranchName,
   parseWorktreeList,
+  resolveRealpath,
   validateWorktreeCreate,
   type WorktreeEntry,
 } from "../../src/opencode-v2/worktree/git.js"
@@ -33,6 +37,33 @@ import { startWorktreeEventSync } from "../../src/opencode-v2/worktree/events.js
 import { sessionAnchorStorageKey, type SessionAnchor } from "../../src/opencode-v2/session/state.js"
 
 const location = { directory: "/workspace", project: { id: "origin" } }
+
+type SymlinkFixture = {
+  base: string
+  real: string
+  link: string
+  cleanup(): Promise<void>
+}
+
+/**
+ * Throwaway temp fixture with a real directory symlink, for the `/tmp` vs
+ * `/private/tmp` alias regressions. Returns `undefined` where symlink
+ * creation is unavailable (e.g. unprivileged Windows); callers treat that as
+ * a skip. Always cleaned via `cleanup()`.
+ */
+async function createSymlinkFixture(): Promise<SymlinkFixture | undefined> {
+  const base = await mkdtemp(path.join(tmpdir(), "worktree-alias-"))
+  const real = path.join(base, "real")
+  await mkdir(real)
+  const link = path.join(base, "link")
+  try {
+    await symlink(real, link, "dir")
+  } catch {
+    await rm(base, { recursive: true, force: true })
+    return undefined
+  }
+  return { base, real, link, cleanup: () => rm(base, { recursive: true, force: true }) }
+}
 
 type Call = { cmd: string; args: string[]; cwd?: string; timeoutMs?: number }
 
@@ -334,6 +365,29 @@ describe("branch and path validation", () => {
   })
 })
 
+describe("canonical path resolution", () => {
+  test("resolveRealpath collapses symlink aliases of the same directory", async () => {
+    const fixture = await createSymlinkFixture()
+    if (!fixture) return
+    try {
+      expect(path.join(fixture.link, "tree")).not.toBe(path.join(fixture.real, "tree"))
+      const viaLink = await resolveRealpath(path.join(fixture.link, "tree"))
+      const viaReal = await resolveRealpath(path.join(fixture.real, "tree"))
+      expect(viaLink).toBe(viaReal)
+      expect(viaLink).toBe(path.join(await resolveRealpath(fixture.real), "tree"))
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+  test("resolveRealpath falls back lexically when no ancestor exists", async () => {
+    expect(await resolveRealpath("/nonexistent-worktree-root-xyz/aaa/bbb")).toBe(
+      "/nonexistent-worktree-root-xyz/aaa/bbb",
+    )
+    expect(await resolveRealpath("/srv/worktrees/feature")).toBe("/srv/worktrees/feature")
+  })
+})
+
 describe("gitWorktreeAdd", () => {
   test("creates with -b, -- separator, and base, then verifies via list and rev-parse", async () => {
     const { runner, calls } = scriptedGit(createSuccessScript())
@@ -488,6 +542,100 @@ describe("gitWorktreeAdd", () => {
       ).rejects.toThrow(/rejected/)
     }
     expect(calls).toBe(0)
+  })
+
+  test("throws the redacted add failure immediately on a nonzero exit, skipping verification", async () => {
+    const { runner, calls } = scriptedGit((call) => {
+      if (call.args[0] === "rev-parse") {
+        if (call.args[1] === "--is-bare-repository") return ok("false")
+        if (call.args[1] === "--git-dir") return ok("/repo/.git")
+        return fail("unknown revision")
+      }
+      if (call.args[0] === "worktree" && call.args[1] === "list") return ok(MAIN_ONLY)
+      if (call.args[0] === "worktree" && call.args[1] === "add") {
+        return fail("fatal: access denied for supersecret-token")
+      }
+      return undefined
+    })
+    const redact = (text: string): string => text.replaceAll("supersecret-token", "[redacted]")
+    await expect(
+      gitWorktreeAdd(
+        { runner, redact, pathExists: async () => false },
+        { repoRoot: "/repo", branch: "feature", directory: "/srv/worktrees/feature", base: "main" },
+      ),
+    ).rejects.toThrow(
+      /worktree create failed: git worktree add exited with code 1: fatal: access denied for \[redacted\]/,
+    )
+    // Pre-add list ran; post-add list/ref verification must not.
+    expect(calls.filter((call) => call.args[1] === "list")).toHaveLength(1)
+    expect(
+      calls.filter((call) => call.args[0] === "rev-parse" && call.args[1] === "refs/heads/feature"),
+    ).toHaveLength(1)
+  })
+
+  test("rejects a target that overlaps an existing worktree through a symlink alias", async () => {
+    const fixture = await createSymlinkFixture()
+    if (!fixture) return
+    try {
+      const listed = path.join(fixture.real, "tree")
+      const directory = path.join(fixture.link, "tree")
+      const { runner, calls } = scriptedGit((call) => {
+        if (call.args[0] === "rev-parse") {
+          if (call.args[1] === "--is-bare-repository") return ok("false")
+          if (call.args[1] === "--git-dir") return ok(path.join(fixture.real, ".git"))
+          return fail("unknown revision")
+        }
+        if (call.args[0] === "worktree" && call.args[1] === "list") {
+          return ok(`${MAIN_ONLY}\n\nworktree ${listed}\nHEAD 1111\nbranch refs/heads/feature`)
+        }
+        return undefined
+      })
+      await expect(
+        gitWorktreeAdd(
+          { runner, pathExists: async () => false },
+          { repoRoot: fixture.real, branch: "feature", directory, base: "main" },
+        ),
+      ).rejects.toThrow(/overlaps an existing worktree/)
+      expect(calls.some((call) => call.args[1] === "add")).toBe(false)
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+  test("verifies a create whose target is reached through a symlink alias", async () => {
+    const fixture = await createSymlinkFixture()
+    if (!fixture) return
+    try {
+      const listed = path.join(fixture.real, "tree")
+      const directory = path.join(fixture.link, "tree")
+      let listCalls = 0
+      let refChecks = 0
+      const { runner, calls } = scriptedGit((call) => {
+        if (call.args[0] === "rev-parse") {
+          if (call.args[1] === "--is-bare-repository") return ok("false")
+          if (call.args[1] === "--git-dir") return ok(path.join(fixture.real, ".git"))
+          refChecks += 1
+          return refChecks > 1 ? ok("f1c2dc0abc") : fail("unknown revision")
+        }
+        if (call.args[0] === "worktree" && call.args[1] === "list") {
+          listCalls += 1
+          if (listCalls === 1) return ok(MAIN_ONLY)
+          return ok(`${MAIN_ONLY}\n\nworktree ${listed}\nHEAD f1c2dc0abc\nbranch refs/heads/feature`)
+        }
+        if (call.args[0] === "worktree" && call.args[1] === "add") return ok("")
+        return undefined
+      })
+      const result = await gitWorktreeAdd(
+        { runner, pathExists: async () => false },
+        { repoRoot: fixture.real, branch: "feature", directory, base: "main" },
+      )
+      expect(result.verified).toBe(true)
+      expect(result.verification).toEqual({ listed: true, branchResolved: true })
+      const addCall = calls.find((call) => call.args[1] === "add")
+      expect(addCall?.args).toEqual(["worktree", "add", "-b", "feature", "--", directory, "main"])
+    } finally {
+      await fixture.cleanup()
+    }
   })
 })
 
@@ -852,6 +1000,183 @@ describe("worktree tools", () => {
     expect(parsed.worktrees.map((entry) => entry.directory)).toContain("/srv/worktrees/feature")
     expect(parsed.records).toHaveLength(1)
     expect(parsed.records[0]?.status).toBe("ready")
+  })
+
+  test("create returns the redacted add failure and writes no ready record", async () => {
+    const { runner, calls } = scriptedGit((call) => {
+      if (call.args[0] === "rev-parse") {
+        if (call.args[1] === "--is-bare-repository") return ok("false")
+        if (call.args[1] === "--git-dir") return ok("/repo/.git")
+        return fail("unknown revision")
+      }
+      if (call.args[0] === "worktree" && call.args[1] === "list") return ok(MAIN_ONLY)
+      if (call.args[0] === "worktree" && call.args[1] === "add") {
+        return fail("fatal: remote auth failed for supersecret-token")
+      }
+      return undefined
+    })
+    const { tools, values } = collectWorktreeTools({ runner })
+    const output = await tools
+      .get("worktree_create")!
+      .execute(
+        { repoRoot: "/repo", directory: "/srv/worktrees/feature", branch: "feature", base: "main", confirm: true },
+        toolContext("session-1", "orchestrator"),
+      )
+    expect(output.content).toContain("worktree create failed")
+    expect(output.content).toContain("exited with code 1")
+    expect(output.content).toContain("[redacted]")
+    expect(output.content).not.toContain("supersecret-token")
+    expect(values.has(worktreeStorageKey("origin", "session-1"))).toBe(false)
+    expect(values.has(sessionIndexStorageKey("session-1"))).toBe(false)
+    expect(calls.filter((call) => call.args[1] === "list")).toHaveLength(1)
+  })
+
+  test("create accepts a directory aliased inside the configured root and persists the canonical record", async () => {
+    const fixture = await createSymlinkFixture()
+    if (!fixture) return
+    try {
+      const directory = path.join(fixture.link, "feature")
+      const listed = path.join(fixture.real, "feature")
+      let listCalls = 0
+      let refChecks = 0
+      const { runner, calls } = scriptedGit((call) => {
+        if (call.args[0] === "rev-parse") {
+          if (call.args[1] === "--is-bare-repository") return ok("false")
+          if (call.args[1] === "--git-dir") return ok(path.join(fixture.real, ".git"))
+          refChecks += 1
+          return refChecks > 1 ? ok("f1c2dc0abc") : fail("unknown revision")
+        }
+        if (call.args[0] === "worktree" && call.args[1] === "list") {
+          listCalls += 1
+          if (listCalls === 1) return ok(MAIN_ONLY)
+          return ok(`${MAIN_ONLY}\n\nworktree ${listed}\nHEAD f1c2dc0abc\nbranch refs/heads/feature`)
+        }
+        if (call.args[0] === "worktree" && call.args[1] === "add") return ok("")
+        return undefined
+      })
+      const { tools, values } = collectWorktreeTools({
+        runner,
+        options: wTreeOptions({ worktree: { enabled: true, allow_mutations: true, root: fixture.link } }),
+      })
+      const output = await tools
+        .get("worktree_create")!
+        .execute(
+          { repoRoot: fixture.real, directory, branch: "feature", base: "main", confirm: true },
+          toolContext("session-1", "orchestrator"),
+        )
+      const parsed = JSON.parse(output.content) as { record: WorktreeRecord; verified: boolean }
+      expect(parsed.verified).toBe(true)
+      expect(parsed.record.status).toBe("ready")
+      const canonicalReal = await resolveRealpath(fixture.real)
+      expect(parsed.record.dir).toBe(path.join(canonicalReal, "feature"))
+      expect(parsed.record.repoRoot).toBe(canonicalReal)
+      expect(values.has(worktreeStorageKey("origin", "session-1"))).toBe(true)
+      const addCall = calls.find((call) => call.args[1] === "add")
+      expect(addCall?.args).toEqual(["worktree", "add", "-b", "feature", "--", directory, "main"])
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+  test("status returns the updated record after a status write-back", async () => {
+    const { tools, values } = collectWorktreeTools({
+      runner: scriptedGit((call) => {
+        if (call.args[0] === "worktree" && call.args[1] === "list") {
+          return ok(`${MAIN_ONLY}\n\nworktree /srv/worktrees/feature`)
+        }
+        if (call.args[0] === "status") return ok(" M dirty.txt")
+        return undefined
+      }).runner,
+    })
+    const original = seedRecord(values)
+    expect(original.status).toBe("ready")
+    const output = await tools.get("worktree_status")!.execute({}, toolContext("session-1", "orchestrator"))
+    const parsed = JSON.parse(output.content) as { record: WorktreeRecord; status: string }
+    expect(parsed.status).toBe("dirty")
+    expect(parsed.record?.status).toBe("dirty")
+  })
+
+  test("status stays ready when the record dir is a symlink alias of the porcelain path", async () => {
+    const fixture = await createSymlinkFixture()
+    if (!fixture) return
+    try {
+      const recordDir = path.join(fixture.link, "tree")
+      const listed = path.join(fixture.real, "tree")
+      const { tools, values } = collectWorktreeTools({
+        runner: scriptedGit((call) => {
+          if (call.args[0] === "worktree" && call.args[1] === "list") {
+            return ok(`${MAIN_ONLY}\n\nworktree ${listed}\nHEAD 1111\nbranch refs/heads/feature`)
+          }
+          if (call.args[0] === "status") return ok("")
+          return undefined
+        }).runner,
+      })
+      seedRecord(values, { dir: recordDir })
+      const output = await tools
+        .get("worktree_status")!
+        .execute({ repoRoot: fixture.real }, toolContext("session-1", "orchestrator"))
+      const parsed = JSON.parse(output.content) as { status: string; record: WorktreeRecord | null }
+      expect(parsed.status).toBe("ready")
+      expect(parsed.record?.status).toBe("ready")
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+  test("cleanup refuses the main worktree reached through a symlink alias", async () => {
+    const fixture = await createSymlinkFixture()
+    if (!fixture) return
+    try {
+      const { runner, calls } = scriptedGit((call) => {
+        if (call.args[0] === "worktree" && call.args[1] === "list") {
+          return ok(`worktree ${fixture.real}\nHEAD 0123\nbranch refs/heads/main`)
+        }
+        return undefined
+      })
+      const { tools } = collectWorktreeTools({ runner })
+      const output = await tools
+        .get("worktree_cleanup")!
+        .execute(
+          { repoRoot: fixture.real, directory: fixture.link, confirm: true },
+          toolContext("session-1", "orchestrator"),
+        )
+      expect(output.content).toContain("refused")
+      expect(output.content).toContain("main worktree")
+      expect(calls.some((call) => call.args[1] === "remove")).toBe(false)
+    } finally {
+      await fixture.cleanup()
+    }
+  })
+
+  test("cleanup attributes ownership through a symlink alias", async () => {
+    const fixture = await createSymlinkFixture()
+    if (!fixture) return
+    try {
+      const { tools, values } = collectWorktreeTools({ runner: scriptedGit(() => undefined).runner })
+      const other = newWorktree(
+        {
+          owner: "other-session",
+          sessionID: "other-session",
+          originProjectID: "origin",
+          repoRoot: fixture.real,
+          dir: path.join(fixture.link, "tree"),
+          branch: "feature",
+          base: "main",
+        },
+        100,
+      )
+      values.set(worktreeStorageKey("origin", "other-session"), { ...other, status: "ready" })
+      const output = await tools
+        .get("worktree_cleanup")!
+        .execute(
+          { repoRoot: fixture.real, directory: path.join(fixture.real, "tree"), confirm: true },
+          toolContext("session-1", "orchestrator"),
+        )
+      expect(output.content).toContain("refused")
+      expect(output.content).toContain("owned by session other-session")
+    } finally {
+      await fixture.cleanup()
+    }
   })
 })
 

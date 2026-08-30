@@ -46,7 +46,7 @@ npm pack --pack-destination "$TMPDIR"      # writes a fresh tarball to your temp
 cd ../your-project
 
 # 2. Install the freshly built tarball as a project-local dependency
-npm install --save-dev "$TMPDIR/opencode-v2-agent-orchestrator-0.1.3.tgz"
+npm install --save-dev "$TMPDIR/opencode-v2-agent-orchestrator-0.1.4.tgz"
 
 # 3. Run the installer; with per-agent models
 ./node_modules/.bin/opencode-v2-agent-orchestrator install \

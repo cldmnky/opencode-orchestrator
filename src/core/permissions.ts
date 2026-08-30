@@ -32,6 +32,19 @@ export const WORKTREE_TOOL_PERMISSION = "orchestrator_worktree"
 export const CD_TOOL_PERMISSION = "orchestrator_cd"
 export const SESSION_MOVE_PERMISSION = "orchestrator_session_move"
 
+/**
+ * Shared permission action for the serialized orchestration validation tools.
+ *
+ * The serialized runtime tools (task_complexity_classify, handoff_validate,
+ * admission_transition) are registered under the `orchestrator` namespace and
+ * share this one explicit `permission` action so a single rule grants or
+ * revokes the whole family. They are orchestrator-only: worker agents cannot
+ * see or invoke them unless the operator grants the action explicitly. The
+ * tools are callable validation primitives, not automatic hooks — this
+ * permission controls visibility only, exactly like the goal/feature families.
+ */
+export const ORCHESTRATION_TOOL_PERMISSION = "orchestrator_validation"
+
 export type PermissionEffect = "allow" | "deny" | "ask"
 
 export type PermissionRule = {
@@ -51,7 +64,13 @@ export function orchestratorOnlyPermissionRule(effect: PermissionEffect): Permis
   // Kept for backward compatibility in tests that assert the legacy piped shape;
   // new code should use orchestratorOnlyPermissionRules.
   return {
-    action: [GH_TOOL_PERMISSION, WORKTREE_TOOL_PERMISSION, CD_TOOL_PERMISSION, SESSION_MOVE_PERMISSION].join("|"),
+    action: [
+      GH_TOOL_PERMISSION,
+      WORKTREE_TOOL_PERMISSION,
+      CD_TOOL_PERMISSION,
+      SESSION_MOVE_PERMISSION,
+      ORCHESTRATION_TOOL_PERMISSION,
+    ].join("|"),
     resource: "*",
     effect,
   }
@@ -63,6 +82,7 @@ export function orchestratorOnlyPermissionRules(effect: PermissionEffect): Permi
     { action: WORKTREE_TOOL_PERMISSION, resource: "*", effect },
     { action: CD_TOOL_PERMISSION, resource: "*", effect },
     { action: SESSION_MOVE_PERMISSION, resource: "*", effect },
+    { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect },
   ]
 }
 

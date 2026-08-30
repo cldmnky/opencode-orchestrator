@@ -1,11 +1,15 @@
-# D2 versioned structured handoff — draft schema, example, and compatibility notes
+# D2 versioned structured handoff — draft schema, runtime mirror, and compatibility notes
 
-> Status: **design-only draft** for issue #8 (plan item D2).
-> Deliverables: `d2-handoff.schema.json` (Draft 2020-12 JSON Schema, version `1`),
-> `d2-handoff.example.json` (validating illustrative example), and this document.
-> **No runtime adoption is claimed or implied.** `src/core/policy.ts` and
-> `src/core/prompts.ts` are unchanged; `HANDOFF_FORMAT` still governs generated
-> prompts; and no parser, renderer, or prompt integration consumes these files.
+> Status: **design draft (issue #8) + implemented runtime contract (issue #10).**
+> Plan item D2. Design deliverables: `d2-handoff.schema.json` (Draft 2020-12 JSON Schema,
+> version `1`), `d2-handoff.example.json` (validating illustrative example), and this document.
+> Issue #10 implements the contract as a **strict runtime mirror plus prompt/tool integration**:
+> `src/core/contracts.ts` (Zod mirror, deterministic parse, semantic validation, safety helpers,
+> five-heading renderer), `orchestrator_handoff_validate` (`src/opencode-v2/orchestration/validation.ts`),
+> and the prompt guidance in `src/core/policy.ts` (`STRUCTURED_HANDOFF_GUIDANCE`) with tests in
+> `test/unit/contracts.test.ts` and `test/unit/orchestration-tools.test.ts`. The five-field prose
+> `HANDOFF_FORMAT` still governs every worker's prose handoff. The validator is **callable, not
+> automatic**: no hook intercepts child output, and no completion gate is enforced.
 
 ## 1. The current five-field prose handoff
 
@@ -20,9 +24,11 @@
 | Follow-up | the next concrete action |
 
 `orchestrationRules()` embeds the constant verbatim into generated prompts
-(`src/core/policy.ts:94`, `src/core/prompts.ts:28`). There is no structured
-handoff parser or runtime gate in `src/`; the field exists purely as prompt
-text.
+(`src/core/policy.ts:114`, `src/core/prompts.ts:28`). Since issue #10, prompt generation also asks
+workers for the version-1 structured envelope **in addition to** this prose
+(`STRUCTURED_HANDOFF_GUIDANCE`, `src/core/policy.ts:82-89`), and the parent is told to call
+`orchestrator_handoff_validate` before using a handoff downstream — an explicit tool call, not an
+automatic gate.
 
 ## 2. Mapping five-field prose → structured envelope
 
@@ -35,7 +41,10 @@ text.
 | Follow-up | `followUp` | Same content, validated string (1–4000 chars). |
 
 Rendering the envelope back to the five-field prose is lossless for those five
-fields; see §4.
+fields; see §4. The implemented renderer (`renderD2Handoff`,
+`src/core/contracts.ts`) reproduces exactly the five headings `Outcome`, `Files`,
+`Verification`, `Risks`, `Follow-up` and preserves the read/changed distinction,
+per-file scope, command/status/result, and risk severity.
 
 ## 3. Added fields and why
 
@@ -79,8 +88,10 @@ Follow-up: <followUp>
 ```
 
 The mapping in §2 guarantees the five prose fields survive a
-structured → prose round trip. Rendering is a presentation concern only: this
-draft defines the data contract, not a renderer.
+structured → prose round trip. Rendering is implemented as a one-way function
+(`renderD2Handoff`, `src/core/contracts.ts`); prose → structured is **not**
+supported: the runtime mirror validates and renders envelopes but never parses
+prose back into structured form.
 
 ## 5. Schema notes (Draft 2020-12)
 
@@ -106,17 +117,26 @@ draft defines the data contract, not a renderer.
 ## 6. Compatibility and evolution
 
 - **Information preservation:** every datum required by the five-field handoff
-  has a validated home in the envelope, so a future runtime could emit both the
-  structured envelope and the prose rendering from one source.
+  has a validated home in the envelope. The implemented runtime emits the
+  five-heading prose from the structured envelope with `renderD2Handoff`
+  (`src/core/contracts.ts`) and asks workers for the envelope via
+  `STRUCTURED_HANDOFF_GUIDANCE` (`src/core/policy.ts:82-89`).
 - **Strictness trade-off:** `additionalProperties: false` means adding fields in
   a later draft is a breaking change for writers and readers alike. The draft
   accepts that cost because the whole point of D2 is that downstream agents can
-  rely on validated structure; migration is handled by bumping `version`.
+  rely on validated structure; migration is handled by bumping `version`. The
+  runtime mirror is equally strict: the Zod schemas reject unknown fields at
+  every object depth and fail closed (deterministic issue paths).
 - **Neither schema draft nor example is byte-lineage of the prose contract**: the
-  prose constant remains the operative contract today, and this draft does not
-  promise that existing prose handoffs parse into envelopes.
+  prose constant remains the operative contract today, and this contract does not
+  promise that existing prose handoffs parse into envelopes (prose → structured
+  is not supported).
 
-## 7. Verification performed on this draft
+## 7. Verification performed on this draft (issue #8, historical)
+
+> This section records the **issue #8 draft verification** with the original
+> ephemeral scratch approach, preserved for history. The maintained in-repo
+> runtime verification and tests are in §9 below.
 
 The example was checked with an ephemeral Bun script (kept outside the repo):
 
@@ -139,21 +159,64 @@ Draft 2020-12 implementation (no `format`, `unevaluatedProperties`,
 `prefixItems`, `$dynamicRef`, …). Full metaschema compliance of the schema
 document itself was asserted by keyword coverage rather than by running the
 official metaschema against it. No lint or formatter is configured in this
-repository, so no lint claim is made. `bun run typecheck && bun test && bun run
-build` was intentionally **not** run: this task changes no runtime code, and the
-example records that decision as a `not-run` verification entry.
+repository, so no lint claim is made. At the time of issue #8, `bun run
+typecheck && bun test && bun run build` was intentionally **not** run because
+that phase changed no runtime code; the example records that decision as a
+`not-run` verification entry.
 
-## 8. No runtime adoption
+## 8. Runtime adoption boundary (issue #10)
 
-This is a design-only deliverable. It does not:
+The D2 contract is now implemented as a **strict runtime mirror plus prompt/tool
+integration** — and the boundaries of that adoption are explicit:
 
-- change `src/core/policy.ts` or `src/core/prompts.ts`, or any other source file;
-- introduce a parser, validator call site, or prompt integration;
-- claim that real worker handoffs are (or will be) emitted as envelopes;
-- repeat the plan's "at least 40% token reduction" figure as a measured result —
-  that claim is unverified and external (see the example's `Not supported`
-  assumption).
+- **Prompt integration:** workers are asked to emit the version-1 JSON envelope
+  in addition to the unchanged five-field prose, and the parent is told to call
+  `orchestrator_handoff_validate` before using a handoff downstream
+  (`STRUCTURED_HANDOFF_GUIDANCE`, `src/core/policy.ts:82-89`; context hook text
+  in `src/opencode-v2/plugin.ts:97`).
+- **Callable tool, not an automatic gate:** the validator runs **only when the
+  orchestrator invokes it**. No plugin hook intercepts worker output, nothing
+  routes worker output through `parseD2Handoff`/`validateHandoff` automatically,
+  and no completion gate is enforced (`src/opencode-v2/orchestration/validation.ts`).
+- **The validator never runs a shell** and can never re-run a required command
+  itself; at orchestrator level, contracts that name required commands
+  deterministically produce `blocked-unknown` (O3 `checkRerun`) until the parent
+  independently re-runs them with its own tools. URL evidence refs likewise
+  always block at orchestrator level (O6 `checkAuthority`) because typed
+  `EvidenceRecord` input is not accepted in this version.
+- **One-way rendering:** `renderD2Handoff` renders structured → the five-heading
+  prose; prose → structured is not supported.
+- **Schema strictness preserved in code:** the runtime Zod mirror
+  (`src/core/contracts.ts`) mirrors the Draft 2020-12 schema verbatim
+  (`D2_HANDOFF_SCHEMA`, `D2_REQUIRED_KEYS`, length caps, regexes, enums,
+  `additionalProperties: false` at every object depth) and is the single
+  structural authority the validation tool uses. The JSON schema file itself is a
+  **contract/reference document** — it is not loaded or interpreted by the plugin
+  at runtime.
+- **Not changed by this adoption:** the plan's "at least 40% token reduction"
+  figure remains an unverified external claim; real worker handoffs are not
+  guaranteed to be emitted as envelopes (the model is asked, not forced); and
+  nothing here claims runtime enforcement, persistence, or exactly-once behavior.
 
-The next concrete action if this draft is accepted: implement a runtime contract
-module (candidate `src/core/contracts.ts`) and emit the envelope from prompt
-generation while keeping the five-field prose rendering.
+## 9. Runtime verification (issue #10)
+
+The maintained in-repo runtime mirror supersedes the §7 scratch checker for
+structural validation:
+
+1. `test/unit/contracts.test.ts` validates the example through
+   `parseD2Handoff`/`D2_HANDOFF_SCHEMA`, rejects unknown/unsafe data with
+   deterministic issue paths (including per-key `unrecognized_keys` issues),
+   tests the safety helpers (`isSafeRelativeRepoPath`,
+   `isSafeEvidenceRef`), semantic validation (`validateD2Semantics` —
+   assumption-evidence, review-state self-declared warning, pass-without-evidence
+   warning), and the five-heading renderer (`renderD2Handoff`).
+2. `test/unit/orchestration-tools.test.ts` covers `orchestrator_handoff_validate`
+   at both levels with injected deterministic dependencies (session location,
+   VCS status, path existence, realpath, redaction).
+3. Parent-verified repository checks (see the [phase-1 README §6](./README.md)): `bun run typecheck`
+   passed; the full `bun test` suite **456 pass / 1 skip / 0 fail** (457 tests across 18 files;
+   the skip is the pre-existing cross-volume platform case — the D2 `contracts` and
+   `orchestration-tools` tests are part of it and pass); `bun run build` passed all five bundles;
+   the packed `dist/index.js` import exposed and executed the D2 runtime exports. This is **not** a
+   claim of a shared-service live plugin load (the probe was inconclusive and the service was not
+   restarted). The final independent aggregate review passed with no blocking or major findings.

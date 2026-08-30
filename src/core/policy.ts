@@ -68,6 +68,26 @@ export const REMOTE_ORCHESTRATION_GUIDANCE = [
   MANAGED_WORKTREE_GUIDANCE,
 ].join("\n")
 
+/**
+ * Structured-handoff guidance for the serialized runtime validation tools.
+ *
+ * Workers are asked to emit the version-1 JSON envelope described below IN
+ * ADDITION TO the unchanged five-field prose (HANDOFF_FORMAT); the parent is
+ * told to run orchestrator_handoff_validate before any downstream use and to
+ * call orchestrator_task_complexity_classify only after all eight structured
+ * facts are collected. The tools are callable/advisory primitives, not
+ * automatic hooks: nothing intercepts worker output automatically, and no
+ * completion gate is enforced by this plugin.
+ */
+export const STRUCTURED_HANDOFF_GUIDANCE = [
+  "Structured handoff envelope (version 1): include every worker result as this JSON envelope alongside the five-field prose:",
+  "version: 1; taskId: the exact task ID from the parent contract; status: in-progress, blocked, completed, or failed; outcome; facts (statement plus evidence refs); assumptions (id, statement, status, evidence); filesRead and filesChanged (path plus scope); verification (command, status not-run/blocked/fail/pass, result, evidence refs); risks (severity, statement); followUp; artifactRefs (kind file or url, reference, description); reviewState (not-requested, pending, approved, changes-requested, or blocked).",
+  "Use the same relative repository paths and https-only URL refs as the handoff schema; never include credentials, raw transcripts, or secrets in the envelope.",
+  "Parent: call orchestrator_handoff_validate (level worker or orchestrator, with the task contract) before using any worker handoff downstream.",
+  "Parent: call orchestrator_task_complexity_classify only after collecting all eight structured facts (independent_subtasks, dependent_stages, files_modules, independent_review, external_side_effects, shared_mutable_state, security_compliance_risk, expected_parallelism_value).",
+  "These validation tools are callable/advisory, not automatic hooks: the orchestrator invokes them explicitly, results are advisory (D4) or deterministic fail-closed checks (D2/admission), and no automatic completion gate is enforced.",
+].join("\n")
+
 export function orchestrationRules(maxParallel: number, requireReview: boolean): string {
   return [
     `At most ${maxParallel} independent child tasks may run at once.`,

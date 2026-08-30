@@ -24,6 +24,7 @@ import {
   type RepoInfo,
 } from "../../src/opencode-v2/gh/client.js"
 import { addGhTools } from "../../src/opencode-v2/gh/tools.js"
+import { evidenceSchema, type EvidenceRecord } from "../../src/opencode-v2/orchestration/evidence.js"
 
 const location = { directory: "/workspace", project: { id: "origin" } }
 
@@ -559,10 +560,20 @@ describe("github tools", () => {
         { owner: "acme", repo: "widgets", title: "Ship it", labels: ["bug"], confirm: true },
         toolContext("session-1", "orchestrator"),
       )
-    const parsed = JSON.parse(output.content) as IssueInfo & { verified: boolean }
+    const parsed = JSON.parse(output.content) as IssueInfo & { verified: boolean; evidence: unknown }
     expect(parsed.verified).toBe(true)
     expect(parsed.number).toBe(42)
     expect(parsed.html_url).toBe(ISSUE.html_url)
+    expect(parsed.evidence).toEqual({
+      marker: "EVIDENCE_MUTATION",
+      freshness: "per-invocation",
+      authority: "authoritative-for-tested-fields",
+      version: 1,
+      source: "opencode-orchestrator.gh.issue.create",
+      sessionID: "session-1",
+      capturedAt: expect.any(Number),
+      mutation: { verified: true, id: 1001, number: 42, url: ISSUE.html_url },
+    })
   })
 
   test("issue_create failure surfaces the redacted gh error", async () => {
@@ -577,6 +588,8 @@ describe("github tools", () => {
     expect(output.content).toContain("github issue create failed")
     expect(output.content).not.toContain("leaked-leak")
     expect(output.content).not.toContain("super-dupersecret")
+    // Errors remain redacted strings: no success evidence is attached.
+    expect(output.content).not.toContain("evidence")
   })
 
   test("repo_view tool resolves an explicit owner/repo", async () => {
@@ -585,9 +598,19 @@ describe("github tools", () => {
     const output = await tools
       .get("github_repo_view")!
       .execute({ owner: "acme", repo: "widgets" }, toolContext("session-1", "orchestrator"))
-    const repo = JSON.parse(output.content) as RepoInfo
+    const repo = JSON.parse(output.content) as RepoInfo & { evidence: EvidenceRecord }
     expect(repo.nameWithOwner).toBe("acme/widgets")
     expect(repo.defaultBranch).toBe("main")
+    expect(repo.evidence).toMatchObject({
+      marker: "EVIDENCE_LIVE",
+      freshness: "per-invocation",
+      authority: "authoritative-for-tested-fields",
+      version: 1,
+      source: "opencode-orchestrator.gh.repo.view",
+      sessionID: "session-1",
+    })
+    expect(repo.evidence.mutation).toBeUndefined()
+    expect(evidenceSchema.safeParse(repo.evidence).success).toBe(true)
   })
 
   test("issue_list propagates client errors into the result", async () => {
@@ -600,6 +623,8 @@ describe("github tools", () => {
       .execute({ owner: "acme", repo: "widgets" }, toolContext("session-1", "orchestrator"))
     expect(output.content).toContain("github issue list failed")
     expect(output.content).toContain("Not Found")
+    expect(output.content).not.toContain("evidence")
+    expect(() => JSON.parse(output.content)).toThrow()
   })
 
   test("capabilities tool probes the gh binary through the fake runner", async () => {
@@ -612,14 +637,145 @@ describe("github tools", () => {
     const output = await tools
       .get("github_capabilities")!
       .execute({}, toolContext("session-1", "orchestrator"))
-    const probe = JSON.parse(output.content) as CapabilitiesProbe
+    const probe = JSON.parse(output.content) as CapabilitiesProbe & { evidence: EvidenceRecord }
     expect(probe.gh.available).toBe(true)
     expect(probe.auth.authenticated).toBe(false)
+    expect(probe.evidence).toMatchObject({
+      marker: "EVIDENCE_LIVE",
+      source: "opencode-orchestrator.gh.capabilities",
+      sessionID: "session-1",
+    })
+    expect(evidenceSchema.safeParse(probe.evidence).success).toBe(true)
   })
 
   test("no live gh calls: unhandled invocations throw inside the fake", async () => {
     const { runner } = scriptedGh(() => undefined)
     await expect(listIssues({ runner }, { owner: "acme", repo: "widgets" })).rejects.toThrow(/unexpected gh call/)
     await expect(resolveRepo({ runner }, {})).rejects.toThrow(/unexpected gh call/)
+  })
+
+  test("issue_list adds per-item live evidence while the top level stays an array", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/issues")) return ok(JSON.stringify([ISSUE, { ...ISSUE, id: 1002, number: 43 }]))
+      return undefined
+    })
+    const { tools } = collectGhTools({ runner })
+    const output = await tools
+      .get("github_issue_list")!
+      .execute({ owner: "acme", repo: "widgets", state: "open" }, toolContext("session-9", "orchestrator"))
+    const issues = JSON.parse(output.content) as Array<IssueInfo & { evidence: EvidenceRecord }>
+    expect(Array.isArray(issues)).toBe(true)
+    expect(issues).toHaveLength(2)
+    for (const issue of issues) {
+      expect(issue.number).toBeGreaterThan(0)
+      expect(issue.evidence).toMatchObject({
+        marker: "EVIDENCE_LIVE",
+        freshness: "per-invocation",
+        authority: "authoritative-for-tested-fields",
+        source: "opencode-orchestrator.gh.issue.list",
+        sessionID: "session-9",
+      })
+      expect(issue.evidence.mutation).toBeUndefined()
+      expect(evidenceSchema.safeParse(issue.evidence).success).toBe(true)
+    }
+    // The two items share one per-invocation evidence record.
+    expect(issues[0]?.evidence.capturedAt).toBe(issues[1]?.evidence.capturedAt)
+  })
+
+  test("pr_list adds per-item live evidence", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/pulls")) return ok(JSON.stringify([PULL]))
+      return undefined
+    })
+    const { tools } = collectGhTools({ runner })
+    const output = await tools
+      .get("github_pr_list")!
+      .execute({ owner: "acme", repo: "widgets", state: "all" }, toolContext("session-1", "orchestrator"))
+    const pulls = JSON.parse(output.content) as Array<PullInfo & { evidence: EvidenceRecord }>
+    expect(pulls).toHaveLength(1)
+    expect(pulls[0]?.title).toBe("Implement the fix")
+    expect(pulls[0]?.evidence.source).toBe("opencode-orchestrator.gh.pr.list")
+    expect(pulls[0]?.evidence.sessionID).toBe("session-1")
+    expect(evidenceSchema.safeParse(pulls[0]?.evidence).success).toBe(true)
+  })
+
+  test("pr_create reports mutation evidence with an https proof", async () => {
+    const { runner } = scriptedGh((call, _calls, body) => {
+      if (call.args.includes("repos/acme/widgets/pulls")) {
+        expect(body).toEqual({ title: "Implement the fix", head: "feature", base: "main" })
+        return ok(JSON.stringify(PULL))
+      }
+      return undefined
+    })
+    const { tools } = collectGhTools({ runner })
+    const output = await tools
+      .get("github_pr_create")!
+      .execute(
+        { owner: "acme", repo: "widgets", title: "Implement the fix", head: "feature", base: "main", confirm: true },
+        toolContext("session-1", "orchestrator"),
+      )
+    const parsed = JSON.parse(output.content) as PullInfo & { verified: boolean; evidence: unknown }
+    expect(parsed.verified).toBe(true)
+    expect(parsed.number).toBe(7)
+    expect(parsed.evidence).toEqual({
+      marker: "EVIDENCE_MUTATION",
+      freshness: "per-invocation",
+      authority: "authoritative-for-tested-fields",
+      version: 1,
+      source: "opencode-orchestrator.gh.pr.create",
+      sessionID: "session-1",
+      capturedAt: expect.any(Number),
+      mutation: { verified: true, id: 2001, number: 7, url: PULL.html_url },
+    })
+    expect(PULL.html_url.startsWith("https://")).toBe(true)
+  })
+
+  test("read results carry per-session provenance matching the tool context", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/issues/1")) return ok(JSON.stringify(ISSUE))
+      if (call.args.includes("repos/acme/widgets/pulls/2")) {
+        return ok(JSON.stringify({ ...PULL, number: 2 }))
+      }
+      return undefined
+    })
+    const { tools } = collectGhTools({ runner })
+    const sessionA = await tools
+      .get("github_issue_view")!
+      .execute({ owner: "acme", repo: "widgets", number: 1 }, toolContext("session-A", "orchestrator"))
+    const sessionB = await tools
+      .get("github_pr_view")!
+      .execute({ owner: "acme", repo: "widgets", number: 2 }, toolContext("session-B", "orchestrator"))
+    const issue = JSON.parse(sessionA.content) as IssueInfo & { evidence: EvidenceRecord }
+    const pull = JSON.parse(sessionB.content) as PullInfo & { evidence: EvidenceRecord }
+    expect(issue.evidence.sessionID).toBe("session-A")
+    expect(pull.evidence.sessionID).toBe("session-B")
+    expect(issue.evidence.capturedAt).toBeGreaterThanOrEqual(0)
+    expect(evidenceSchema.safeParse(pull.evidence).success).toBe(true)
+  })
+
+  test("capabilities evidence is an object property and contains only validated metadata", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args[0] === "--version") return ok("gh version 2.50.0")
+      if (call.args[0] === "auth" && call.args[1] === "status") {
+        return fail("token: ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123")
+      }
+      return undefined
+    })
+    const { tools } = collectGhTools({ runner, secrets: ["supersecret-token"] })
+    const output = await tools
+      .get("github_capabilities")!
+      .execute({}, toolContext("session-1", "orchestrator"))
+    const serialized = output.content
+    expect(serialized).not.toContain("ghp_")
+    const parsed = JSON.parse(serialized) as CapabilitiesProbe & { evidence: EvidenceRecord }
+    expect(parsed).toMatchObject({
+      gh: { available: true, version: "gh version 2.50.0" },
+      auth: { authenticated: false, hosts: [] },
+      repo: null,
+    })
+    expect(Object.keys(parsed).sort()).toEqual(["auth", "evidence", "gh", "repo"])
+    expect(JSON.stringify(parsed.evidence)).not.toContain("ghp_")
+    expect(JSON.stringify(parsed.evidence)).not.toContain("supersecret-token")
+    expect(evidenceSchema.safeParse(parsed.evidence).success).toBe(true)
   })
 })

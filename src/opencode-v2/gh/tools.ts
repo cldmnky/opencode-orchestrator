@@ -2,6 +2,7 @@ import type { OrchestratorOptions } from "../../core/config.js"
 import { GH_TOOL_PERMISSION } from "../../core/permissions.js"
 import type { Info as ToolInfo } from "@opencode-ai/plugin/promise/tool"
 import type { LocationLike, StorageLike } from "../goal/state.js"
+import { liveEvidence, mutationEvidence } from "../orchestration/evidence.js"
 import { createRedactor } from "../process/redact.js"
 import type { ProcessRunner } from "../process/runner.js"
 import {
@@ -30,6 +31,10 @@ import {
  * All raw `gh` process output and error text is redacted inside the client
  * (known secret shapes plus caller-known `secrets`); only validated typed
  * evidence (API `id`, `number`, `html_url`) is serialized back to the model.
+ * Every successful result additionally carries a per-invocation `evidence`
+ * record (EVIDENCE_LIVE for probes/reads, EVIDENCE_MUTATION with an https
+ * mutation proof for creates) sourced from `tool.sessionID` + `Date.now()`.
+ * Error results stay redacted strings and carry no evidence.
  * `storage` and `location` are accepted for the stage contract but not yet
  * used; durable GitHub records are a later stage.
  */
@@ -65,7 +70,11 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
       requireOrchestrator(tool.agent, deps.options)
       try {
         const probe = await probeCapabilities(gh, { cwd: stringField(input, "cwd") || undefined })
-        return result(JSON.stringify(probe, null, 2))
+        const evidence = liveEvidence({
+          source: "opencode-orchestrator.gh.capabilities",
+          sessionID: tool.sessionID,
+        })
+        return result(JSON.stringify({ ...probe, evidence }, null, 2))
       } catch (error) {
         return result(`github capabilities probe failed: ${message(error)}`)
       }
@@ -87,7 +96,8 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
           repo: repo || undefined,
           cwd: stringField(input, "cwd") || undefined,
         })
-        return result(JSON.stringify(info))
+        const evidence = liveEvidence({ source: "opencode-orchestrator.gh.repo.view", sessionID: tool.sessionID })
+        return result(JSON.stringify({ ...info, evidence }))
       } catch (error) {
         return result(`github repo view failed: ${message(error)}`)
       }
@@ -107,7 +117,8 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
       if (!owner || !repo || number === undefined) return result("owner, repo, and number are required")
       try {
         const issue = await viewIssue(gh, { owner, repo, number })
-        return result(JSON.stringify(issue))
+        const evidence = liveEvidence({ source: "opencode-orchestrator.gh.issue.view", sessionID: tool.sessionID })
+        return result(JSON.stringify({ ...issue, evidence }))
       } catch (error) {
         return result(`github issue view failed: ${message(error)}`)
       }
@@ -127,7 +138,8 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
       if (!owner || !repo) return result("owner and repo are required")
       try {
         const issues = await listIssues(gh, { owner, repo, state: state ? assertIssueState(state) : undefined })
-        return result(JSON.stringify(issues))
+        const evidence = liveEvidence({ source: "opencode-orchestrator.gh.issue.list", sessionID: tool.sessionID })
+        return result(JSON.stringify(issues.map((issue) => ({ ...issue, evidence }))))
       } catch (error) {
         return result(`github issue list failed: ${message(error)}`)
       }
@@ -151,7 +163,12 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
       if (!owner || !repo || !title) return result("owner, repo, and title are required")
       try {
         const created = await createIssue(gh, { owner, repo, title, body: body || undefined, labels })
-        return result(JSON.stringify({ ...created, verified: true }))
+        const evidence = mutationEvidence({
+          source: "opencode-orchestrator.gh.issue.create",
+          sessionID: tool.sessionID,
+          proof: { id: created.id, number: created.number, url: created.html_url },
+        })
+        return result(JSON.stringify({ ...created, verified: true, evidence }))
       } catch (error) {
         return result(`github issue create failed: ${message(error)}`)
       }
@@ -171,7 +188,8 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
       if (!owner || !repo || number === undefined) return result("owner, repo, and number are required")
       try {
         const pull = await viewPull(gh, { owner, repo, number })
-        return result(JSON.stringify(pull))
+        const evidence = liveEvidence({ source: "opencode-orchestrator.gh.pr.view", sessionID: tool.sessionID })
+        return result(JSON.stringify({ ...pull, evidence }))
       } catch (error) {
         return result(`github pr view failed: ${message(error)}`)
       }
@@ -191,7 +209,8 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
       if (!owner || !repo) return result("owner and repo are required")
       try {
         const pulls = await listPulls(gh, { owner, repo, state: state ? assertIssueState(state) : undefined })
-        return result(JSON.stringify(pulls))
+        const evidence = liveEvidence({ source: "opencode-orchestrator.gh.pr.list", sessionID: tool.sessionID })
+        return result(JSON.stringify(pulls.map((pull) => ({ ...pull, evidence }))))
       } catch (error) {
         return result(`github pr list failed: ${message(error)}`)
       }
@@ -219,7 +238,12 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
       }
       try {
         const created = await createPull(gh, { owner, repo, title, head, base, body: body || undefined, draft })
-        return result(JSON.stringify({ ...created, verified: true }))
+        const evidence = mutationEvidence({
+          source: "opencode-orchestrator.gh.pr.create",
+          sessionID: tool.sessionID,
+          proof: { id: created.id, number: created.number, url: created.html_url },
+        })
+        return result(JSON.stringify({ ...created, verified: true, evidence }))
       } catch (error) {
         return result(`github pr create failed: ${message(error)}`)
       }

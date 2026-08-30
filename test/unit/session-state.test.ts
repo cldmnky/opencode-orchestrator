@@ -3,6 +3,7 @@ import { parseOptions, type OrchestratorOptions } from "../../src/core/config.js
 import {
   CD_TOOL_PERMISSION,
   GH_TOOL_PERMISSION,
+  ORCHESTRATION_TOOL_PERMISSION,
   SESSION_MOVE_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
   orchestratorOnlyPermissionRule,
@@ -85,14 +86,15 @@ describe("configuration feature policy", () => {
 })
 
 describe("permission constants", () => {
-  test("exports goal-style orchestrator-only actions for gh/worktree/cd/session move", () => {
+  test("exports goal-style orchestrator-only actions for gh/worktree/cd/session move/validation", () => {
     expect(GH_TOOL_PERMISSION).toBe("orchestrator_gh")
     expect(WORKTREE_TOOL_PERMISSION).toBe("orchestrator_worktree")
     expect(CD_TOOL_PERMISSION).toBe("orchestrator_cd")
     expect(SESSION_MOVE_PERMISSION).toBe("orchestrator_session_move")
+    expect(ORCHESTRATION_TOOL_PERMISSION).toBe("orchestrator_validation")
   })
 
-  test("builds an orchestrator-only deny rule over the whole feature family", () => {
+  test("builds an orchestrator-only deny rule over the whole feature family incl. orchestration validation", () => {
     const rule = orchestratorOnlyPermissionRule("deny")
     expect(rule.resource).toBe("*")
     expect(rule.effect).toBe("deny")
@@ -101,6 +103,7 @@ describe("permission constants", () => {
       WORKTREE_TOOL_PERMISSION,
       CD_TOOL_PERMISSION,
       SESSION_MOVE_PERMISSION,
+      ORCHESTRATION_TOOL_PERMISSION,
     ]) {
       expect(rule.action).toContain(action)
     }

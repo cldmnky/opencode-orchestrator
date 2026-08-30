@@ -35,6 +35,7 @@ import {
 import { addWorktreeTools } from "../../src/opencode-v2/worktree/tools.js"
 import { startWorktreeEventSync } from "../../src/opencode-v2/worktree/events.js"
 import { sessionAnchorStorageKey, type SessionAnchor } from "../../src/opencode-v2/session/state.js"
+import { evidenceSchema, type EvidenceRecord } from "../../src/opencode-v2/orchestration/evidence.js"
 
 const location = { directory: "/workspace", project: { id: "origin" } }
 
@@ -816,10 +817,19 @@ describe("worktree tools", () => {
         { repoRoot: "/repo", directory: "/srv/worktrees/feature", branch: "feature", base: "main", confirm: true },
         toolContext("session-1", "orchestrator"),
       )
-    const parsed = JSON.parse(output.content) as { record: WorktreeRecord; verified: boolean }
+    const parsed = JSON.parse(output.content) as { record: WorktreeRecord; verified: boolean; evidence: EvidenceRecord }
     expect(parsed.verified).toBe(true)
     expect(parsed.record.status).toBe("ready")
     expect(parsed.record.originProjectID).toBe("origin")
+    expect(parsed.evidence).toMatchObject({
+      marker: "EVIDENCE_LIVE",
+      freshness: "per-invocation",
+      authority: "authoritative-for-tested-fields",
+      source: "opencode-orchestrator.worktree.create",
+      sessionID: "session-1",
+    })
+    expect(parsed.evidence.mutation).toBeUndefined()
+    expect(evidenceSchema.safeParse(parsed.evidence).success).toBe(true)
     expect(values.has(worktreeStorageKey("origin", "session-1"))).toBe(true)
     expect(values.has(sessionIndexStorageKey("session-1"))).toBe(true)
   })
@@ -886,11 +896,19 @@ describe("worktree tools", () => {
     const output = await tools
       .get("worktree_push")!
       .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
-    const parsed = JSON.parse(output.content) as { pushed: boolean; verified: boolean; remote: string; branch: string }
+    const parsed = JSON.parse(output.content) as {
+      pushed: boolean
+      verified: boolean
+      remote: string
+      branch: string
+      evidence: EvidenceRecord
+    }
     expect(parsed.pushed).toBe(true)
     expect(parsed.verified).toBe(true)
     expect(parsed.remote).toBe("origin")
     expect(parsed.branch).toBe("feature")
+    expect(parsed.evidence.source).toBe("opencode-orchestrator.worktree.push")
+    expect(parsed.evidence.sessionID).toBe("session-1")
     expect(calls.some((call) => call.args.join(" ").includes("--set-upstream"))).toBe(true)
     const persisted = values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord
     expect(persisted.status).toBe("ready")
@@ -908,6 +926,7 @@ describe("worktree tools", () => {
       .get("worktree_push")!
       .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
     expect(output.content).toContain("push failed")
+    expect(output.content).not.toContain("evidence")
   })
 
   test("cleanup refuses a dirty worktree without removing", async () => {
@@ -923,6 +942,7 @@ describe("worktree tools", () => {
       .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
     expect(output.content).toContain("refused")
     expect(output.content).toContain("uncommitted changes")
+    expect(output.content).not.toContain("evidence")
     expect(calls.some((call) => call.args[1] === "remove")).toBe(false)
   })
 
@@ -982,7 +1002,10 @@ describe("worktree tools", () => {
     const output = await tools
       .get("worktree_cleanup")!
       .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
-    expect(JSON.parse(output.content)).toEqual({ removed: true, directory: "/srv/worktrees/feature" })
+    const parsed = JSON.parse(output.content) as { removed: boolean; directory: string; evidence: EvidenceRecord }
+    expect(parsed).toMatchObject({ removed: true, directory: "/srv/worktrees/feature" })
+    expect(parsed.evidence.source).toBe("opencode-orchestrator.worktree.cleanup")
+    expect(parsed.evidence.marker).toBe("EVIDENCE_LIVE")
     expect(calls.some((call) => call.args[1] === "remove")).toBe(true)
     expect(values.has(worktreeStorageKey("origin", "session-1"))).toBe(false)
   })
@@ -996,10 +1019,16 @@ describe("worktree tools", () => {
     const output = await tools
       .get("worktree_list")!
       .execute({ repoRoot: "/repo" }, toolContext("session-1", "orchestrator"))
-    const parsed = JSON.parse(output.content) as { worktrees: WorktreeEntry[]; records: WorktreeRecord[] }
+    const parsed = JSON.parse(output.content) as {
+      worktrees: WorktreeEntry[]
+      records: WorktreeRecord[]
+      evidence: EvidenceRecord
+    }
     expect(parsed.worktrees.map((entry) => entry.directory)).toContain("/srv/worktrees/feature")
     expect(parsed.records).toHaveLength(1)
     expect(parsed.records[0]?.status).toBe("ready")
+    expect(parsed.evidence.source).toBe("opencode-orchestrator.worktree.list")
+    expect(evidenceSchema.safeParse(parsed.evidence).success).toBe(true)
   })
 
   test("create returns the redacted add failure and writes no ready record", async () => {
@@ -1026,6 +1055,7 @@ describe("worktree tools", () => {
     expect(output.content).toContain("exited with code 1")
     expect(output.content).toContain("[redacted]")
     expect(output.content).not.toContain("supersecret-token")
+    expect(output.content).not.toContain("evidence")
     expect(values.has(worktreeStorageKey("origin", "session-1"))).toBe(false)
     expect(values.has(sessionIndexStorageKey("session-1"))).toBe(false)
     expect(calls.filter((call) => call.args[1] === "list")).toHaveLength(1)
@@ -1177,6 +1207,96 @@ describe("worktree tools", () => {
     } finally {
       await fixture.cleanup()
     }
+  })
+})
+
+describe("worktree tool evidence", () => {
+  test("every successful worktree tool result carries live per-invocation evidence", async () => {
+    const { runner } = scriptedGit((call) => {
+      if (call.args[0] === "worktree" && call.args[1] === "list") {
+        return ok(`${MAIN_ONLY}\n\nworktree /srv/worktrees/feature`)
+      }
+      if (call.args[0] === "status") return ok("")
+      return undefined
+    })
+    const { tools, values } = collectWorktreeTools({ runner })
+    const seeded = newWorktree(
+      {
+        owner: "session-evidence",
+        sessionID: "session-evidence",
+        originProjectID: "origin",
+        repoRoot: "/repo",
+        dir: "/srv/worktrees/feature",
+        branch: "feature",
+        base: "main",
+      },
+      100,
+    )
+    values.set(worktreeStorageKey("origin", "session-evidence"), { ...seeded, status: "ready" })
+    const context = toolContext("session-evidence", "orchestrator")
+    const outputs: Array<{ name: string; content: string }> = []
+    outputs.push(
+      { name: "list", content: (await tools.get("worktree_list")!.execute({ repoRoot: "/repo" }, context)).content },
+      { name: "status", content: (await tools.get("worktree_status")!.execute({}, context)).content },
+    )
+    for (const { name, content } of outputs) {
+      const parsed = JSON.parse(content) as { evidence: EvidenceRecord }
+      expect(parsed.evidence.marker).toBe("EVIDENCE_LIVE")
+      expect(parsed.evidence.freshness).toBe("per-invocation")
+      expect(parsed.evidence.authority).toBe("authoritative-for-tested-fields")
+      expect(parsed.evidence.version).toBe(1)
+      expect(parsed.evidence.source).toBe(`opencode-orchestrator.worktree.${name}`)
+      // Per-session provenance: the evidence is bound to the invoking session.
+      expect(parsed.evidence.sessionID).toBe("session-evidence")
+      expect(Number.isInteger(parsed.evidence.capturedAt)).toBe(true)
+      expect(parsed.evidence.capturedAt).toBeGreaterThanOrEqual(0)
+      expect(parsed.evidence.mutation).toBeUndefined()
+      expect(evidenceSchema.safeParse(parsed.evidence).success).toBe(true)
+    }
+  })
+
+  test("worktree evidence never claims child isolation and carries only schema fields", async () => {
+    const { runner } = scriptedGit(createSuccessScript())
+    const { tools } = collectWorktreeTools({ runner })
+    const output = await tools
+      .get("worktree_create")!
+      .execute(
+        { repoRoot: "/repo", directory: "/srv/worktrees/feature", branch: "feature", base: "main", confirm: true },
+        toolContext("session-1", "orchestrator"),
+      )
+    const parsed = JSON.parse(output.content) as { record: WorktreeRecord; verified: boolean; evidence: EvidenceRecord }
+    // Live local operation results with durable worktree bookkeeping — NOT
+    // proof of native child isolation; the evidence must never say otherwise.
+    expect(parsed.verified).toBe(true)
+    expect(JSON.stringify(parsed.evidence)).not.toContain("isolat")
+    expect(JSON.stringify(parsed.evidence)).not.toContain("child")
+    expect(Object.keys(parsed.evidence).sort()).toEqual([
+      "authority",
+      "capturedAt",
+      "freshness",
+      "marker",
+      "sessionID",
+      "source",
+      "version",
+    ])
+    expect(evidenceSchema.safeParse(parsed.evidence).success).toBe(true)
+  })
+
+  test("worktree evidence and output serialize no raw secrets", async () => {
+    const { runner } = scriptedGit((call) => {
+      if (call.args[0] === "worktree" && call.args[1] === "list") {
+        return ok(`worktree /srv/worktrees/supersecret-token\nHEAD 0123\nbranch refs/heads/feature`)
+      }
+      return undefined
+    })
+    const { tools } = collectWorktreeTools({ runner })
+    const output = await tools
+      .get("worktree_list")!
+      .execute({ repoRoot: "/repo" }, toolContext("session-1", "orchestrator"))
+    expect(output.content).not.toContain("supersecret-token")
+    const parsed = JSON.parse(output.content) as { worktrees: WorktreeEntry[]; evidence: EvidenceRecord }
+    expect(parsed.worktrees[0]?.directory).toContain("[redacted]")
+    expect(JSON.stringify(parsed.evidence)).not.toContain("supersecret-token")
   })
 })
 

@@ -2,10 +2,10 @@
   "version": 1,
   "taskId": "issue-8-d2-handoff-schema-draft",
   "status": "completed",
-  "outcome": "Drafted the D2 versioned structured-handoff contract: a Draft 2020-12 JSON Schema (docs/phase-1/d2-handoff.schema.json), one illustrative example that validates against it (docs/phase-1/d2-handoff.example.json), and a compatibility document mapping the envelope to the existing five-field prose handoff (docs/phase-1/d2-handoff.md). Confirmed HANDOFF_FORMAT remains text-only: no runtime parser, prompt change, or adoption claim is included in this draft.",
+  "outcome": "Drafted the D2 versioned structured-handoff contract (issue #8): a Draft 2020-12 JSON Schema (docs/phase-1/d2-handoff.schema.json), one illustrative example that validates against it (docs/phase-1/d2-handoff.example.json), and a compatibility document mapping the envelope to the existing five-field prose handoff (docs/phase-1/d2-handoff.md). Confirmed at base commit f7f45176096c2346957cdf52493017185eda3946 that HANDOFF_FORMAT was text-only and that this draft introduced no runtime parser, prompt change, or adoption claim. Issue #10 later completed the follow-up in this file (see followUp): the runtime mirror, validation tool, and prompt integration now exist.",
   "facts": [
     {
-      "statement": "HANDOFF_FORMAT in src/core/policy.ts defines five fields (Outcome, Files, Verification, Risks, Follow-up) and is embedded verbatim into orchestration prompts.",
+      "statement": "At base commit f7f45176096c2346957cdf52493017185eda3946, HANDOFF_FORMAT in src/core/policy.ts defined five fields (Outcome, Files, Verification, Risks, Follow-up) and was embedded verbatim into orchestration prompts.",
       "evidence": [
         "src/core/policy.ts#L19-25",
         "src/core/policy.ts#L94",
@@ -13,7 +13,7 @@
       ]
     },
     {
-      "statement": "The repository has no structured handoff parser or runtime gate; every match for 'handoff' in src/ is a prompt string or a text constant.",
+      "statement": "At base commit f7f45176096c2346957cdf52493017185eda3946, the repository had no structured handoff parser or runtime gate; every match for 'handoff' in src/ was a prompt string or a text constant. This historical negative was true of the base, not of the current tree: issue #10 added the strict runtime mirror and validation tool.",
       "evidence": [
         "src/core/policy.ts",
         "src/core/prompts.ts",
@@ -27,6 +27,15 @@
     {
       "statement": "At base commit f7f45176096c2346957cdf52493017185eda3946, docs/phase-1 had no tracked files and was absent from the git tree; the schema, example, and mapping document are among the Phase 1 additions to that directory.",
       "evidence": ["docs/phase-1"]
+    },
+    {
+      "statement": "Issue #10 implemented this draft's follow-up in the current tree: src/core/contracts.ts mirrors the schema as a strict Zod contract (D2_HANDOFF_SCHEMA, parseD2Handoff, validateD2Semantics, renderD2Handoff), orchestrator_handoff_validate validates envelopes at worker/orchestrator level, and STRUCTURED_HANDOFF_GUIDANCE asks workers for the version-1 envelope alongside the prose. This historical example envelope was never itself emitted by or traversed through a real orchestrated child hook.",
+      "evidence": [
+        "src/core/contracts.ts",
+        "src/opencode-v2/orchestration/validation.ts",
+        "src/core/policy.ts#L82-89",
+        "test/unit/contracts.test.ts"
+      ]
     }
   ],
   "assumptions": [
@@ -120,7 +129,7 @@
       "statement": "The 'at least 40% token reduction' figure from the plan's linked npm package remains an unverified external claim and must not be repeated as a measured result."
     }
   ],
-  "followUp": "If this draft is accepted, implement a runtime contract module (candidate src/core/contracts.ts) that validates handoffs against the schema and emit the structured envelope from prompt generation, keeping the five-field prose rendering for humans.",
+  "followUp": "Completed by issue #10 (current tree): the runtime contract module landed at src/core/contracts.ts with parseD2Handoff/validateD2Handoff/validateD2Semantics/renderD2Handoff, the orchestrator_handoff_validate tool (src/opencode-v2/orchestration/validation.ts), and prompt guidance asking workers for the version-1 envelope while keeping the five-field prose rendering (src/core/policy.ts STRUCTURED_HANDOFF_GUIDANCE). This issue #8 envelope itself remains a historical design artifact: it was never emitted or consumed by a real orchestrated child hook.",
   "artifactRefs": [
     {
       "kind": "file",

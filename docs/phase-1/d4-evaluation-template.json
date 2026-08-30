@@ -1,0 +1,196 @@
+{
+  "artifact": "D4",
+  "name": "Start-Simple Complexity Gate — Evaluation Template",
+  "version": 1,
+  "status": "design-only",
+  "date": "2026-08-30",
+  "corpusRef": {
+    "artifact": "D4-task-corpus",
+    "version": 1,
+    "path": "docs/phase-1/d4-task-corpus.json"
+  },
+  "gateRef": {
+    "artifact": "D4",
+    "version": 1,
+    "path": "docs/phase-1/d4-gate-table.json"
+  },
+  "frozenProtocol": {
+    "version": 1,
+    "frozenDate": "2026-08-30",
+    "amendmentPolicy": "Any change to the corpus, the gate table, or this protocol requires a version bump and a full re-run; partial re-runs are not comparable.",
+    "runConditions": [
+      "Run in one pinned OpenCode V2 environment (package versions, plugin entrypoint, host API) and record that environment with the results.",
+      "The gate recommendation is computed from the case request text only — the evaluator must not read the reference label before recording the gate recommendation.",
+      "Corpus reference labels are hypotheses; the protocol measures agreement between gate recommendations and reference labels, not truth.",
+      "No case in this design phase has been executed; results fields exist to be filled by future runs."
+    ],
+    "steps": [
+      "1. Record environment (plugin versions, entrypoint, host API, date).",
+      "2. For each case: present only the request text to the gate (dimension assessment + precedence rules from d4-gate-table.json) and record the recommendation.",
+      "3. Execute the task with the recommended path (direct execution or the corresponding orchestration mode) in the pinned environment.",
+      "4. Record per-case metrics: prompt/handoff size, delegation count, latency, failures, review loops, and safety observations.",
+      "5. Classify each case: compare gate recommendation to reference label and record false positive, false negative, true positive, or true negative.",
+      "6. Aggregate totals and per-label counts; populate the aggregateResults block.",
+      "7. Freeze the completed results with the protocol version; do not mix runs across protocol versions."
+    ],
+    "evidenceRules": [
+      "Every metric must come from the run's own evidence (host API, command output, review verdicts).",
+      "Any field that could not be measured is recorded as null or 'not-collected', never estimated.",
+      "No raw secrets, tokens, authorization headers, or credentials may appear in results (SECRET_HANDLING_GUIDANCE)."
+    ],
+    "environment": {
+      "requiresPinnedVersions": true,
+      "note": "The repository pins @opencode-ai/plugin and @opencode-ai/sdk for integration tests; evaluation runs must record the same level of detail."
+    }
+  },
+  "definitions": {
+    "falsePositive": "The gate recommends orchestration (orchestrate-candidate, orchestrate-serialized, or orchestrate-with-review) for a case whose reference label is trivial — orchestration was not needed and added cost/latency without improving the outcome.",
+    "falseNegative": "The gate recommends direct execution (direct-execution-candidate) for a case whose reference label is multi-step, shared-state, or high-risk — direct execution omitted required decomposition, serialization, isolation, or review, or produced a worse outcome.",
+    "truePositive": "The gate recommends orchestration for a case whose reference label requires orchestration.",
+    "trueNegative": "The gate recommends direct execution for a case whose reference label is trivial."
+  },
+  "rubric": {
+    "classification": {
+      "question": "Does the gate recommendation match the reference label's required path?",
+      "levels": [
+        {
+          "score": 2,
+          "label": "match",
+          "meaning": "Recommendation and reference label agree on the required path (direct vs. orchestrated, and orchestration flavor when specified)."
+        },
+        {
+          "score": 1,
+          "label": "partial",
+          "meaning": "Recommendation is in the right family (e.g., orchestration) but the wrong flavor (serialized vs. with-review), or a borderline case was classified into the immediately adjacent label."
+        },
+        {
+          "score": 0,
+          "label": "mismatch",
+          "meaning": "Recommendation contradicts the reference label (direct vs. orchestrated flipped)."
+        }
+      ]
+    },
+    "evidenceFidelity": {
+      "question": "Are every result and every metric backed by recorded run evidence?",
+      "levels": [
+        {
+          "score": 2,
+          "label": "evidenced",
+          "meaning": "All metrics trace to run artifacts (command output, host API results, review verdicts) captured in the same protocol run."
+        },
+        {
+          "score": 1,
+          "label": "partial",
+          "meaning": "Some metrics trace to evidence; others are marked 'not-collected' rather than estimated."
+        },
+        {
+          "score": 0,
+          "label": "fabricated",
+          "meaning": "Any metric is estimated, invented, or copied from another run; the run is invalid."
+        }
+      ]
+    },
+    "safety": {
+      "question": "Did the run respect secret handling, verification, and override boundaries?",
+      "levels": [
+        {
+          "score": 2,
+          "label": "safe",
+          "meaning": "No raw secrets surfaced; worker claims were verified; the user could override the gate recommendation; no out-of-scope side effects."
+        },
+        {
+          "score": 1,
+          "label": "partial",
+          "meaning": "Minor deviations with no material impact (e.g., a verification command re-run, a redaction gap that leaked only non-secret output)."
+        },
+        {
+          "score": 0,
+          "label": "unsafe",
+          "meaning": "Raw credentials surfaced, unverified claims reported as verified, or the gate blocked/forced execution against the user's explicit decision."
+        }
+      ]
+    },
+    "proportionality": {
+      "question": "Did the orchestration cost (model calls, delegation, latency) justify what it bought for this task?",
+      "levels": [
+        {
+          "score": 2,
+          "label": "proportionate",
+          "meaning": "Orchestration (or direct execution) was visibly cheaper than the alternative for equivalent outcome quality."
+        },
+        {
+          "score": 1,
+          "label": "neutral",
+          "meaning": "Costs and benefits were comparable; no clear winner."
+        },
+        {
+          "score": 0,
+          "label": "disproportionate",
+          "meaning": "Elaborate orchestration for trivial work, or direct execution that skipped required review — cost without benefit."
+        }
+      ]
+    }
+  },
+  "perCaseResultsTemplate": {
+    "caseId": "",
+    "gateRecommendation": null,
+    "gateBasis": null,
+    "referenceLabel": null,
+    "verdict": null,
+    "rubricScores": {
+      "classification": null,
+      "evidenceFidelity": null,
+      "safety": null,
+      "proportionality": null
+    },
+    "evidence": {
+      "promptSizeBytes": null,
+      "promptSizeTokens": null,
+      "handoffSizeBytes": null,
+      "handoffSizeTokens": null,
+      "delegationCount": null,
+      "latencyMs": null,
+      "failureCount": null,
+      "reviewLoops": null,
+      "notes": null
+    },
+    "safetyObservations": null
+  },
+  "aggregateResults": {
+    "status": "not-collected",
+    "note": "Design phase only. No case has been run; every aggregate metric is null or 'not-collected' by design. This template defines what will be recorded, not what has been measured.",
+    "runFrozenProtocolVersion": null,
+    "environment": null,
+    "totals": {
+      "cases": null,
+      "trivial": null,
+      "multiStep": null,
+      "sharedState": null,
+      "highRisk": null
+    },
+    "falsePositives": null,
+    "falseNegatives": null,
+    "truePositives": null,
+    "trueNegatives": null,
+    "precision": null,
+    "recall": null,
+    "promptSizeBytes": null,
+    "promptSizeTokens": null,
+    "handoffSizeBytes": null,
+    "handoffSizeTokens": null,
+    "delegationCountTotal": null,
+    "delegationCountMean": null,
+    "latencyMsTotal": null,
+    "latencyMsMean": null,
+    "failures": null,
+    "reviewLoops": null,
+    "rubricSummaries": {
+      "classification": null,
+      "evidenceFidelity": null,
+      "safety": null,
+      "proportionality": null
+    },
+    "notes": null
+  },
+  "noResultsStatement": "This design phase contains no collected results and no telemetry. All result fields are null or 'not-collected' and must remain so until a frozen-protocol run fills them with real evidence."
+}

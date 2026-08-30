@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "d2-handoff.schema.json",
+  "title": "D2 versioned structured handoff",
+  "description": "Draft 2020-12 JSON Schema for the D2 versioned structured handoff envelope (plan item D2, issue #8). Design-only draft: no runtime parser, prompt change, or adoption claim relies on this document. The envelope preserves the five-field prose handoff (Outcome, Files, Verification, Risks, Follow-up) and adds strictly validated fields for evidence, assumptions, artifact references, and review state. Version is constrained to 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "taskId",
+    "status",
+    "outcome",
+    "facts",
+    "assumptions",
+    "filesRead",
+    "filesChanged",
+    "verification",
+    "risks",
+    "followUp",
+    "artifactRefs",
+    "reviewState"
+  ],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Envelope schema version, constrained to 1 for this draft. Future incompatible changes must bump the version and document migration."
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Stable identifier for the task this handoff reports on, used to correlate the handoff across hops."
+    },
+    "status": {
+      "enum": ["in-progress", "blocked", "completed", "failed"],
+      "description": "Lifecycle state of the task when the handoff was written. 'completed' may coexist with not-run verification entries when those checks do not apply to the delivered change."
+    },
+    "outcome": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000,
+      "description": "Maps to the prose field 'Outcome: what was achieved or discovered'."
+    },
+    "facts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fact" },
+      "description": "Established facts, each with a statement and at least one evidence reference."
+    },
+    "assumptions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/assumption" },
+      "description": "Explicitly labeled assumptions with a verification status and evidence references. Evidence may be empty while an assumption is Unverified."
+    },
+    "filesRead": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fileRef" },
+      "description": "Files read, with the scope of each read. Part of the prose 'Files' field."
+    },
+    "filesChanged": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fileRef" },
+      "description": "Files changed, with the scope of each change. Part of the prose 'Files' field."
+    },
+    "verification": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/verificationEntry" },
+      "description": "Commands run and their results. Maps to the prose 'Verification' field. Honest states not-run, blocked, fail, and pass are supported."
+    },
+    "risks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/risk" },
+      "description": "Known uncertainty or regression risk, each with a severity. Maps to the prose 'Risks' field."
+    },
+    "followUp": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000,
+      "description": "The next concrete action. Maps to the prose 'Follow-up' field."
+    },
+    "artifactRefs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifactRef" },
+      "description": "Path-safe references to stored artifacts instead of raw transcripts. kind=file references must be relative repository paths; kind=url references must be https URLs."
+    },
+    "reviewState": {
+      "enum": ["not-requested", "pending", "approved", "changes-requested", "blocked"],
+      "description": "Review workflow state of this handoff."
+    }
+  },
+  "$defs": {
+    "relativeRepoPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!.*://)(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\"'\\x00-\\x1f]+$",
+      "description": "Relative repository path. No leading '/', no '.'/'..' path segments, no '://' scheme prefix, no quotes or control characters; names with spaces or dots are allowed."
+    },
+    "evidenceRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(?:https://[^\\s\"'\\x00-\\x1f]+|(?!/)(?!.*://)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\"'\\x00-\\x1f#]+(?:#[^\\s\"'\\x00-\\x1f]*)?)$",
+      "description": "A reference to evidence: a relative repository path (optionally with a #anchor such as #L19-25) or an https URL. Strings containing '://' must be https URLs."
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statement", "evidence"],
+      "properties": {
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "The established fact."
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidenceRef" },
+          "description": "At least one reference supporting the statement."
+        }
+      }
+    },
+    "assumption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement", "status", "evidence"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Stable identifier for the assumption so downstream hops can track its verification."
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "The assumption."
+        },
+        "status": {
+          "enum": ["Verified", "Partially verified", "Unverified", "Not supported"],
+          "description": "Current verification status of the assumption."
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidenceRef" },
+          "description": "References supporting the stated status; intentionally allowed to be empty while Unverified."
+        }
+      }
+    },
+    "fileRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "scope"],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relativeRepoPath",
+          "description": "Relative repository path. Absolute paths, '.'/'..' path segments, '://' scheme prefixes, quotes, and control characters are rejected; names containing spaces or dots are allowed."
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "What the file was read for, or what change was made to it."
+        }
+      }
+    },
+    "verificationEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "status", "result"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "The command or check that was run."
+        },
+        "status": {
+          "enum": ["not-run", "blocked", "fail", "pass"],
+          "description": "Honest outcome: not-run when the check was intentionally skipped, blocked when it could not run, fail or pass when it ran."
+        },
+        "result": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "description": "Observed result; for not-run, state why the check was not run."
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidenceRef" },
+          "description": "Optional references supporting the result."
+        }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "statement"],
+      "properties": {
+        "severity": {
+          "enum": ["low", "medium", "high", "critical"],
+          "description": "Severity of the risk."
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "The known uncertainty or regression risk."
+        }
+      }
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference", "description"],
+      "properties": {
+        "kind": {
+          "enum": ["file", "url"],
+          "description": "file = relative repository path; url = https URL."
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "description": "The artifact location, constrained by kind: a relative repository path for file, an https URL for url."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "What the artifact is."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "file" } } },
+          "then": {
+            "properties": {
+              "reference": { "$ref": "#/$defs/relativeRepoPath" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "url" } } },
+          "then": {
+            "properties": {
+              "reference": {
+                "pattern": "^https://[^\\s\"'\\x00-\\x1f]+$"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { inspectConfig, mergeStatus, runtimeChecks, type DoctorRunner } from "../../src/cli/doctor.js"
 import { configRelativePluginReference, installConfig, isLocalPluginReference, pluginEntryForRuntimeFile } from "../../src/cli/install.js"
 import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../../src/core/package-identity.js"
-import { GOAL_TOOL_PERMISSION } from "../../src/core/permissions.js"
+import { GOAL_TOOL_PERMISSION, ORCHESTRATION_TOOL_PERMISSION } from "../../src/core/permissions.js"
 
 describe("plugin reference helpers", () => {
   test("derives the source entrypoint from src/cli/index.ts", () => {
@@ -447,6 +447,63 @@ describe("installer", () => {
     const rules = second.agents.orchestrator.permissions as Rule[]
     expect(rules.filter((rule) => rule.action === GOAL_TOOL_PERMISSION)).toEqual([
       { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "ask" },
+    ])
+  })
+
+  test("allows the orchestration validation permission for the orchestrator and denies it to workers", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+
+    const orchestratorPermissions = document.agents.orchestrator.permissions as Rule[]
+    expect(orchestratorPermissions.filter((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toEqual([
+      { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect: "allow" },
+    ])
+    const denyAllIndex = orchestratorPermissions.findIndex((rule) => rule.action === "*" && rule.resource === "*" && rule.effect === "deny")
+    expect(orchestratorPermissions.findIndex((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toBeGreaterThan(denyAllIndex)
+
+    for (const id of ["planner", "explore", "implementer", "reviewer"]) {
+      const workerPermissions = document.agents[id].permissions as Rule[]
+      expect(workerPermissions.filter((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toEqual([
+        { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect: "deny" },
+      ])
+      expect(workerPermissions.findIndex((rule) => rule.action === "*" && rule.resource === "*" && rule.effect === "deny")).toBeGreaterThanOrEqual(0)
+      expect(workerPermissions.findIndex((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toBeGreaterThan(
+        workerPermissions.findIndex((rule) => rule.action === "*" && rule.resource === "*" && rule.effect === "deny"),
+      )
+    }
+  })
+
+  test("reinstall never duplicates the orchestration validation permission rule", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    installConfig(path, {})
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+
+    const orchestratorPermissions = document.agents.orchestrator.permissions as Rule[]
+    expect(orchestratorPermissions.filter((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toHaveLength(1)
+    const workerPermissions = document.agents.explore.permissions as Rule[]
+    expect(workerPermissions.filter((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toHaveLength(1)
+  })
+
+  test("preserves a user's exact rule for the orchestration validation permission across installs", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const first = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    const permissions = first.agents.orchestrator.permissions as Rule[]
+    const validationIndex = permissions.findIndex((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)
+    permissions[validationIndex] = { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect: "ask" }
+    writeFileSync(path, JSON.stringify(first))
+
+    installConfig(path, {})
+
+    const second = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    const rules = second.agents.orchestrator.permissions as Rule[]
+    expect(rules.filter((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toEqual([
+      { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect: "ask" },
     ])
   })
 })

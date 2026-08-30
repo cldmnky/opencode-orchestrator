@@ -8,6 +8,7 @@ import { startGoalContinuation } from "./goal/continuation.js"
 import { addGoalTools } from "./goal/tools.js"
 import { addGhTools } from "./gh/tools.js"
 import { addWorktreeTools } from "./worktree/tools.js"
+import { addOrchestrationTools } from "./orchestration/tools.js"
 import { startWorktreeEventSync } from "./worktree/events.js"
 import { SpawnRunner } from "./process/runner.js"
 import { DISTRIBUTION_NAME, RUNTIME_PLUGIN_ID } from "../core/package-identity.js"
@@ -71,6 +72,12 @@ export const orchestratorPlugin = Plugin.define({
           addGoalTools(draft, ctx.storage, ctx.location, options)
           addGhTools(draft, { storage: ctx.storage, runner, location: ctx.location, options })
           addWorktreeTools(draft, { storage: ctx.storage, runner, location: ctx.location, options })
+          addOrchestrationTools(draft, {
+            options,
+            location: ctx.location,
+            session: ctx.session,
+            vcs: ctx.vcs,
+          })
         }),
       )
 
@@ -87,6 +94,7 @@ export const orchestratorPlugin = Plugin.define({
               "Use orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update for session goal state.",
               "Move the current session with /cd; session ID and history are preserved and the durable anchor follows the session, while goal/plan/halt state stays keyed to the origin project.",
               "Use orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_push, and orchestrator_worktree_cleanup only for the current session's managed worktree; delegated children get no atomic isolation.",
+              "Use orchestrator_task_complexity_classify (advisory, user-overridable), orchestrator_handoff_validate (callable, not an automatic gate), and orchestrator_admission_transition (stateless) to classify complexity, validate worker handoffs before downstream use, and track admission state.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
             ].join("\n"),
           })

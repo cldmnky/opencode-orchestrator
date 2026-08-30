@@ -4,6 +4,7 @@ import {
   CD_TOOL_PERMISSION,
   GH_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
+  ORCHESTRATION_TOOL_PERMISSION,
   SESSION_MOVE_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
   orchestratorOnlyPermissionRules,
@@ -12,7 +13,13 @@ import { applyAgentTransform, type AgentDraftLike } from "../../src/opencode-v2/
 
 const options = parseOptions({})
 
-const FEATURE_ACTIONS = [GH_TOOL_PERMISSION, WORKTREE_TOOL_PERMISSION, CD_TOOL_PERMISSION, SESSION_MOVE_PERMISSION] as const
+const FEATURE_ACTIONS = [
+  GH_TOOL_PERMISSION,
+  WORKTREE_TOOL_PERMISSION,
+  CD_TOOL_PERMISSION,
+  SESSION_MOVE_PERMISSION,
+  ORCHESTRATION_TOOL_PERMISSION,
+] as const
 
 type MutableAgent = {
   id: string
@@ -142,6 +149,58 @@ describe("agent transform feature permissions", () => {
     expect(draft.get("explore")!.permissions).toEqual([
       { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "allow" },
       ...FEATURE_DENIES,
+    ])
+  })
+
+  test("grants and denies the orchestration validation family with the shared action", () => {
+    const draft = draftWith({
+      orchestrator: { mode: "primary" },
+      planner: { mode: "subagent" },
+      explore: { mode: "subagent" },
+    })
+    applyAgentTransform(draft, options)
+
+    const orchestratorRules = draft.get("orchestrator")!.permissions!
+    expect(orchestratorRules.find((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toEqual({
+      action: ORCHESTRATION_TOOL_PERMISSION,
+      resource: "*",
+      effect: "allow",
+    })
+    // Deny-all is seeded first; the family rule lands after it so
+    // last-match-wins keeps the tools visible to the orchestrator.
+    expect(orchestratorRules[0]).toEqual(DENY_ALL)
+    expect(orchestratorRules.findIndex((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toBeGreaterThan(0)
+
+    for (const id of ["planner", "explore"]) {
+      const workerRules = draft.get(id)!.permissions!
+      expect(workerRules.find((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toEqual({
+        action: ORCHESTRATION_TOOL_PERMISSION,
+        resource: "*",
+        effect: "deny",
+      })
+      expect(workerRules[0]).toEqual(DENY_ALL)
+      expect(workerRules.findIndex((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toBeGreaterThan(0)
+    }
+  })
+
+  test("preserves an exact user rule for the orchestration validation permission", () => {
+    const draft = draftWith({
+      orchestrator: {
+        mode: "primary",
+        permissions: [{ action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect: "ask" }],
+      },
+    })
+    applyAgentTransform(draft, options)
+    const rules = draft.get("orchestrator")!.permissions!
+    expect(rules.filter((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toEqual([
+      { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect: "ask" },
+    ])
+    // The augmentation never duplicates or moves the user's rule; the rest of
+    // the family is still appended unless an exact rule already exists.
+    expect(rules).toEqual([
+      { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect: "ask" },
+      GOAL_ALLOW,
+      ...orchestratorOnlyPermissionRules("allow").filter((rule) => rule.action !== ORCHESTRATION_TOOL_PERMISSION),
     ])
   })
 

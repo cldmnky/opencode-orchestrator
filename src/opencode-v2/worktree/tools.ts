@@ -1,6 +1,7 @@
 import type { OrchestratorOptions } from "../../core/config.js"
 import { WORKTREE_TOOL_PERMISSION } from "../../core/permissions.js"
 import type { Info as ToolInfo } from "@opencode-ai/plugin/promise/tool"
+import { liveEvidence } from "../orchestration/evidence.js"
 import { createRedactor } from "../process/redact.js"
 import type { ProcessRunner } from "../process/runner.js"
 import {
@@ -35,6 +36,13 @@ import {
  * plus the runtime agent check. Durable records are written per op with the
  * stage-2 lifecycle enum; outputs are redacted (known patterns plus any
  * caller-known secrets) before they reach the transcript.
+ *
+ * Every successful JSON result carries a per-invocation `evidence` record
+ * (marker EVIDENCE_LIVE, authoritative-for-tested-fields, sourced from
+ * `tool.sessionID` + `Date.now()`). These are live local operation results
+ * with durable worktree bookkeeping; they are NOT proof of native child
+ * isolation, and the evidence/tests never claim it. Errors stay redacted
+ * strings and carry no evidence.
  */
 
 type ToolDraftLike = {
@@ -88,7 +96,8 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
       try {
         const entries: WorktreeEntry[] = repoRoot ? await gitWorktreeList(git, repoRoot) : []
         const records = await listWorktrees(deps.storage)
-        return result(JSON.stringify({ worktrees: entries, records }))
+        const evidence = liveEvidence({ source: "opencode-orchestrator.worktree.list", sessionID: tool.sessionID })
+        return result(JSON.stringify({ worktrees: entries, records, evidence }))
       } catch (error) {
         return result(`worktree list failed: ${message(error)}`)
       }
@@ -148,7 +157,13 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
           directory: deps.location.directory,
           updatedAt: written.updatedAt,
         })
-        return result(JSON.stringify({ record: written, verified: addResult.verified }))
+        return result(
+          JSON.stringify({
+            record: written,
+            verified: addResult.verified,
+            evidence: liveEvidence({ source: "opencode-orchestrator.worktree.create", sessionID: tool.sessionID }),
+          }),
+        )
       } catch (error) {
         return result(`worktree create failed: ${message(error)}`)
       }
@@ -190,7 +205,15 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
         if (record && status !== record.status) {
           current = await writeWorktree(deps.storage, { ...record, status })
         }
-        return result(JSON.stringify({ record: current, status, dirty: dirtyText.length > 0, worktrees: entries }))
+        return result(
+          JSON.stringify({
+            record: current,
+            status,
+            dirty: dirtyText.length > 0,
+            worktrees: entries,
+            evidence: liveEvidence({ source: "opencode-orchestrator.worktree.status", sessionID: tool.sessionID }),
+          }),
+        )
       } catch (error) {
         return result(`worktree status failed: ${message(error)}`)
       }
@@ -221,7 +244,16 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
         if (record.status === "moved") {
           await writeWorktree(deps.storage, { ...record, status: "ready" })
         }
-        return result(JSON.stringify({ pushed: true, verified, remote, branch, refs }))
+        return result(
+          JSON.stringify({
+            pushed: true,
+            verified,
+            remote,
+            branch,
+            refs,
+            evidence: liveEvidence({ source: "opencode-orchestrator.worktree.push", sessionID: tool.sessionID }),
+          }),
+        )
       } catch (error) {
         return result(`worktree push failed: ${message(error)}`)
       }
@@ -276,7 +308,13 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
         if (record) {
           await deps.storage.remove(worktreeStorageKey(record.originProjectID, record.sessionID))
         }
-        return result(JSON.stringify({ removed: true, directory }))
+        return result(
+          JSON.stringify({
+            removed: true,
+            directory,
+            evidence: liveEvidence({ source: "opencode-orchestrator.worktree.cleanup", sessionID: tool.sessionID }),
+          }),
+        )
       } catch (error) {
         return result(`worktree cleanup failed: ${message(error)}`)
       }

@@ -8,9 +8,11 @@ import {
 import { parseOptions } from "../../src/core/config.js"
 import {
   DELEGATION_RULES,
+  HANDOFF_FORMAT,
   MANAGED_WORKTREE_GUIDANCE,
   REMOTE_ORCHESTRATION_GUIDANCE,
   SECRET_HANDLING_GUIDANCE,
+  STRUCTURED_HANDOFF_GUIDANCE,
   TOOL_AVAILABILITY_GUIDANCE,
   WORKTREE_BOUNDARY_GUIDANCE,
   orchestrationRules,
@@ -72,6 +74,28 @@ describe("prompts", () => {
     expect(prompt).toContain("Expected outcome")
     expect(prompt).toContain("Must not do")
     expect(prompt).toContain("Worker handoff format:")
+  })
+
+  test("structured handoff guidance lists the version-1 envelope and the callable validation tools", () => {
+    expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("version: 1")
+    for (const field of [
+      "taskId",
+      "outcome",
+      "facts",
+      "assumptions",
+      "filesRead and filesChanged",
+      "verification",
+      "risks",
+      "followUp",
+      "artifactRefs",
+      "reviewState",
+    ]) {
+      expect(STRUCTURED_HANDOFF_GUIDANCE).toContain(field)
+    }
+    expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("orchestrator_handoff_validate")
+    expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("orchestrator_task_complexity_classify")
+    expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("callable/advisory, not automatic hooks")
+    expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("after collecting all eight structured facts")
   })
 
   test("renders complete command arguments", () => {
@@ -201,11 +225,30 @@ describe("remote orchestration policy", () => {
     expect(DELEGATION_RULES.review.writes).toBe(false)
   })
 
+  test("preserves the five-field handoff format byte-for-byte in every handoff-bearing prompt", () => {
+    expect(HANDOFF_FORMAT).toBe(
+      [
+        "Outcome: what was achieved or discovered",
+        "Files: files read or changed, with scope",
+        "Verification: commands run and their results",
+        "Risks: known uncertainty or regression risk",
+        "Follow-up: the next concrete action",
+      ].join("\n"),
+    )
+    // The orchestrator and worker system prompts embed the literal format; the
+    // command and continuation prompts carry the structured guidance only.
+    for (const [name, prompt] of allPromptKinds()) {
+      expect(prompt).toContain(STRUCTURED_HANDOFF_GUIDANCE)
+      if (name === "orchestrator system" || name === "worker system") expect(prompt).toContain(HANDOFF_FORMAT)
+    }
+  })
+
   test("the guidance appears exactly once per prompt, not duplicated per section", () => {
     for (const [, prompt] of allPromptKinds()) {
       expect(prompt.split("inspect the tool catalog").length - 1).toBe(1)
       expect(prompt.split("Never request, resolve, log, paste, or copy").length - 1).toBe(1)
-      expect(prompt.split("advisory").length - 1).toBe(1)
+      expect(prompt.split("plugin-controlled atomic worktree").length - 1).toBe(1)
+      expect(prompt.split("callable/advisory, not automatic hooks").length - 1).toBe(1)
     }
   })
 })

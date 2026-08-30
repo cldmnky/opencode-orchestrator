@@ -3,6 +3,7 @@ import type { Context } from "@opencode-ai/plugin/promise/plugin"
 import {
   GH_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
+  ORCHESTRATION_TOOL_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
 } from "../../src/core/permissions.js"
 import { orchestratorPlugin } from "../../src/index.js"
@@ -123,7 +124,8 @@ describe("server plugin contract", () => {
     expect(commandNames.has("cd")).toBe(true)
 
     // The tool transform registers the goal family plus the orchestrator-only
-    // github and worktree families with their shared permission actions.
+    // github, worktree, and orchestration validation families with their shared
+    // permission actions: 3 goal + 8 github + 5 worktree + 3 validation = 19.
     const allToolNames = tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)
     expect(allToolNames).toEqual([
       "orchestrator_goal_get",
@@ -142,7 +144,11 @@ describe("server plugin contract", () => {
       "orchestrator_worktree_status",
       "orchestrator_worktree_push",
       "orchestrator_worktree_cleanup",
+      "orchestrator_task_complexity_classify",
+      "orchestrator_handoff_validate",
+      "orchestrator_admission_transition",
     ])
+    expect(allToolNames).toHaveLength(19)
     expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBeGreaterThanOrEqual(8)
     expect(tools.filter((tool) => tool.options?.permission === WORKTREE_TOOL_PERMISSION).length).toBe(5)
     const goalTools = tools.filter((tool) => tool.options?.permission === GOAL_TOOL_PERMISSION)
@@ -151,6 +157,16 @@ describe("server plugin contract", () => {
     // a single rule grants or revokes the whole family.
     for (const tool of goalTools) {
       expect(tool.options?.permission).toBe(GOAL_TOOL_PERMISSION)
+    }
+    // The three serialized runtime validation tools share their own permission.
+    const validationTools = tools.filter((tool) => tool.options?.permission === ORCHESTRATION_TOOL_PERMISSION)
+    expect(validationTools.map((tool) => tool.name).sort()).toEqual([
+      "admission_transition",
+      "handoff_validate",
+      "task_complexity_classify",
+    ])
+    for (const tool of validationTools) {
+      expect(tool.options?.namespace).toBe("orchestrator")
     }
     // The orchestrator-only feature families share one permission action each.
     for (const tool of tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION)) {
@@ -170,6 +186,10 @@ describe("server plugin contract", () => {
     expect(contextText.join("\n")).toContain("orchestrator_goal_update")
     expect(contextText.join("\n")).toContain("/cd")
     expect(contextText.join("\n")).toContain("orchestrator_worktree_create")
+    expect(contextText.join("\n")).toContain("orchestrator_task_complexity_classify")
+    expect(contextText.join("\n")).toContain("orchestrator_handoff_validate")
+    expect(contextText.join("\n")).toContain("orchestrator_admission_transition")
+    expect(contextText.join("\n")).toContain("not an automatic gate")
     expect(contextText.join("\n")).toContain("exact disjoint write scope")
     expect(contextText.join("\n")).not.toMatch(/\bgoal_(get|set|update)\b/)
 

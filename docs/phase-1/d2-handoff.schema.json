@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "d2-handoff.schema.json",
   "title": "D2 versioned structured handoff",
-  "description": "Draft 2020-12 JSON Schema for the D2 versioned structured handoff envelope (plan item D2, issue #8). Design-only draft: no runtime parser, prompt change, or adoption claim relies on this document. The envelope preserves the five-field prose handoff (Outcome, Files, Verification, Risks, Follow-up) and adds strictly validated fields for evidence, assumptions, artifact references, and review state. Version is constrained to 1.",
+  "description": "Draft 2020-12 JSON Schema for the D2 versioned structured handoff envelope (plan item D2, issue #8). The runtime mirrors this document as a strict Zod contract (src/core/contracts.ts) used by the orchestrator_handoff_validate tool and the prompt guidance (issue #10); this JSON file is the contract/reference document and is not loaded or interpreted dynamically by the plugin. The envelope preserves the five-field prose handoff (Outcome, Files, Verification, Risks, Follow-up) and adds strictly validated fields for evidence, assumptions, artifact references, and review state. Version is constrained to 1.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -23,7 +23,7 @@
   "properties": {
     "version": {
       "const": 1,
-      "description": "Envelope schema version, constrained to 1 for this draft. Future incompatible changes must bump the version and document migration."
+      "description": "Envelope schema version, constrained to 1 for this contract. Future incompatible changes must bump the version and document migration."
     },
     "taskId": {
       "type": "string",

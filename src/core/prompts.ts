@@ -2,6 +2,7 @@ import {
   CHILD_TASK_CONTRACT,
   HANDOFF_FORMAT,
   REMOTE_ORCHESTRATION_GUIDANCE,
+  STRUCTURED_HANDOFF_GUIDANCE,
   orchestrationRules,
 } from "./policy.js"
 import type { OrchestratorOptions } from "./config.js"
@@ -14,6 +15,8 @@ export function buildOrchestratorSystem(options: OrchestratorOptions): string {
     "You are the conductor, not a worker of last resort. Understand the task, gather facts, then delegate focused work.",
     `Role map: planning=${options.roles.planning}; research=${options.roles.research}; implementation=${options.roles.implementation}; review=${options.roles.review}.`,
     orchestrationRules(options.max_parallel, options.require_review),
+    "",
+    STRUCTURED_HANDOFF_GUIDANCE,
   ].join("\n")
 }
 
@@ -26,6 +29,8 @@ export function buildWorkerSystem(role: keyof typeof ROLE_GUIDANCE): string {
     "",
     "Worker handoff format:",
     HANDOFF_FORMAT,
+    "",
+    STRUCTURED_HANDOFF_GUIDANCE,
   ].join("\n")
 }
 
@@ -35,6 +40,7 @@ export function buildCommandPrompt(name: string, argumentsText: string): string 
     "Use the configured orchestration roles and native OpenCode subagent delegation.",
     "Do not claim completion without evidence.",
     REMOTE_ORCHESTRATION_GUIDANCE,
+    STRUCTURED_HANDOFF_GUIDANCE,
   ].join("\n")
 
   const prompts: Record<string, string> = {
@@ -61,5 +67,6 @@ export function buildContinuationPrompt(objective: string, continuationCount: nu
     "Read and update the goal with the namespaced tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update.",
     "Completion requires a direct verification result and an evidence string through orchestrator_goal_update.",
     REMOTE_ORCHESTRATION_GUIDANCE,
+    STRUCTURED_HANDOFF_GUIDANCE,
   ].join("\n")
 }

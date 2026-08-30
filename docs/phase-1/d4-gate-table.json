@@ -2,10 +2,23 @@
   "artifact": "D4",
   "name": "Start-Simple Complexity Gate — Decision Table",
   "version": 1,
-  "status": "design-only",
+  "status": "design-table + callable advisory classifier (issue #10 runtime implementation); runtimeEnforced: false",
   "date": "2026-08-30",
   "runtimeEnforced": false,
-  "purpose": "Recommend, for an incoming task, whether direct execution or some level of orchestration is the proportionate starting point. The table is a design artifact for proposal D4 in docs/orchestrator-improvements-plan.md; it is not loaded by any runtime code.",
+  "purpose": "Recommend, for an incoming task, whether direct execution or some level of orchestration is the proportionate starting point. The table began as the design artifact for proposal D4 in docs/orchestrator-improvements-plan.md; issue #10 mirrored it as a callable, advisory classifier (classifyTaskComplexity in src/core/d4.ts, exposed as the orchestrator-only tool orchestrator_task_complexity_classify). This JSON file itself is a contract/reference document — the runtime Zod mirror (src/core/d4.ts) is the single runtime authority and this file is not loaded dynamically.",
+  "runtimeImplementation": {
+    "status": "implemented-as-callable-advisory-classifier",
+    "module": "src/core/d4.ts",
+    "publicApi": "classifyTaskComplexity",
+    "tool": "orchestrator_task_complexity_classify",
+    "permission": "orchestrator_validation (orchestrator namespace; runtime agent check rejects workers)",
+    "tests": ["test/unit/d4.test.ts", "test/unit/orchestration-tools.test.ts"],
+    "advisory": true,
+    "runtimeEnforced": false,
+    "inputBoundary": "Accepts the eight structured dimension facts (each optional/nullable); it does not infer facts from raw request prose; missing/null facts force collect-facts; invalid structured input is rejected.",
+    "corpusConformance": "11 of 12 synthetic corpus cases classify to their referenceRecommendation; d4-case-006 is the documented intentional mismatch (runtime returns orchestrate-serialized via the shared-state rule vs the orchestrate-candidate adjudication hypothesis).",
+    "note": "Callable and explicitly invoked, not an automatic hook; nothing here enforces, delegates, persists, or collects telemetry."
+  },
   "recommendationBoundary": {
     "produces": "A recommendation only: direct-execution-candidate, orchestrate-candidate, orchestrate-serialized, orchestrate-with-review, or collect-facts.",
     "neverProduces": [
@@ -48,7 +61,7 @@
       "question": "Should a separate reviewer audit the change before it is reported complete (default require_review=true already demands this for orchestrated runs)?",
       "inputType": "boolean",
       "unknownHandling": "collect-facts",
-      "sourceReference": "src/core/config.ts:52 require_review; src/core/policy.ts:90"
+      "sourceReference": "src/core/config.ts:52 require_review; src/core/policy.ts:110"
     },
     {
       "id": "external_side_effects",
@@ -206,7 +219,7 @@
       "id": "policy",
       "type": "repository",
       "path": "src/core/policy.ts",
-      "lines": "71-91",
+      "lines": "91-115",
       "note": "orchestrationRules(): prompt-guidance-only constraints (disjoint write scopes, serialize overlapping implementation, review before completion). This table inherits the same advisory boundary."
     },
     {
@@ -231,5 +244,5 @@
       "note": "Directional evidence on orchestration patterns; the secondary '64% single-agent sufficiency' claim must be validated independently before use."
     }
   ],
-  "designOnlyStatement": "This artifact is design-only: it makes no runtime changes, is not referenced by plugin code, enforces nothing, and contains no measured results or telemetry."
+  "designOnlyStatement": "This table began as a design-only artifact: it made no runtime changes and contained no measured results or telemetry. Issue #10 mirrored it as the callable advisory classifier classifyTaskComplexity (runtimeEnforced: false, advisory: true); this JSON file remains a contract/reference document, not a dynamically loaded parser. It still contains no measured results or telemetry, and the implemented classifier still enforces nothing."
 }

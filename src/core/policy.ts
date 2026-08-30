@@ -57,7 +57,8 @@ export const WORKTREE_BOUNDARY_GUIDANCE = [
 ].join("\n")
 
 export const MANAGED_WORKTREE_GUIDANCE = [
-  "Managed worktree tools (orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_push, orchestrator_worktree_cleanup) create and track one git worktree owned by the current session, with durable records and git-verified results; /cd moves the current session while preserving its ID and history.",
+  "Managed worktree tools (orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_enter, orchestrator_worktree_push, orchestrator_worktree_cleanup) create and track one git worktree owned by the current session, with durable records and git-verified results.",
+  "When managed worktrees are used for implementation, the required order is orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer. orchestrator_worktree_enter moves only the current session into its tracked worktree (session ID and history preserved); children delegated afterward inherit or start from that context, while no atomic child isolation is guaranteed.",
   "That managed ownership covers the current session only; it is not atomic child isolation, and parallel children still share the parent filesystem.",
 ].join("\n")
 

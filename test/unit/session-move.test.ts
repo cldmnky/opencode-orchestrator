@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import type { Context } from "@opencode-ai/plugin/promise/plugin"
 import { parseOptions } from "../../src/core/config.js"
-import type { CommandInvocationLike } from "../../src/opencode-v2/commands/index.js"
+import type { CommandInvocationLike, CommandName } from "../../src/opencode-v2/commands/index.js"
 import { runCommand } from "../../src/opencode-v2/commands/runtime.js"
 import { goalStorageKey, stableProjectID } from "../../src/opencode-v2/goal/state.js"
 import { moveSessionToDirectory, validateTarget, type MoveSessionDeps } from "../../src/opencode-v2/session/move.js"
@@ -46,7 +46,7 @@ function memStorage(initial: Map<string, unknown> = new Map()): {
 // Fake session that records every move and advances its own location, so the
 // helper's re-read verification observes the moved session. The shape mirrors
 // the real Session.Info (`id`, `projectID`, `location`). By default the
-// project ID is preserved across moves (a /cd within the same repository
+// project ID is preserved across moves (a move within the same repository
 // keeps the project); tests pass `projectIDFor` to simulate moving outside
 // the project, which is what the real server derives from the new directory.
 function sessionFixture(
@@ -123,7 +123,7 @@ describe("session move helper", () => {
     // Durable state: a fresh anchor is written at (preserved) current project
     // with the origin preserved, the worktree session index advances, and any
     // tracked worktree owned by the session is marked moved. The move stays
-    // in the same project (a /cd within the same repository), so the anchor
+    // in the same project (a move within the same repository), so the anchor
     // key is unchanged and the record is updated in place.
     const anchor = storage.values.get(sessionAnchorStorageKey("origin", "s1")) as SessionAnchor | undefined
     expect(anchor?.originProjectID).toBe("origin")
@@ -200,7 +200,7 @@ describe("session move helper", () => {
   })
 
   test("rewrites the anchor in place when the move stays in the same project", async () => {
-    // A /cd within the same repository keeps the project ID; the anchor must
+    // A move within the same repository keeps the project ID; the anchor must
     // be updated at its existing key (not set-then-removed like a relocation).
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-move-"))
     mkdirSync(join(directory, "app"))
@@ -315,42 +315,21 @@ describe("session move helper", () => {
   })
 })
 
-describe("cd command", () => {
-  test("moves the session through the command handler and reports continuity", async () => {
+describe("legacy cd command dispatch", () => {
+  test("runCommand no longer dispatches the removed /cd slash command", async () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-cd-"))
     mkdirSync(join(directory, "app"))
     const fixture = cdFixture({ id: "session", projectID: "origin", directory, workspaceID: "ws-1" })
 
-    await runCommand(fixture.context, parseOptions({}), "cd", invocation("app"), undefined)
-
-    expect(fixture.moves).toEqual([
-      { sessionID: "session", directory: resolve(directory, "app"), workspaceID: "ws-1", delivery: "queue" },
-    ])
-    expect(fixture.statuses[0]).toContain("Session moved to")
-    expect(fixture.statuses[0]).toContain("history preserved")
-    expect(fixture.statuses[0]).toContain(resolve(directory, "app"))
-    expect(fixture.prompts).toHaveLength(0)
-    // Durable anchor was written for the moved session (same project for a
-    // subdirectory move), preserving the origin.
-    const anchor = fixture.values.get(sessionAnchorStorageKey("origin", "session")) as SessionAnchor | undefined
-    expect(anchor?.originProjectID).toBe("origin")
-    expect(anchor?.currentDirectory).toBe(resolve(directory, "app"))
-    // Fresh anchor for a previously untracked session stays "active".
-    expect(anchor?.status).toBe("active")
-  })
-
-  test("rejects invalid targets without moving and keeps the session location", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "orchestrator-cd-"))
-    const fixture = cdFixture({ id: "session", projectID: "origin", directory })
-
-    await runCommand(fixture.context, parseOptions({}), "cd", invocation("-flag"), undefined)
-    await runCommand(fixture.context, parseOptions({}), "cd", invocation("missing-dir"), undefined)
+    // "cd" is absent from the command contract, so the runtime dispatcher
+    // treats it as an unknown name: no session move, no status, no prompt.
+    // The cast documents that the legacy name is no longer part of the
+    // typed CommandName union; the runtime must still ignore it safely.
+    await runCommand(fixture.context, parseOptions({}), "cd" as CommandName, invocation("app"), undefined)
 
     expect(fixture.moves).toHaveLength(0)
-    expect(fixture.statuses[0]).toContain("rejected")
-    expect(fixture.statuses[0]).toContain("flag")
-    expect(fixture.statuses[1]).toContain("rejected")
-    expect(fixture.statuses[1]).toContain("does not exist")
+    expect(fixture.statuses).toHaveLength(0)
+    expect(fixture.prompts).toHaveLength(0)
     expect(fixture.state.directory).toBe(directory)
   })
 })

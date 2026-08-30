@@ -1,11 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { parseOptions } from "../../src/core/config.js"
 import {
-  CD_TOOL_PERMISSION,
   GH_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
   ORCHESTRATION_TOOL_PERMISSION,
-  SESSION_MOVE_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
   orchestratorOnlyPermissionRules,
 } from "../../src/core/permissions.js"
@@ -16,8 +14,6 @@ const options = parseOptions({})
 const FEATURE_ACTIONS = [
   GH_TOOL_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
-  CD_TOOL_PERMISSION,
-  SESSION_MOVE_PERMISSION,
   ORCHESTRATION_TOOL_PERMISSION,
 ] as const
 

@@ -102,7 +102,7 @@ export function addGoalTools(
 }
 
 // Goal/run/halt keys stay anchored to the session's stable project so a
-// `/cd` move (which relocates the session anchor and the worktree index, but
+// session move (which relocates the session anchor and the worktree index, but
 // never this state) cannot orphan the goal.
 async function goalKey(storage: StorageLike, location: LocationLike, sessionID: string): Promise<string> {
   return goalStorageKey(stableLocationFor(await stableProjectID(storage, location, sessionID), location), sessionID)

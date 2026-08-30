@@ -25,7 +25,6 @@ Conductor, not worker: the orchestrator never edits as a last resort, keeps writ
 | Plan before coding | `/stress-plan` | You want a plan critiqued from 4 lenses before implementation. |
 | Stop automation | `/halt` | Pause goal/plan without deleting state. |
 | Hand off context | `/handover` | Produce a continuation brief for the next session or person. |
-| Move the session | `/cd` | Keep the session ID, history, and goal while switching to another directory. |
 
 Skip the orchestrator for single-file trivial edits — just prompt the model directly.
 
@@ -129,14 +128,6 @@ Durable session goal stored at `goal/v1/<project>/<session>`. Uses namespaced to
 ```
 
 Completion requires evidence: `orchestrator_goal_update(status="complete", evidence="...")` with ≥8 chars. Auto-continuation (if `goal.auto_continue=true`) admits one queued continuation per idle edge, gated by `cooldown_ms` and `max_continuations`.
-
-### `/cd <directory>` — required argument
-Moves the current session to an existing directory while preserving the session ID, history, and durable anchor; goal/plan/halt state stays keyed to the origin project. Never runs a shell — it rejects flag-shaped, NUL, and shell-metacharacter targets, resolves relative paths against the session's *current* location, and verifies the move before updating durable state.
-
-```
-/cd ../other-project
-/cd src/packages/checkout
-```
 
 ### `/restructure <target> [--scope=file|module|project] [--risk=conservative|broad]`
 Conservative, test-backed refactoring. Validates target is inside the project, maps references/tests via `explore`, plans atomic behavior-preserving steps, verifies baseline, then delegates.
@@ -246,17 +237,15 @@ Ask the orchestrator to delegate: it will run `explore` in background and `plann
 /goal resume
 ```
 
-## GitHub, worktrees, and /cd
+## GitHub and managed worktrees
 
-All three families are orchestrator-only (one shared permission action per family, denied to every worker) and disabled by default.
+Both families are orchestrator-only (one shared permission action per family, denied to every worker) and disabled by default.
 
 **GitHub via `gh` (`github.enabled`).** `github_capabilities` probes the `gh` binary, its auth state, and the resolved repository; `github_repo_view`, `github_issue_view`/`list`/`create`, and `github_pr_view`/`list`/`create` shell out to `gh` with `shell: false` and no model-supplied arguments. Credentials are owned by the host — configure `gh auth login` with least-privilege scopes there; the plugin never reads, stores, or prints headers, tokens, or environment secrets. The server-side `github_capabilities` probe is authoritative for what a session can actually do; the CLI `doctor` can only advisory-check this machine's `gh`.
 
-**Worktrees via git (`worktree.enabled`).** `worktree_list`/`create`/`status`/`push`/`cleanup` run `git worktree` operations against the session's repository, restricted to the configured absolute `worktree.root`, with durable per-session/project records and git-verified results.
+**Worktrees via git (`worktree.enabled`).** `worktree_list`/`create`/`status`/`enter`/`push`/`cleanup` operate on one tracked worktree per current session, restricted to the configured absolute `worktree.root`, with durable per-session/project records and git-verified results. When managed worktrees are used for implementation, the required order is `orchestrator_worktree_create` → `orchestrator_worktree_enter` → delegate to the implementer. `orchestrator_worktree_enter` moves only the current session into its tracked ready worktree (session ID, history, and durable anchor preserved) and requires only `worktree.enabled` — it never runs git, so it needs no `allow_mutations` and no `confirm`; children delegated afterward inherit or start from that context, while no atomic child isolation is guaranteed.
 
-**`/cd <directory>`.** Moves the current session to an existing directory while preserving the session ID, history, and durable anchor (see Slash commands).
-
-**Mutation opt-in, evidence, and cleanup.** Every mutating tool (`github_issue_create`, `github_pr_create`, `worktree_create`, `worktree_push`, `worktree_cleanup`) requires both `allow_mutations: true` in plugin options **and** a literal `confirm: true` field in the tool call; read-only tools need only `enabled: true`. Successful GitHub/worktree results carry typed, per-invocation `evidence` metadata: marker (`EVIDENCE_LIVE` for probes/reads/worktree operations, `EVIDENCE_MUTATION` for issue/PR creates), freshness `per-invocation`, authority (`authoritative-for-tested-fields`), `source`, `sessionID`, and `capturedAt`. Mutation evidence additionally embeds a validated https proof of the created object — `verified: true` plus its `id`, `number`, and `html_url`. List tools keep the evidence repeated per list item; error results are redacted strings that carry no evidence. Evidence is metadata only: nothing persists it, it is never process/transcript/header/token data, and worktree evidence never claims child isolation. `worktree_cleanup` refuses the main worktree, a worktree owned by another session, and uncommitted changes, and removes the durable record only after `git worktree remove` succeeds.
+**Mutation opt-in, evidence, and cleanup.** Every mutating Git/GitHub tool (`github_issue_create`, `github_pr_create`, `worktree_create`, `worktree_push`, `worktree_cleanup`) requires both `allow_mutations: true` in plugin options **and** a literal `confirm: true` field in the tool call; read-only tools need only `enabled: true`. Successful GitHub/worktree results carry typed, per-invocation `evidence` metadata: marker (`EVIDENCE_LIVE` for probes/reads/worktree operations, `EVIDENCE_MUTATION` for issue/PR creates), freshness `per-invocation`, authority (`authoritative-for-tested-fields`), `source`, `sessionID`, and `capturedAt`. Mutation evidence additionally embeds a validated https proof of the created object — `verified: true` plus its `id`, `number`, and `html_url`. List tools keep the evidence repeated per list item; error results are redacted strings that carry no evidence. Evidence is metadata only: nothing persists it, it is never process/transcript/header/token data, and worktree evidence never claims child isolation. `worktree_cleanup` refuses the main worktree, a worktree owned by another session, and uncommitted changes, and removes the durable record only after `git worktree remove` succeeds.
 
 ## Runtime contract tools
 

@@ -26,16 +26,21 @@ import {
   type StorageLike,
   type WorktreeRecord,
 } from "./state.js"
+import { moveSessionToDirectory } from "../session/move.js"
 
 /**
  * `orchestrator_worktree_*` tools (stage 2), registered via the tool
  * transform. Gating: the whole family requires `worktree.enabled`, mutating
- * tools (create/push/cleanup) additionally require `worktree.allow_mutations`
- * and a literal `confirm: true` input field, and every tool is
- * orchestrator-only via the shared `orchestrator_worktree` permission action
- * plus the runtime agent check. Durable records are written per op with the
- * stage-2 lifecycle enum; outputs are redacted (known patterns plus any
- * caller-known secrets) before they reach the transcript.
+ * git tools (create/push/cleanup) additionally require
+ * `worktree.allow_mutations` and a literal `confirm: true` input field, and
+ * every tool is orchestrator-only via the shared `orchestrator_worktree`
+ * permission action plus the runtime agent check. `worktree_enter` requires
+ * neither `allow_mutations` nor a confirm field: it moves the current session
+ * (native `session.move` plus durable anchor/index/worktree bookkeeping via
+ * `moveSessionToDirectory`) instead of running git, and `worktree.enabled`
+ * is the operator opt-in for the whole family. Durable records are written
+ * per op with the stage-2 lifecycle enum; outputs are redacted (known
+ * patterns plus any caller-known secrets) before they reach the transcript.
  *
  * Every successful JSON result carries a per-invocation `evidence` record
  * (marker EVIDENCE_LIVE, authoritative-for-tested-fields, sourced from
@@ -62,6 +67,20 @@ export type WorktreeToolsDeps = {
   runner: ProcessRunner
   location: WorktreeLocation
   options: OrchestratorOptions
+  /**
+   * Session source compatible with `moveSessionToDirectory` (get + move);
+   * plugin wiring passes `context.session` (the pinned `SessionDomain`
+   * includes `move`).
+   */
+  session: {
+    get(input: { sessionID: string }): Promise<unknown>
+    move(input: {
+      sessionID: string
+      directory: string
+      workspaceID?: string
+      delivery?: "steer" | "queue" | null
+    }): Promise<void>
+  }
   secrets?: readonly string[]
   pathExists?: (directory: string) => Promise<boolean>
   /**
@@ -75,11 +94,12 @@ export type WorktreeToolsDeps = {
 export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps): void {
   if (!deps.options.worktree.enabled) return
 
+  const redactor = createRedactor(deps.secrets)
   const git: GitContext = {
     runner: deps.runner,
     pathExists: deps.pathExists,
     realpath: deps.realpath,
-    redact: createRedactor(deps.secrets),
+    redact: redactor,
   }
 
   /** Canonicalize through the shared resolver, falling back to the fs default. */
@@ -320,6 +340,60 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
       }
     },
   })
+
+  draft.add({
+    name: "worktree_enter",
+    description:
+      "Move the current session into its tracked ready worktree (session ID and history preserved). Requires no directory or confirm: the tracked worktree is resolved from durable records for the invoking session.",
+    input: enterInput,
+    options: { namespace: "orchestrator", permission: WORKTREE_TOOL_PERMISSION },
+    execute: async (_input, tool) => {
+      requireOrchestrator(tool.agent, deps.options)
+      // worktree_enter moves the current session (native session.move plus
+      // durable anchor/index/worktree bookkeeping) and never runs git, so it
+      // deliberately does not require worktree.allow_mutations;
+      // worktree.enabled (checked at registration) is the operator opt-in.
+      try {
+        const record = await readWorktree(deps.storage, deps.location.project.id, tool.sessionID)
+        if (!record) {
+          return result("worktree_enter: no tracked worktree for this session; create one with orchestrator_worktree_create first")
+        }
+        if (record.status !== "ready") {
+          return result(`worktree_enter refused: tracked worktree is ${record.status}; only a ready worktree can be entered`)
+        }
+        // The record's dir is already the canonical form persisted at create;
+        // canonicalize again so symlink aliases resolve to the same directory
+        // the session is moved into. No caller-supplied path is accepted.
+        const directory = await canon(record.dir)
+        const outcome = await moveSessionToDirectory(
+          { session: deps.session, storage: deps.storage, location: deps.location },
+          { sessionID: tool.sessionID, target: directory },
+        )
+        if (!outcome.ok) {
+          return result(`worktree_enter failed: ${redactor(outcome.reason)}`)
+        }
+        // The helper relocated/marked the anchor and index and flipped the
+        // tracked record to `moved`; re-read it so the result reports the
+        // durable state the helper actually left behind.
+        const movedRecord = await readWorktree(deps.storage, deps.location.project.id, tool.sessionID)
+        return result(
+          JSON.stringify({
+            entered: true,
+            directory,
+            session: outcome.session,
+            anchor: outcome.anchor,
+            record: movedRecord ?? record,
+            // Live local result: the current session entered its tracked
+            // worktree. Children delegated afterward inherit/start from this
+            // context; no atomic child isolation is claimed.
+            evidence: liveEvidence({ source: "opencode-orchestrator.worktree.enter", sessionID: tool.sessionID }),
+          }),
+        )
+      } catch (error) {
+        return result(`worktree_enter failed: ${redactor(message(error))}`)
+      }
+    },
+  })
 }
 
 function requireOrchestrator(agent: string, options: OrchestratorOptions): void {
@@ -403,5 +477,14 @@ const cleanupInput = {
     confirm: { type: "boolean" },
   },
   required: ["confirm"],
+  additionalProperties: false,
+} as const
+
+// worktree_enter takes no caller-supplied fields: the tracked directory comes
+// only from the durable record for the invoking session, and there is no
+// confirm flag (it does not run git).
+const enterInput = {
+  type: "object",
+  properties: {},
   additionalProperties: false,
 } as const

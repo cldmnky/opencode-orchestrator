@@ -11,7 +11,6 @@ export const COMMAND_NAMES = [
   "handover",
   "polish",
   "stress-plan",
-  "cd",
 ] as const
 
 const agentId = z.string().trim().min(1)
@@ -36,12 +35,18 @@ const roleOptions = z
   .strict()
 
 const commandOptions = z
-  .object(
-    Object.fromEntries(COMMAND_NAMES.map((name) => [name, z.boolean().optional()])) as Record<
+  .object({
+    ...(Object.fromEntries(COMMAND_NAMES.map((name) => [name, z.boolean().optional()])) as Record<
       (typeof COMMAND_NAMES)[number],
       z.ZodOptional<z.ZodBoolean>
-    >,
-  )
+    >),
+    // Legacy `commands.cd` is accepted for backward compatibility with configs
+    // written before the /cd slash command was removed, but it is ignored: it
+    // never appears in COMMAND_NAMES, command definitions, or registered
+    // commands, and session movement is now orchestrated through the
+    // orchestrator_worktree_enter tool (and native session moves).
+    cd: z.boolean().optional(),
+  })
   .strict()
 
 export const OrchestratorOptionsSchema = z

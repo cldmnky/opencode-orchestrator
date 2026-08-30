@@ -29,8 +29,6 @@ export const GOAL_TOOL_PERMISSION = "orchestrator_goal"
  */
 export const GH_TOOL_PERMISSION = "orchestrator_gh"
 export const WORKTREE_TOOL_PERMISSION = "orchestrator_worktree"
-export const CD_TOOL_PERMISSION = "orchestrator_cd"
-export const SESSION_MOVE_PERMISSION = "orchestrator_session_move"
 
 /**
  * Shared permission action for the serialized orchestration validation tools.
@@ -67,8 +65,6 @@ export function orchestratorOnlyPermissionRule(effect: PermissionEffect): Permis
     action: [
       GH_TOOL_PERMISSION,
       WORKTREE_TOOL_PERMISSION,
-      CD_TOOL_PERMISSION,
-      SESSION_MOVE_PERMISSION,
       ORCHESTRATION_TOOL_PERMISSION,
     ].join("|"),
     resource: "*",
@@ -80,8 +76,6 @@ export function orchestratorOnlyPermissionRules(effect: PermissionEffect): Permi
   return [
     { action: GH_TOOL_PERMISSION, resource: "*", effect },
     { action: WORKTREE_TOOL_PERMISSION, resource: "*", effect },
-    { action: CD_TOOL_PERMISSION, resource: "*", effect },
-    { action: SESSION_MOVE_PERMISSION, resource: "*", effect },
     { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect },
   ]
 }

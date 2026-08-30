@@ -215,7 +215,7 @@ function orchestratorPermissions(options: OrchestratorOptions): Array<Record<str
     // Keep the goal tools visible and callable despite the deny-all above.
     // They share one explicit permission action declared on each tool.
     { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "allow" },
-    // Surface the orchestrator-only feature family (github/worktree/cd): one
+    // Surface the orchestrator-only feature family (github/worktree): one
     // explicit permission action per family declared on each tool, so discrete
     // rules grant or revoke each set while workers stay denied.
     ...orchestratorOnlyPermissionRules("allow"),

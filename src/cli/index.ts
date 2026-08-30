@@ -125,7 +125,7 @@ function replacePluginEntry(source: string, entry: string): string {
 function printHelp(): void {
   console.log(`Usage: ${DISTRIBUTION_NAME} install [--global] [--model agent=provider/model[#variant]]`)
   console.log(`       ${DISTRIBUTION_NAME} <doctor|dev-setup|dev-run|dev-reset>`)
-  console.log("doctor checks the local config and, advisory only, this machine's git/gh availability and auth. Plugin commands (/orchestrate, /goal, /cd, ...) exist only at runtime inside OpenCode — they are not CLI subcommands.")
+  console.log("doctor checks the local config and, advisory only, this machine's git/gh availability and auth. Plugin commands (/orchestrate, /goal, ...) exist only at runtime inside OpenCode — they are not CLI subcommands.")
 }
 
 await main()

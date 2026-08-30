@@ -98,7 +98,7 @@ export type SessionLocation = { directory: string; workspaceID?: string }
 export type VcsObservedFile = { file: string }
 
 export type ValidationDeps = {
-  /** Resolve the session's current post-/cd location; `undefined` when unavailable. */
+  /** Resolve the session's current post-move location; `undefined` when unavailable. */
   sessionLocation: (sessionID: string) => Promise<SessionLocation | undefined>
   /** Observed changed files in a directory; `undefined` means VCS status is unavailable. */
   vcsStatus: (directory: string, workspaceID: string | undefined) => Promise<ReadonlyArray<VcsObservedFile> | undefined>
@@ -509,7 +509,7 @@ function checkAuthority(handoff: D2Handoff, evidenceFilesVerdict: HandoffCheckVe
  * Output is versioned and deterministic for a fixed input + injected deps.
  *
  * The invoking session's ID is passed explicitly so `deps.sessionLocation`
- * resolves the current post-/cd location for the right session. Only the
+ * resolves the current post-move location for the right session. Only the
  * session ID flows through here: resolved session *content* is never echoed in
  * check details, prose, or limitations, and never logged by this module.
  */

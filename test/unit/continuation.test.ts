@@ -372,7 +372,7 @@ describe("goal continuation", () => {
   })
 
   test("continues a goal keyed to the stable origin project after a move", async () => {
-    // After /cd the anchor records the origin project, and goal/run/halt state
+    // After a session move the anchor records the origin project, and goal/run/halt state
     // stays keyed to that origin: admission must find and reserve the goal
     // under the origin-project key, not abandon it after the move.
     const location = { directory: "/workspace", project: { id: "project" } }
@@ -407,7 +407,7 @@ describe("goal continuation", () => {
   })
 
   test("continues a session whose idle events carry the moved directory", async () => {
-    // A /cd move changes the session directory but keeps the workspace; idle
+    // A session move changes the session directory but keeps the workspace; idle
     // events for the moved session must still be admitted.
     const location = { directory: "/workspace", project: { id: "project-here" }, workspaceID: "ws-1" }
     const key = goalStorageKey(location, "session")

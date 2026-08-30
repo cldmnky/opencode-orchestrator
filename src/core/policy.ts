@@ -70,6 +70,36 @@ export const REMOTE_ORCHESTRATION_GUIDANCE = [
 ].join("\n")
 
 /**
+ * Explicit bounded maker-checker review flow, embedded only when
+ * `review.mode === "bounded"`. It requires the serialized flow through the
+ * existing admission tooling and the V1 review tools. The flow is callable and
+ * advisory: nothing is gated automatically and a self-declared D2 reviewState
+ * is never trusted as reviewer proof.
+ */
+export const BOUNDED_REVIEW_GUIDANCE = [
+  "Bounded review mode is configured: run the explicit maker-checker flow.",
+  "Validate the maker handoff with orchestrator_handoff_validate before review.",
+  "Reach admission state review-pending through orchestrator_admission_transition (orchestrator-pass with reviewRequired=true) before starting a review record.",
+  "Start the review record with orchestrator_review_transition using a start signal (taskId, runId, maker, checker, and the review-pending admission signal are required).",
+  "Delegate the reviewer (the configured review role), then record its fixed decision through orchestrator_review_transition: fixed boolean checks for approve, or request-changes / block.",
+  "Map the review decision through orchestrator_admission_transition (review-approve, review-reject, or review-block).",
+  "Stop when the review record is blocked or tripped; do not keep dispatching the same run past a terminal breaker.",
+  "These tools are callable/advisory, not an automatic completion gate: nothing is gated automatically and a self-declared D2 reviewState is never reviewer proof.",
+].join("\n")
+
+/**
+ * stop-between-steps budget semantics, embedded only when
+ * `budget.mode === "stop-between-steps"`. Only plugin-owned next dispatches
+ * are checked; in-flight provider/tool calls are never interrupted and nothing
+ * is cancelled automatically.
+ */
+export const BUDGET_GUIDANCE = [
+  "stop-between-steps budget mode is configured: plugin-owned next dispatches (goal auto-continuations and slash-command prompts) are checked against the configured limits before dispatch.",
+  "Exceeded limits stop the next dispatch; in-flight provider and tool calls are never interrupted and nothing is cancelled automatically.",
+  "Unknown token or cost observations fail closed for these checks; inspect orchestrator_observability_get for the evaluation and reasons.",
+].join("\n")
+
+/**
  * Structured-handoff guidance for the serialized runtime validation tools.
  *
  * Workers are asked to emit the version-1 JSON envelope described below IN

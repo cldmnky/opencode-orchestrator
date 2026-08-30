@@ -13,7 +13,64 @@ export const COMMAND_NAMES = [
   "stress-plan",
 ] as const
 
+/**
+ * S3 trace mode: `off` (default, no tracing), `memory` (bounded in-memory
+ * metadata summaries only, never persisted), or `snapshot` (memory plus one
+ * bounded current metadata record per session). Every mode never stores
+ * prompts, transcripts, tool input/output, or arbitrary payloads.
+ */
+export const TRACE_MODES = ["off", "memory", "snapshot"] as const
+export type TraceMode = (typeof TRACE_MODES)[number]
+
+/**
+ * S3 budget mode: `advisory` (default, never blocks) or `stop-between-steps`
+ * (checked before plugin-owned next dispatches). Limits are nullable strict
+ * finite values; an explicit null (or omission) means "no limit".
+ */
+export const BUDGET_MODES = ["advisory", "stop-between-steps"] as const
+export type BudgetMode = (typeof BUDGET_MODES)[number]
+
+/**
+ * V1 review mode: `prompt` (default, unchanged prompt-only behavior) or
+ * `bounded` (adds the explicit maker-checker review tools and the terminal
+ * breaker for auto-continuation).
+ */
+export const REVIEW_MODES = ["prompt", "bounded"] as const
+export type ReviewMode = (typeof REVIEW_MODES)[number]
+
 const agentId = z.string().trim().min(1)
+
+// Nullable strict finite limits: explicit null or omission means "no limit";
+// Infinity/NaN and negative values are rejected outright.
+const nullableCountLimit = z.number().int().nonnegative().nullish()
+const nullableFiniteLimit = z.number().finite().nonnegative().nullish()
+
+const traceOptions = z
+  .object({
+    mode: z.enum(TRACE_MODES).default("off"),
+  })
+  .strict()
+  .default({ mode: "off" })
+
+const budgetOptions = z
+  .object({
+    mode: z.enum(BUDGET_MODES).default("advisory"),
+    max_steps: nullableCountLimit,
+    max_tokens: nullableFiniteLimit,
+    max_cost_usd: nullableFiniteLimit,
+    max_wall_clock_ms: nullableFiniteLimit,
+    max_retries: nullableCountLimit,
+  })
+  .strict()
+  .default({ mode: "advisory" })
+
+const reviewOptions = z
+  .object({
+    mode: z.enum(REVIEW_MODES).default("prompt"),
+    max_rounds: z.number().int().min(1).max(8).default(2),
+  })
+  .strict()
+  .default({ mode: "prompt", max_rounds: 2 })
 
 /**
  * Validates a worktree root as an absolute POSIX path (or, when nullable,
@@ -77,7 +134,11 @@ export const OrchestratorOptionsSchema = z
         root: absolutePosixPath.nullable().default(null),
       })
       .default({ enabled: false, allow_mutations: false, root: null }),
+    trace: traceOptions,
+    budget: budgetOptions,
+    review: reviewOptions,
   })
+  .strict()
   .superRefine((value, context) => {
     const seen = new Map<string, RoleName>()
     for (const role of Object.keys(value.roles) as RoleName[]) {
@@ -104,6 +165,13 @@ export const OrchestratorOptionsSchema = z
 
 export type OrchestratorOptions = z.infer<typeof OrchestratorOptionsSchema>
 export type CommandName = (typeof COMMAND_NAMES)[number]
+export type TraceOptions = z.infer<typeof traceOptions>
+export type BudgetOptions = z.infer<typeof budgetOptions>
+export type BudgetLimits = Pick<
+  BudgetOptions,
+  "max_steps" | "max_tokens" | "max_cost_usd" | "max_wall_clock_ms" | "max_retries"
+>
+export type ReviewOptions = z.infer<typeof reviewOptions>
 
 export function parseOptions(value: unknown): OrchestratorOptions {
   const parsed = OrchestratorOptionsSchema.safeParse(value ?? {})

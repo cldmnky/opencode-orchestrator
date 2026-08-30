@@ -235,12 +235,12 @@ Sources:
 |---|---|---|---|---|---:|---:|---|
 | P0 | D4 | Delegation & Prompting | Start-simple complexity gate | README already advises skipping trivial edits; Beam and Anthropic warn about cost multiplication. | S | High | Under-delegation |
 | P0 | D2 | Delegation & Prompting | Versioned JSON handoffs and artifact references | Current handoff is plain text; npm claims ≥40% token reduction from structured transport. | M | High | Information loss |
-| P0 | V2 | Verification & Safety | Two-level validation before downstream admission | Current review policy is prompt-based; Anthropic and npm support explicit evaluation stages. | M | High | False confidence |
+| P0 | V2 | Verification & Safety | Two-level validation before downstream admission | Current review policy is prompt-based; Anthropic and npm support explicit evaluation stages. | M | High | False confidence — callable validation tools implemented (issue #10), still no automatic gate |
 | P0 | V3 | Verification & Safety | Host-tool preflight and capability matrix | `policy.ts` already requires preflight; `doctor` remains local/advisory. | S | High | Misleading capability status |
-| P0 | S3 | State & Observability | Trace, budget, latency, token, and step controls | Current hook mainly warns on failed orchestrator tools; Tyk/Knowlee recommend structured governance. | M | High | Privacy and overhead |
+| P0 | S3 | State & Observability | Trace, budget, latency, token, and step controls | Current hook mainly warns on failed orchestrator tools; Tyk/Knowlee recommend structured governance. | M | High | Privacy and overhead — **bounded opt-in impl (trace/budget) on `feat/s3-v1-controls`** |
 | P1 | D1 | Delegation & Prompting | DAG decomposition with adaptive scaling | Current native delegation has no visible task graph; Anthropic and issue #20849 describe DAG scheduling. | L | High | Over-decomposition |
 | P1 | D3 | Delegation & Prompting | Context isolation target and enforcement | PromptEngines recommends task-specific contexts under 5K tokens; native isolation is not currently measured. | M | High | Lossy compression |
-| P1 | V1 | Verification & Safety | Maker-checker review with circuit breaker and model tiering | `require_review` is not a runtime gate; Beam recommends bounded independent review. | M | High | Cost and review loops |
+| P1 | V1 | Verification & Safety | Maker-checker review with circuit breaker and model tiering | `require_review` is not a runtime gate; Beam recommends bounded independent review. | M | High | Cost and review loops — **bounded opt-in impl (review + breaker) on `feat/s3-v1-controls`; tiering not implemented** |
 | P1 | V4 | Verification & Safety | Redaction and authority-boundary hardening | Redaction is pattern-based; child authority and permission `ask` semantics need explicit boundaries. | M | High | False security |
 | P1 | S1 | State & Observability | Durable step checkpoints with backoff and cursor resume | Goal/run records lack per-step receipts; Knowlee and Anthropic recommend resumable execution. | L | High | Duplicate side effects |
 | P1 | S2 | State & Observability | Separate volatile events, durable logs, and projections | Current subscriptions can miss events; OpenAgents documents this distinction. | L | High | State divergence |
@@ -462,6 +462,15 @@ A future review gate could:
 - Require human confirmation for high-risk or externally mutating actions.
 
 Model tiering should remain role/capability-based rather than hard-coded to vendor model names.
+
+**Implemented (bounded, opt-in — `feat/s3-v1-controls`)**
+
+- `review.mode: "bounded"` adds `orchestrator_review_get` / `orchestrator_review_transition` and a **separate version-1 review schema** (`src/opencode-v2/observability/review.ts`) with fixed states (`pending`/`approved`/`changes-requested`/`blocked`/`tripped`), fixed reason codes, and deterministic transitions. D2 `reviewState` and the core admission machine (V2) are unchanged.
+- **Bounded rounds** (`review.max_rounds`, default 2, range 1..8): `request-changes` re-opens rounds while rounds remain and trips the circuit (open, requires human) at max; `approve` requires every fixed boolean check; `block` opens the circuit immediately.
+- **Circuit breaker**: tripped/blocked records stop goal auto-continuation (checked before reservation and before delivery); pending/changes-requested/approved do not trip it; a new task start that replaces a terminal record reopens it.
+- One bounded current record per session (`review/v1/<project>/<session>`, process-local `withSessionLock` only — no CAS/cross-process guarantee). No free-form reviewer text is persisted.
+- Still **not implemented** here: automatic completion gating, model-tier escalation (V1 keeps role-based review; no vendor tiering), human confirmation prompts, and separate reviewer contexts/hidden reasoning.
+- See `docs/phase-1/s3-v1-controls.md`.
 
 **Files affected (candidate)**
 
@@ -869,7 +878,14 @@ Prompts, secrets, and unrestricted raw transcripts should not be required for or
 
 Define a privacy-preserving metric schema and establish retention, redaction, and user-visibility rules.
 
-**Web source linkage**
+**Implemented (bounded, opt-in — `feat/s3-v1-controls`)**
+
+- Strict config blocks (`src/core/config.ts`): `trace` `off|memory|snapshot` (default `off`), `budget` `advisory|stop-between-steps` (default `advisory`, nullable finite `max_steps`/`max_tokens`/`max_cost_usd`/`max_wall_clock_ms`/`max_retries`), and `review` `prompt|bounded` (`max_rounds` 1..8 default 2). Defaults preserve the previous behavior exactly.
+- **Metadata-only tracing** (`src/opencode-v2/observability/trace.ts`, runtime in `observability/runtime.ts`): versioned bounded summaries (counts, timestamps, per-tool aggregates, steps/retries, latest usage snapshot) from pinned `execute.before/after` hooks and typed events only. No prompts, transcripts, payloads, call IDs (in-memory pairing only), or credentials. Usage aggregate events are snapshots (never additive) — no double counting; missing coverage is unknown/partial, never zero. The pinned Promise `SessionDomain` has no `session.stats`; no HTTP client is built.
+- **Deterministic budget evaluation** (`observability/budget.ts`): `within|exceeded|unknown` with exact-boundary `within`; unknown **token/cost** coverage fails closed only for `stop-between-steps` checks (reason recorded) while `advisory` never blocks. `stop-between-steps` gates only plugin-owned next dispatches (goal auto-continuation before reservation and before delivery; slash-command prompt delivery). `session.interrupt` is never called and no in-flight provider/tool call is cancelled.
+- Still **not implemented**: durable step checkpoints (§S1), replayable event logs/projections (§S2), rate limiting, per-workflow dashboards, and retention policies.
+
+**Web source linkage** for S3
 
 - [R8](https://tyk.io/learning-center/ai-agent-orchestration-a-complete-enterprise-guide/)
 - [R9](https://www.knowlee.ai/blog/ai-agent-orchestration-guide-2026)

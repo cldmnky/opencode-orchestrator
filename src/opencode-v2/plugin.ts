@@ -9,6 +9,8 @@ import { addGoalTools } from "./goal/tools.js"
 import { addGhTools } from "./gh/tools.js"
 import { addWorktreeTools } from "./worktree/tools.js"
 import { addOrchestrationTools } from "./orchestration/tools.js"
+import { addObservabilityTools } from "./observability/tools.js"
+import { createDispatchGate, shouldStartObservability, startObservability } from "./observability/runtime.js"
 import { startWorktreeEventSync } from "./worktree/events.js"
 import { SpawnRunner } from "./process/runner.js"
 import { DISTRIBUTION_NAME, RUNTIME_PLUGIN_ID } from "../core/package-identity.js"
@@ -40,6 +42,15 @@ export const orchestratorPlugin = Plugin.define({
     const registrations: Array<{ dispose(): Promise<void> }> = []
     const lateAgentSetup = bootstrapIsEmpty ? startLateAgentSetup(ctx, options) : undefined
 
+    // S3/V1 observability runtime: started only when trace, stop-between-steps
+    // budget, or bounded review is configured. Defaults keep the previous
+    // behavior exactly (no extra hooks, events, tools, or gates).
+    const observability = shouldStartObservability(options)
+      ? await startObservability({ options, event: ctx.event, tool: ctx.tool, storage: ctx.storage, location: ctx.location })
+      : undefined
+    if (observability) registrations.push({ dispose: () => observability.dispose() })
+    const controlGate = createDispatchGate({ options, storage: ctx.storage, location: ctx.location, runtime: observability })
+
     try {
       registrations.push(
         await ctx.agent.transform((draft) => {
@@ -53,7 +64,7 @@ export const orchestratorPlugin = Plugin.define({
           commandResult = applyCommandTransform(
             draft,
             options,
-            (name, input) => runCommand(ctx, options, name, input, undefined),
+            (name, input) => runCommand(ctx, options, name, input, undefined, controlGate),
             new Set(existingCommands.map((command) => command.name)),
             semanticRoles,
           )
@@ -78,6 +89,12 @@ export const orchestratorPlugin = Plugin.define({
             session: ctx.session,
             vcs: ctx.vcs,
           })
+          addObservabilityTools(draft, {
+            options,
+            storage: ctx.storage,
+            location: ctx.location,
+            runtime: observability,
+          })
         }),
       )
 
@@ -96,6 +113,19 @@ export const orchestratorPlugin = Plugin.define({
               "When managed worktrees are used for implementation, the required order is orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer. orchestrator_worktree_enter moves only the current session into its tracked worktree (session ID and history preserved); children delegated afterward inherit or start from that context, while no atomic child isolation is guaranteed.",
               "Use orchestrator_task_complexity_classify (advisory, user-overridable), orchestrator_handoff_validate (callable, not an automatic gate), and orchestrator_admission_transition (stateless) to classify complexity, validate worker handoffs before downstream use, and track admission state.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
+              ...(options.review.mode === "bounded"
+                ? [
+                    "Bounded review is enabled: use orchestrator_review_get and orchestrator_review_transition (start -> delegate reviewer -> record fixed checks/decision -> map through orchestrator_admission_transition) and stop when the record is blocked or tripped.",
+                  ]
+                : []),
+              ...(options.budget.mode === "stop-between-steps"
+                ? [
+                    "stop-between-steps budget is enabled: plugin-owned next dispatches are checked against the configured limits before dispatch; inspect orchestrator_observability_get for the evaluation.",
+                  ]
+                : []),
+              ...(options.trace.mode !== "off"
+                ? ["Trace is enabled: orchestrator_observability_get reads the bounded metadata summary and budget evaluation for a session."]
+                : []),
             ].join("\n"),
           })
         }),
@@ -117,7 +147,7 @@ export const orchestratorPlugin = Plugin.define({
         dispose: startWorktreeEventSync(ctx, options),
       })
 
-      const stopContinuation = options.goal.auto_continue ? startGoalContinuation(ctx, options) : undefined
+      const stopContinuation = options.goal.auto_continue ? startGoalContinuation(ctx, options, controlGate) : undefined
       return async () => {
         await stopContinuation?.()
         await lateAgentSetup?.stop()

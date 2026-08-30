@@ -21,7 +21,22 @@
           "enabled": false,
           "allow_mutations": false,
           "root": null
-        }
+        },
+        // S3/V1 controls — all opt-in, defaults preserve the previous behavior.
+        // trace: off | memory | snapshot (bounded metadata summaries only)
+        "trace": { "mode": "off" },
+        // budget: advisory | stop-between-steps with nullable strict limits
+        "budget": {
+          "mode": "advisory",
+          "max_steps": null,
+          "max_tokens": null,
+          "max_cost_usd": null,
+          "max_wall_clock_ms": null,
+          "max_retries": null
+        },
+        // review: prompt | bounded (max_rounds 1..8, rounds remaining must
+        // absorb rework before the terminal circuit breaker opens)
+        "review": { "mode": "prompt", "max_rounds": 2 }
       }
     }
   ],

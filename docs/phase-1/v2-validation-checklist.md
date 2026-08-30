@@ -45,6 +45,7 @@ enforcement exist.
 | [`./v3-capability-matrix.md`](./v3-capability-matrix.md) | Supplies the evidence markers (`EVIDENCE_LIVE`, `EVIDENCE_MUTATION`, `EVIDENCE_REGISTERED`, `EVIDENCE_LOCAL`, `EVIDENCE_STATIC`, `UNKNOWN`) and freshness/authority markers that Level 2's evidence checks (§9) are keyed to; the vocabulary is now implemented (`src/opencode-v2/orchestration/evidence.ts`). |
 | [`./d4-complexity-gate.md`](./d4-complexity-gate.md) | Gives a recommendation (advisory) on whether review is warranted for a task class (§3 labels); "review is required" in §7's decision rule follows its `high-risk` → `orchestrate-with-review` linkage. |
 | [`./assumptions.md`](./assumptions.md) | A4 (parallelism prompt-only), A5 (review enforcement prompt-only) — the current-state basis for §7.3. |
+| [`./s3-v1-controls.md`](./s3-v1-controls.md) | V1 bounded maker-checker review: a **separate version-1 review schema** (`src/opencode-v2/observability/review.ts`) with fixed transitions and a terminal breaker. It does **not** change D2 `reviewState` or the eight-state admission vocabulary below; Level 3's judgment remains reviewer/human territory, and the V1 record is bounded bookkeeping that never overrides a self-declared envelope. |
 | [`../orchestrator-improvements-plan.md`](../orchestrator-improvements-plan.md) | Source of record: V1 `:446-487`, V2 `:489-535`, V3 `:537+`, Phase-2 terminal-state activity `:1047`. |
 
 ## 3. The three validation levels at a glance

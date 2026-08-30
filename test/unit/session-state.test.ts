@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test"
 import { parseOptions, type OrchestratorOptions } from "../../src/core/config.js"
 import {
   GH_TOOL_PERMISSION,
+  OBSERVABILITY_TOOL_PERMISSION,
   ORCHESTRATION_TOOL_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
   orchestratorOnlyPermissionRule,
+  orchestratorOnlyPermissionRules,
 } from "../../src/core/permissions.js"
 import {
   inferOriginProjectID,
@@ -88,9 +90,10 @@ describe("permission constants", () => {
     expect(GH_TOOL_PERMISSION).toBe("orchestrator_gh")
     expect(WORKTREE_TOOL_PERMISSION).toBe("orchestrator_worktree")
     expect(ORCHESTRATION_TOOL_PERMISSION).toBe("orchestrator_validation")
+    expect(OBSERVABILITY_TOOL_PERMISSION).toBe("orchestrator_observability")
   })
 
-  test("builds an orchestrator-only deny rule over the whole feature family incl. orchestration validation", () => {
+  test("builds an orchestrator-only deny rule over the whole feature family incl. orchestration validation and observability", () => {
     const rule = orchestratorOnlyPermissionRule("deny")
     expect(rule.resource).toBe("*")
     expect(rule.effect).toBe("deny")
@@ -98,12 +101,23 @@ describe("permission constants", () => {
       GH_TOOL_PERMISSION,
       WORKTREE_TOOL_PERMISSION,
       ORCHESTRATION_TOOL_PERMISSION,
+      OBSERVABILITY_TOOL_PERMISSION,
     ]) {
       expect(rule.action).toContain(action)
     }
     // The legacy /cd and session-move actions are no longer emitted.
     expect(rule.action).not.toContain("orchestrator_cd")
     expect(rule.action).not.toContain("orchestrator_session_move")
+  })
+
+  test("each family has its own permission rule in the modern rules helper", () => {
+    const rules = orchestratorOnlyPermissionRules("deny")
+    expect(rules.map((rule) => rule.action)).toEqual([
+      GH_TOOL_PERMISSION,
+      WORKTREE_TOOL_PERMISSION,
+      ORCHESTRATION_TOOL_PERMISSION,
+      OBSERVABILITY_TOOL_PERMISSION,
+    ])
   })
 })
 

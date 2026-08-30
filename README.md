@@ -199,9 +199,19 @@ Use native `agents.<id>.model` for per-agent models. Plugin options are orchestr
       "require_review": true,
       "strict_agents": true,    // fail setup if mapped agent missing
       "commands": {},           // e.g. { "polish": false }
-      "goal": { "auto_continue": true, "max_continuations": 50, "cooldown_ms": 1000 }
+      "goal": { "auto_continue": true, "max_continuations": 50, "cooldown_ms": 1000 },
+      "github": { "enabled": false, "allow_mutations": false },   // orchestrator-only gh tools; both off by default
+      "worktree": { "enabled": false, "allow_mutations": false, "root": null },  // orchestrator-only git worktrees
+      "trace": { "mode": "off" },            // off | memory | snapshot (S3, metadata only)
+      "budget": { "mode": "advisory" },      // advisory | stop-between-steps + nullable limits
+      "review": { "mode": "prompt", "max_rounds": 2 }  // prompt | bounded (max_rounds 1..8)
     }
   }],
+  // When worktree.root is non-null and sits outside the project directory, grant
+  // the worktree root scope so managed worktrees are usable, e.g.:
+  // "permissions": [
+  //   { "action": "external_directory", "resource": "/srv/worktrees/*", "effect": "allow" }
+  // ],
   "agents": {
     "orchestrator": { "mode": "primary", "model": "openai/gpt-5#high" },
     "planner":      { "mode": "subagent", "model": "openai/gpt-5-mini" },
@@ -247,6 +257,54 @@ Both families are orchestrator-only (one shared permission action per family, de
 
 **Mutation opt-in, evidence, and cleanup.** Every mutating Git/GitHub tool (`github_issue_create`, `github_pr_create`, `worktree_create`, `worktree_push`, `worktree_cleanup`) requires both `allow_mutations: true` in plugin options **and** a literal `confirm: true` field in the tool call; read-only tools need only `enabled: true`. Successful GitHub/worktree results carry typed, per-invocation `evidence` metadata: marker (`EVIDENCE_LIVE` for probes/reads/worktree operations, `EVIDENCE_MUTATION` for issue/PR creates), freshness `per-invocation`, authority (`authoritative-for-tested-fields`), `source`, `sessionID`, and `capturedAt`. Mutation evidence additionally embeds a validated https proof of the created object — `verified: true` plus its `id`, `number`, and `html_url`. List tools keep the evidence repeated per list item; error results are redacted strings that carry no evidence. Evidence is metadata only: nothing persists it, it is never process/transcript/header/token data, and worktree evidence never claims child isolation. `worktree_cleanup` refuses the main worktree, a worktree owned by another session, and uncommitted changes, and removes the durable record only after `git worktree remove` succeeds.
 
+## S3 observability and V1 bounded review (opt-in)
+
+All three controls default to the previous behavior (`trace off`, `budget advisory`,
+`review prompt`) and add surfaces only when enabled — the default tool contract and
+hook count are unchanged.
+
+**Trace (`trace.mode`).** `memory` keeps bounded metadata summaries in memory;
+`snapshot` additionally persists one bounded current record per session under
+`trace/v1/<project>/<session>`. Records are **metadata only**: counts, timestamps,
+per-tool aggregates (count/failed/duration), steps, retries, and the latest usage
+snapshot. They never contain prompts, transcripts, tool input/output, shell output,
+result/error text, raw credentials, or call IDs. Usage comes from the
+`session.usage.updated` event and is treated as an aggregate **snapshot** (replace,
+never add) so nothing is double counted; missing coverage is unknown, never zero.
+
+**Budget (`budget.mode`).** Deterministic `within | exceeded | unknown` evaluations
+over the nullable strict finite limits (`max_steps`, `max_tokens`, `max_cost_usd`,
+`max_wall_clock_ms`, `max_retries`; an explicit `null` or omission means no limit).
+`advisory` never blocks. `stop-between-steps` checks **only plugin-owned next
+dispatches** — goal auto-continuation and slash-command prompt delivery — before
+reservation and delivery. Exceeded limits stop the next dispatch; **in-flight
+provider and tool calls are never interrupted** and nothing is cancelled
+automatically. Unknown token/cost coverage fails closed for stop-between-steps
+checks (the reason is reported). Inspect `orchestrator_observability_get` for the
+evaluation. Budget enforcement works best with trace enabled; with budget
+stop-between-steps and no observations at all, unknown tokens/cost fail closed.
+
+**Bounded review (`review.mode`).** `bounded` adds `orchestrator_review_get` and
+`orchestrator_review_transition`. One bounded version-1 review record per session
+(`review/v1/<project>/<session>`, serialized through the existing process-local
+`withSessionLock`; no CAS/cross-process guarantee) with deterministic transitions
+over a record identity of **taskId + runId**. `start` (requires exactly taskId,
+runId, maker, checker, and the `review-pending` admission signal) → pending round
+1; pending `approve` requires exactly the three fixed boolean checks `diff`,
+`scope`, and `verification`, all true → approved; pending `request-changes` →
+changes-requested while rounds remain, else tripped (open, requires human);
+pending `block` → blocked (requires human); changes-requested `start` reopens the
+next round but only with the unchanged maker/checker (drift is rejected
+`identity-drift`); a different task/run (including the same task with a new run)
+can never overwrite an open record and may replace only a terminal one.
+Approved/blocked/tripped are terminal for the current task/run; tripped/blocked
+open the **circuit breaker** and stop goal auto-continuation until a new
+terminal-replacing review start. Fixed enums/reason codes only — no free-form
+reviewer text, and the model-facing tool schema mirrors the runtime checks
+exactly. Caller identity cannot be proven, and this machine is a separate
+version-1 schema that never changes D2 `reviewState` or the admission state
+semantics.
+
 ## Runtime contract tools
 
 Three validation tools are always registered with no feature-enable gate. They live under the `orchestrator` namespace and share the single `orchestrator_validation` permission action; workers are denied them by the installer/agent transform, and each execute handler rejects non-orchestrator agents regardless of visibility rules. They are **callable/advisory primitives, not automatic hooks**: nothing routes worker output through them, they accept no `confirm` input, and no completion gate is enforced.
@@ -267,8 +325,10 @@ The underlying pure primitives — `classifyTaskComplexity`, the D2 Zod mirror w
 - **`doctor` cannot prove the server.** Its runtime checks probe this machine's PATH only and are always advisory; the server-side capabilities/worktree tools are authoritative.
 - **Validation is callable, not automatic.** The three orchestration validation tools exist and are always registered, but no plugin hook intercepts worker output, nothing persists admission or classification results, and there is no completion gate. `handoff_validate` never runs a shell and can never re-run a required command itself (the pinned V2 API offers no mechanism for it to do so), so orchestrator-level contracts that name required commands deterministically yield `blocked-unknown` until the parent independently re-runs them with its own tools; URL evidence refs likewise block because their authority cannot be authenticated from D2 strings in this version.
 - **No structured child-output hook.** The plugin prompts workers for the version-1 envelope, but it does not parse, validate, or transform child output automatically; the orchestrator must call `orchestrator_handoff_validate` explicitly.
-- **No server-plugin statistics surface.** The pinned Promise `SessionDomain` exposes no `statistics`/`tokenCount`/`usage` surface, so the plugin cannot read session token stats server-side. This absence claim is scoped to the pinned package declarations — the official HTTP API may expose session statistics (e.g. `/api/session/stats`), which is a separate surface the plugin does not consume.
+- **No server-plugin statistics surface.** The pinned Promise `SessionDomain` exposes no `statistics`/`tokenCount`/`usage` surface, so the plugin cannot read session token stats server-side. This absence claim is scoped to the pinned package declarations — the official HTTP API may expose session statistics (e.g. `/api/session/stats`), which is a separate surface the plugin does not consume. The S3 trace/budget feature therefore observes `session.usage.updated` events (aggregate snapshots) instead; missing coverage is reported as unknown.
 - **No evidence persistence.** Tool `evidence` records are returned to the model as metadata and are not stored; there is no durable receipt/evidence ledger.
+- **No automatic gating and no in-flight cancellation.** The S3/V1 controls are callable/advisory primitives plus checks at plugin-owned dispatch boundaries only: nothing intercepts worker output automatically, no hook reads review/budget state as a completion gate, `session.interrupt` is never called automatically, recognized tool-call IDs survive only in memory, and in-flight provider/tool calls are never cancelled. `stop-between-steps` stops only the next plugin-owned dispatch (goal auto-continuation and slash-command prompt delivery where practical), and the bounded review breaker stops only goal auto-continuation on blocked/tripped.
+- **No model-vendor tiering.** V1 review escalation stays within the configured semantic role map; there is no model-tier escalation, no per-vendor pricing, and no migration of D2/admission semantics.
 
 ## Development
 

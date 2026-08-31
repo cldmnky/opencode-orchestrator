@@ -1,10 +1,10 @@
-import { Plugin } from "@opencode-ai/plugin/tui"
+import type { Definition } from "@opencode-ai/plugin/tui/plugin"
 import type { Context, KeymapCommand } from "@opencode-ai/plugin/tui/context"
 import { commandDefinitions } from "./opencode-v2/commands/index.js"
 import { parseOptions } from "./core/config.js"
 import { RUNTIME_PLUGIN_ID } from "./core/package-identity.js"
 
-export const tuiPlugin = Plugin.define({
+export const tuiPlugin = {
   id: RUNTIME_PLUGIN_ID,
   async setup(context: Context) {
     const options = parseOptions(context.options)
@@ -42,7 +42,7 @@ export const tuiPlugin = Plugin.define({
       stopCommandUpdates()
     }
   },
-})
+} satisfies Definition
 
 function tuiCommand(context: Context, name: string, description: string): KeymapCommand {
   return {

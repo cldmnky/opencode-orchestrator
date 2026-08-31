@@ -109,8 +109,17 @@ export const orchestratorPlugin = (Plugin.define as any)({
               "Delegate with the child-task contract: Task, Expected outcome, Scope/file ownership, Must do, Must not do, Verification, and handoff.",
               "Parallel writes require an exact disjoint write scope from every child; separate established facts from assumptions.",
               "Use orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update for session goal state.",
-              "Use orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_enter, orchestrator_worktree_push, and orchestrator_worktree_cleanup only for the current session's managed worktree; delegated children get no atomic isolation.",
-              "When managed worktrees are used for implementation, the required order is orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer. orchestrator_worktree_enter moves only the current session into its tracked worktree (session ID and history preserved); children delegated afterward inherit or start from that context, while no atomic child isolation is guaranteed.",
+              ...(options.worktree.enabled
+                ? [
+                    "Use orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_enter, orchestrator_worktree_push, and orchestrator_worktree_cleanup only for the current session's managed worktree; delegated children get no atomic isolation.",
+                    "Worktree lifecycle is enabled and orchestrator-owned: implementation delegation MUST be preceded by orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer. orchestrator_worktree_enter moves only the current session into its tracked worktree (session ID and history preserved); children delegated afterward inherit or start from that context. Only the orchestrator creates, enters, pushes, and cleans up managed worktrees. When the worktree tools, a whitelisted worktree.root, allow_mutations, a ready tracked worktree, or a successful worktree_enter are unavailable, stop and ask the user instead of delegating implementation from the main checkout.",
+                  ]
+                : []),
+              ...(options.github.enabled
+                ? [
+                    "GitHub lifecycle is enabled and orchestrator-owned: preflight with orchestrator_github_capabilities; implementers never push branches or create/merge pull requests. The orchestrator pushes the branch and creates the pull request only after validated maker/checker review and direct verification, and merges only after a separate explicit user request: a fresh orchestrator_github_pr_view with the exact expected head SHA, a literal confirm: true, and post-merge verification. confirm: true and checker approval are never user authorization; stale, refused, or failed merges stop truthfully.",
+                  ]
+                : []),
               "Use orchestrator_task_complexity_classify (advisory, user-overridable), orchestrator_handoff_validate (callable, not an automatic gate), and orchestrator_admission_transition (stateless) to classify complexity, validate worker handoffs before downstream use, and track admission state.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
               ...(options.review.mode === "bounded"

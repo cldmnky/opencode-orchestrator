@@ -11,18 +11,20 @@ import type { ProcessResult, ProcessRunner } from "../process/runner.js"
  * (shell off, 1 MiB output bound, 30s default timeout), so tests inject fakes
  * and nothing here ever sees or handles tokens. `gh api` is invoked with the
  * fixed endpoint templates below (`repos/{owner}/{repo}/issues`,
- * `repos/{owner}/{repo}/pulls`, plus `/number`) and `--method GET/POST`.
+ * `repos/{owner}/{repo}/pulls`, plus `/number` and `/number/merge`) and
+ * `--method GET/POST/PUT`.
  *
- * POST bodies cannot ride along as `--input -` stdin because the stage-2
+ * Request bodies cannot ride along as `--input -` stdin because the stage-2
  * runner spawns with `stdio: ["ignore", ...]` (stdin is closed). Bodies are
  * therefore written to a mode-0600 temp file and passed via `--input <file>`,
  * removed immediately after the call. The endpoint templates stay fixed.
  *
  * Every response is validated before it is returned: issues and pulls must
  * carry numeric `id`/`number` and a non-empty `html_url`; repo views must
- * carry `id`, `nameWithOwner`, and `url`. All raw process text and every
- * raised error message pass through the redactor (known secret shapes plus
- * caller-known exact secrets) before leaving this module.
+ * carry `id`, `nameWithOwner`, and `url`; pull merges must carry `sha`,
+ * `merged`, and `message`. All raw process text and every raised error
+ * message pass through the redactor (known secret shapes plus caller-known
+ * exact secrets) before leaving this module.
  */
 
 export const GH_CMD = "gh"
@@ -138,7 +140,28 @@ export type PullCreateInput = {
   timeoutMs?: number
 }
 
+export type PullMergeInput = {
+  owner: string
+  repo: string
+  number: number
+  /** SHA that the pull request head must match for the merge to be allowed. */
+  sha: string
+  mergeMethod?: "merge" | "squash" | "rebase"
+  commitTitle?: string
+  commitMessage?: string
+  timeoutMs?: number
+}
+
+/** Validated `PUT /repos/{owner}/{repo}/pulls/{number}/merge` response body. */
+export type PullMergeResult = {
+  sha: string
+  merged: boolean
+  message: string
+}
+
 const ISSUE_STATES = ["open", "closed", "all"] as const
+
+const MERGE_METHODS = ["merge", "squash", "rebase"] as const
 
 /** Repo slug hygiene: endpoint segments must be URL-safe (http://gh.io/repos). */
 export function assertRepoSlug(value: string, label: string): string {
@@ -203,6 +226,38 @@ export function assertPullShape(value: unknown): PullInfo {
       head && typeof head.ref === "string" && typeof head.sha === "string" ? { ref: head.ref, sha: head.sha } : undefined,
     base: base && typeof base.ref === "string" ? { ref: base.ref } : undefined,
   }
+}
+
+/**
+ * Validate the expected head SHA for a merge: a non-empty, whitespace-free,
+ * 7-40 character hexadecimal git SHA. GitHub compares the value exactly
+ * against the pull's `head.sha`, so a short unambiguous prefix still fails
+ * the freshness check rather than merging on a stale head.
+ */
+export function assertMergeSha(value: string): string {
+  const sha = value.trim()
+  if (!/^[A-Fa-f0-9]{7,40}$/.test(sha)) {
+    throw new Error("sha must be a 7-40 character hexadecimal commit SHA")
+  }
+  return sha
+}
+
+export function assertMergeMethod(value: string): (typeof MERGE_METHODS)[number] {
+  if (!(MERGE_METHODS as readonly string[]).includes(value)) {
+    throw new Error(`mergeMethod must be one of: ${MERGE_METHODS.join(", ")}`)
+  }
+  return value as (typeof MERGE_METHODS)[number]
+}
+
+/** Validate a raw GitHub pull-merge response: sha, merged, and message are required. */
+export function assertPullMergeShape(value: unknown): PullMergeResult {
+  const merge = objectOf(value)
+  if (typeof merge.sha !== "string" || merge.sha.length === 0) {
+    throw new Error('github pull merge response is missing "sha"')
+  }
+  if (typeof merge.merged !== "boolean") throw new Error('github pull merge response is missing "merged"')
+  if (typeof merge.message !== "string") throw new Error('github pull merge response is missing "message"')
+  return { sha: merge.sha, merged: merge.merged, message: merge.message }
 }
 
 /** Resolve the current directory's repo, or `owner/repo` when both are given. */
@@ -299,6 +354,33 @@ export async function createPull(gh: GhContext, input: PullCreateInput): Promise
 }
 
 /**
+ * Merge a pull request via the fixed `repos/{owner}/{repo}/pulls/{number}/merge`
+ * endpoint. The expected head `sha` is required and sent in the body so GitHub
+ * refuses the merge if the head moved; absent optional fields are omitted. The
+ * response is validated as `{sha, merged, message}` before it is returned;
+ * a non-zero `gh` exit (403/404/405/409/422) raises a redacted `GhError`.
+ */
+export async function mergePull(gh: GhContext, input: PullMergeInput): Promise<PullMergeResult> {
+  const { owner, repo } = repoOf(input)
+  const number = assertIssueNumber(input.number)
+  const sha = assertMergeSha(input.sha)
+  const body: Record<string, unknown> = { sha }
+  if (input.mergeMethod !== undefined) body.merge_method = assertMergeMethod(input.mergeMethod)
+  if (input.commitTitle !== undefined && input.commitTitle.trim().length > 0) {
+    body.commit_title = input.commitTitle.trim()
+  }
+  if (input.commitMessage !== undefined && input.commitMessage.trim().length > 0) {
+    body.commit_message = input.commitMessage.trim()
+  }
+  const result = await ghApi(gh, "PUT", pullMergeEndpoint(owner, repo, number), {
+    body,
+    timeoutMs: input.timeoutMs,
+  })
+  requireZero(result, gh, "gh pr merge")
+  return assertPullMergeShape(parseJson(result.stdout, gh))
+}
+
+/**
  * Best-effort capability probe for the `orchestrator_github_capabilities`
  * tool. Never throws for an absent gh binary, failed auth, or an unresolvable
  * repo; each probe degrades to the corresponding `false`/`null` field.
@@ -349,7 +431,7 @@ export async function probeCapabilities(
 /** `gh api` with the fixed endpoint templates; redacts raw output at the source. */
 async function ghApi(
   gh: GhContext,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT",
   endpoint: string,
   opts: { body?: unknown; query?: string; timeoutMs?: number } = {},
 ): Promise<ProcessResult> {
@@ -477,4 +559,9 @@ export function issuesEndpoint(owner: string, repo: string): string {
 /** Fixed endpoint template: `repos/{owner}/{repo}/pulls`. */
 export function pullsEndpoint(owner: string, repo: string): string {
   return `repos/${owner}/${repo}/pulls`
+}
+
+/** Fixed endpoint template: `repos/{owner}/{repo}/pulls/{number}/merge`. */
+export function pullMergeEndpoint(owner: string, repo: string, number: number): string {
+  return `${pullsEndpoint(owner, repo)}/${number}/merge`
 }

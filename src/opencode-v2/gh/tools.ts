@@ -11,30 +11,41 @@ import {
   createPull,
   listIssues,
   listPulls,
+  mergePull,
   probeCapabilities,
   resolveRepo,
   viewIssue,
   viewPull,
   type GhContext,
+  type PullMergeInput,
 } from "./client.js"
 
 /**
  * `orchestrator_github_*` tools (stage 3), registered via the tool transform.
  *
  * Gating mirrors the worktree family: the whole set requires `github.enabled`,
- * mutating tools (issue_create / pr_create) additionally require
+ * mutating tools (issue_create / pr_create / pr_merge) additionally require
  * `github.allow_mutations` plus a literal `confirm: true` input field, and
  * every tool is orchestrator-only via the shared `orchestrator_gh` permission
  * action plus the runtime agent check (server-side: a worker that somehow
  * reaches the execute handler is rejected regardless of visibility rules).
+ *
+ * `github_pr_merge` is the safe explicit-confirmation merge: it never trusts
+ * the caller's SHA, method, or a `confirm: true` flag as user authorization.
+ * It runs a fresh PR view, requires an open unmerged PR whose head SHA matches
+ * the required `expectedHeadSha` exactly, merges with that SHA, requires
+ * `merged: true`, and verifies with a second fresh view before returning any
+ * success evidence. `confirm: true` is a tool flag, not proof of user
+ * authorization; the caller (the orchestrator prompt) is told to merge only
+ * after a separate explicit user request.
  *
  * All raw `gh` process output and error text is redacted inside the client
  * (known secret shapes plus caller-known `secrets`); only validated typed
  * evidence (API `id`, `number`, `html_url`) is serialized back to the model.
  * Every successful result additionally carries a per-invocation `evidence`
  * record (EVIDENCE_LIVE for probes/reads, EVIDENCE_MUTATION with an https
- * mutation proof for creates) sourced from `tool.sessionID` + `Date.now()`.
- * Error results stay redacted strings and carry no evidence.
+ * mutation proof for creates/merges) sourced from `tool.sessionID` +
+ * `Date.now()`. Error results stay redacted strings and carry no evidence.
  * `storage` and `location` are accepted for the stage contract but not yet
  * used; durable GitHub records are a later stage.
  */
@@ -249,6 +260,82 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
       }
     },
   })
+
+  draft.add({
+    name: "github_pr_merge",
+    description:
+      "Merge a GitHub pull request after a fresh view, the exact expected head SHA, and post-merge verification. Requires confirm: true and a separate explicit user request.",
+    input: prMergeInput,
+    options: { namespace: "orchestrator", permission: GH_TOOL_PERMISSION },
+    execute: async (input, tool) => {
+      requireOrchestrator(tool.agent, deps.options)
+      requireMutations(deps.options)
+      if (inputConfirm(input) !== true) return result("github_pr_merge requires confirm: true")
+      const owner = stringField(input, "owner")
+      const repo = stringField(input, "repo")
+      const number = numberField(input, "number")
+      const expectedHeadSha = stringField(input, "expectedHeadSha")
+      const mergeMethod = stringField(input, "mergeMethod")
+      const commitTitle = stringField(input, "commitTitle")
+      const commitMessage = stringField(input, "commitMessage")
+      if (!owner || !repo || number === undefined || !expectedHeadSha) {
+        return result("owner, repo, number, and expectedHeadSha are required")
+      }
+      const merge: PullMergeInput = {
+        owner,
+        repo,
+        number,
+        sha: expectedHeadSha,
+        mergeMethod: mergeMethod ? (mergeMethod as PullMergeInput["mergeMethod"]) : undefined,
+        commitTitle: commitTitle || undefined,
+        commitMessage: commitMessage || undefined,
+      }
+      try {
+        // Fresh pre-view: the PR must be open and unmerged, and its head SHA
+        // must match the required expected head SHA exactly. A stale or moved
+        // head refuses before any merge call; nothing is retried or fallen
+        // back to a different SHA.
+        const before = await viewPull(gh, { owner, repo, number })
+        if (before.merged || before.state !== "open") {
+          return result(`github pr merge refused: pull ${owner}/${repo}#${number} is not open and unmerged`)
+        }
+        if (before.head?.sha !== expectedHeadSha) {
+          return result(
+            `github pr merge refused: expected head SHA does not match pull ${owner}/${repo}#${number} (head ${before.head?.sha ?? "(unknown)"})`,
+          )
+        }
+
+        const merged = await mergePull(gh, merge)
+        if (!merged.merged) {
+          return result(`github pr merge failed: API reported merged:false (${merged.message || "no message"})`)
+        }
+
+        // Post-merge verification: a second fresh view must confirm the merge.
+        const after = await viewPull(gh, { owner, repo, number })
+        if (!after.merged) {
+          return result("github pr merge failed: post-merge view does not confirm merged:true")
+        }
+
+        const evidence = mutationEvidence({
+          source: "opencode-orchestrator.gh.pr.merge",
+          sessionID: tool.sessionID,
+          proof: { id: after.id, number: after.number, url: after.html_url },
+        })
+        return result(
+          JSON.stringify({
+            ...after,
+            mergeSha: merged.sha,
+            mergeMessage: merged.message,
+            expectedHeadSha,
+            verified: true,
+            evidence,
+          }),
+        )
+      } catch (error) {
+        return result(`github pr merge failed: ${message(error)}`)
+      }
+    },
+  })
 }
 
 function requireOrchestrator(agent: string, options: OrchestratorOptions): void {
@@ -393,5 +480,21 @@ const prListInput = {
     state: { type: "string", enum: ["open", "closed", "all"] },
   },
   required: ["owner", "repo"],
+  additionalProperties: false,
+} as const
+
+const prMergeInput = {
+  type: "object",
+  properties: {
+    owner: { type: "string", minLength: 1 },
+    repo: { type: "string", minLength: 1 },
+    number: { type: "number", minimum: 1 },
+    expectedHeadSha: { type: "string", pattern: "^[A-Fa-f0-9]{7,40}$", minLength: 1 },
+    mergeMethod: { type: "string", enum: ["merge", "squash", "rebase"] },
+    commitTitle: { type: "string" },
+    commitMessage: { type: "string" },
+    confirm: { type: "boolean" },
+  },
+  required: ["owner", "repo", "number", "expectedHeadSha", "confirm"],
   additionalProperties: false,
 } as const

@@ -202,7 +202,7 @@ function agentDefinitions(options: OrchestratorOptions, modelReferences: AgentMo
       mode: "subagent",
       ...(modelReferences[id] ? { model: modelReferences[id] } : {}),
       description: `${role} specialist managed by the orchestrator.`,
-      system: buildWorkerSystem(role as RoleName),
+      system: buildWorkerSystem(role as RoleName, options),
       permissions: workerPermissions(role),
     }
   }

@@ -5,10 +5,11 @@ import {
   buildOrchestratorSystem,
   buildWorkerSystem,
 } from "../../src/core/prompts.js"
-import { COMMAND_NAMES, parseOptions } from "../../src/core/config.js"
+import { COMMAND_NAMES, parseOptions, type OrchestratorOptions } from "../../src/core/config.js"
 import { commandDefinitions } from "../../src/opencode-v2/commands/index.js"
 import {
   DELEGATION_RULES,
+  GITHUB_LIFECYCLE_GUIDANCE,
   HANDOFF_FORMAT,
   MANAGED_WORKTREE_GUIDANCE,
   REMOTE_ORCHESTRATION_GUIDANCE,
@@ -16,6 +17,8 @@ import {
   STRUCTURED_HANDOFF_GUIDANCE,
   TOOL_AVAILABILITY_GUIDANCE,
   WORKTREE_BOUNDARY_GUIDANCE,
+  WORKTREE_LIFECYCLE_GUIDANCE,
+  orchestrationCapabilities,
   orchestrationRules,
 } from "../../src/core/policy.js"
 
@@ -285,16 +288,27 @@ describe("remote orchestration policy", () => {
     "stress-plan",
   ]
 
-  function allPromptKinds(): Array<[string, string]> {
+  // Universal guidance is asserted on the default (all-disabled) options;
+  // feature-specific lifecycle guidance is asserted per enabled feature.
+  const DEFAULT = parseOptions({})
+  const WORKTREE = parseOptions({ worktree: { enabled: true } })
+  const GITHUB = parseOptions({ github: { enabled: true } })
+  const BOTH = parseOptions({ github: { enabled: true }, worktree: { enabled: true } })
+
+  function promptKinds(options: OrchestratorOptions): Array<[string, string]> {
     const prompts: Array<[string, string]> = [
-      ["orchestrator system", buildOrchestratorSystem(parseOptions({}))],
-      ["worker system", buildWorkerSystem("implementation")],
-      ["continuation", buildContinuationPrompt("objective", 2)],
+      ["orchestrator system", buildOrchestratorSystem(options)],
+      ["worker system", buildWorkerSystem("implementation", options)],
+      ["continuation", buildContinuationPrompt("objective", 2, options)],
     ]
     for (const name of COMMAND_NAMES) {
-      prompts.push([`command ${name}`, buildCommandPrompt(name, "scope")])
+      prompts.push([`command ${name}`, buildCommandPrompt(name, "scope", options)])
     }
     return prompts
+  }
+
+  function allPromptKinds(): Array<[string, string]> {
+    return promptKinds(DEFAULT)
   }
 
   test("every prompt kind uses only exposed host-configured GitHub tools and requires preflight", () => {
@@ -341,7 +355,7 @@ describe("remote orchestration policy", () => {
   })
 
   test("every prompt kind distinguishes managed current-session worktrees from unavailable atomic child isolation", () => {
-    for (const [, prompt] of allPromptKinds()) {
+    for (const [, prompt] of promptKinds(WORKTREE)) {
       expect(prompt).toContain("orchestrator_worktree_create")
       expect(prompt).toContain("orchestrator_worktree_enter")
       expect(prompt).toContain("owned by the current session")
@@ -351,18 +365,26 @@ describe("remote orchestration policy", () => {
       expect(prompt).toContain("children delegated afterward inherit or start from that context")
       expect(prompt).not.toMatch(/\/cd/)
     }
+    // The default (feature-disabled) prompts keep the universal boundary but
+    // drop the feature-specific managed-worktree lifecycle entirely.
+    for (const [, prompt] of allPromptKinds()) {
+      expect(prompt).not.toContain("orchestrator_worktree_enter")
+    }
     // The remote GitHub guidance is still present alongside the worktree text.
     expect(MANAGED_WORKTREE_GUIDANCE).toContain("orchestrator_worktree_cleanup")
     expect(MANAGED_WORKTREE_GUIDANCE).toContain("current session only")
     expect(REMOTE_ORCHESTRATION_GUIDANCE).toContain("inspect the tool catalog")
-    expect(REMOTE_ORCHESTRATION_GUIDANCE).toContain(MANAGED_WORKTREE_GUIDANCE)
+    // The universal constant no longer embeds the feature lifecycle; the
+    // worktree feature guidance composes it conditionally instead.
+    expect(REMOTE_ORCHESTRATION_GUIDANCE).not.toContain(MANAGED_WORKTREE_GUIDANCE)
+    expect(WORKTREE_LIFECYCLE_GUIDANCE).toContain(MANAGED_WORKTREE_GUIDANCE)
   })
 
   test("no command prompt renders /cd and no default prompt mentions the slash command", () => {
     for (const [, prompt] of allPromptKinds()) {
       expect(prompt).not.toMatch(/\/cd/)
     }
-    expect(buildCommandPrompt("orchestrate", "use a managed worktree")).toContain("orchestrator_worktree_enter")
+    expect(buildCommandPrompt("orchestrate", "use a managed worktree", WORKTREE)).toContain("orchestrator_worktree_enter")
   })
 
   test("never hard-codes deployment-specific GitHub tool names", () => {
@@ -384,6 +406,67 @@ describe("remote orchestration policy", () => {
     expect(REMOTE_ORCHESTRATION_GUIDANCE.split("\n").length).toBeGreaterThan(
       TOOL_AVAILABILITY_GUIDANCE.split("\n").length,
     )
+    // The capabilities helper derives the flags from the parsed options, so
+    // prompt builders and rules never duplicate the option shape.
+    expect(orchestrationCapabilities(DEFAULT)).toEqual({ worktree: false, github: false })
+    expect(orchestrationCapabilities(BOTH)).toEqual({ worktree: true, github: true })
+  })
+
+  test("worktree lifecycle guidance appears only when worktree is enabled", () => {
+    for (const [, prompt] of promptKinds(WORKTREE)) {
+      expect(prompt).toContain("Worktree lifecycle is mandatory for implementation when worktree support is enabled")
+      expect(prompt).toContain("the orchestrator MUST run orchestrator_worktree_create -> orchestrator_worktree_enter")
+      expect(prompt).toContain("only the orchestrator creates, enters, pushes, and cleans up managed worktrees")
+      expect(prompt).toContain("stop and ask the user")
+      expect(prompt).toContain("never delegate implementation from the main checkout")
+    }
+    for (const [, prompt] of allPromptKinds()) {
+      expect(prompt).not.toContain("Worktree lifecycle is mandatory")
+      expect(prompt).not.toContain("preceded by orchestrator_worktree_create")
+    }
+  })
+
+  test("github lifecycle guidance appears only when github is enabled", () => {
+    for (const [, prompt] of promptKinds(GITHUB)) {
+      expect(prompt).toContain("implementers never push branches or create or merge pull requests")
+      expect(prompt).toContain("orchestrator_github_pr_create")
+      expect(prompt).toContain("orchestrator_github_pr_merge")
+      expect(prompt).toContain("separate explicit user request")
+      expect(prompt).toContain("expected head SHA")
+      expect(prompt).toContain("literal confirm: true")
+      expect(prompt).toContain("is never user authorization")
+      expect(prompt).toContain("stop truthfully")
+    }
+    for (const [, prompt] of allPromptKinds()) {
+      expect(prompt).not.toContain("orchestrator_github_pr_merge")
+      expect(prompt).not.toContain("is never user authorization")
+    }
+  })
+
+  test("worktree-only and github-only options compose without leaking the other feature's guidance", () => {
+    for (const [, prompt] of promptKinds(WORKTREE)) {
+      expect(prompt).not.toContain("orchestrator_github_pr_merge")
+    }
+    for (const [, prompt] of promptKinds(GITHUB)) {
+      expect(prompt).not.toContain("Worktree lifecycle is mandatory")
+      expect(prompt).not.toContain("preceded by orchestrator_worktree_create")
+    }
+    for (const [, prompt] of promptKinds(BOTH)) {
+      expect(prompt).toContain("orchestrator_github_pr_merge")
+      expect(prompt).toContain("the orchestrator MUST run orchestrator_worktree_create -> orchestrator_worktree_enter")
+      expect(prompt).toContain("is never user authorization")
+    }
+  })
+
+  test("github guidance keeps confirm:true and checker approval distinct from user authorization", () => {
+    expect(GITHUB_LIFECYCLE_GUIDANCE).toContain(
+      "A confirm: true flag or a checker's approval is never user authorization",
+    )
+    expect(GITHUB_LIFECYCLE_GUIDANCE).toContain("run orchestrator_github_pr_merge with a fresh")
+    expect(GITHUB_LIFECYCLE_GUIDANCE).toContain("then verify merged:true again with a fresh orchestrator_github_pr_view")
+    for (const [, prompt] of promptKinds(BOTH)) {
+      expect(prompt).toContain("is never user authorization")
+    }
   })
 
   test("role policy keeps native delegation and retains every configured role", () => {
@@ -416,11 +499,18 @@ describe("remote orchestration policy", () => {
   })
 
   test("the guidance appears exactly once per prompt, not duplicated per section", () => {
-    for (const [, prompt] of allPromptKinds()) {
-      expect(prompt.split("inspect the tool catalog").length - 1).toBe(1)
-      expect(prompt.split("Never request, resolve, log, paste, or copy").length - 1).toBe(1)
-      expect(prompt.split("plugin-controlled atomic worktree").length - 1).toBe(1)
-      expect(prompt.split("callable/advisory, not automatic hooks").length - 1).toBe(1)
+    for (const options of [DEFAULT, WORKTREE, GITHUB, BOTH]) {
+      for (const [, prompt] of promptKinds(options)) {
+        expect(prompt.split("inspect the tool catalog").length - 1).toBe(1)
+        expect(prompt.split("Never request, resolve, log, paste, or copy").length - 1).toBe(1)
+        expect(prompt.split("plugin-controlled atomic worktree").length - 1).toBe(1)
+        expect(prompt.split("callable/advisory, not automatic hooks").length - 1).toBe(1)
+        // Feature lifecycle sections are embedded at most once each.
+        expect(prompt.split("Worktree lifecycle is mandatory").length - 1).toBe(options.worktree.enabled ? 1 : 0)
+        expect(prompt.split("preflight with orchestrator_github_capabilities").length - 1).toBe(
+          options.github.enabled ? 1 : 0,
+        )
+      }
     }
   })
 })

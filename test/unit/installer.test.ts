@@ -525,6 +525,33 @@ describe("installer", () => {
       ])
     }
   })
+
+  test("threads feature lifecycle guidance into installed agent systems only when the feature is enabled", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, { github: { enabled: true }, worktree: { enabled: true, root: "/srv/worktrees" } })
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+
+    const orchestratorSystem = document.agents.orchestrator.system as string
+    expect(orchestratorSystem).toContain("orchestrator_github_pr_merge")
+    expect(orchestratorSystem).toContain("implementers never push branches or create or merge pull requests")
+    expect(orchestratorSystem).toContain("the orchestrator MUST run orchestrator_worktree_create -> orchestrator_worktree_enter")
+    expect(orchestratorSystem).toContain("is never user authorization")
+    const implementerSystem = document.agents.implementer.system as string
+    expect(implementerSystem).toContain("never delegate implementation from the main checkout")
+    expect(implementerSystem).toContain("is never user authorization")
+
+    const plain = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const plainPath = join(plain, "opencode.jsonc")
+    installConfig(plainPath, {})
+    const plainDocument = JSON.parse(readFileSync(plainPath, "utf8")) as Record<string, any>
+    const plainSystem = plainDocument.agents.orchestrator.system as string
+    expect(plainSystem).not.toContain("orchestrator_github_pr_merge")
+    expect(plainSystem).not.toContain("Worktree lifecycle is mandatory")
+    // The universal boundary and catalog-preflight guidance stay installed.
+    expect(plainSystem).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
+    expect(plainSystem).toContain("inspect the tool catalog")
+  })
 })
 
 describe("doctor runtime checks", () => {

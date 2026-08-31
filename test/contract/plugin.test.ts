@@ -130,7 +130,7 @@ describe("server plugin contract", () => {
 
     // The tool transform registers the goal family plus the orchestrator-only
     // github, worktree, and orchestration validation families with their shared
-    // permission actions: 3 goal + 8 github + 6 worktree + 3 validation = 20.
+    // permission actions: 3 goal + 9 github + 6 worktree + 3 validation = 21.
     const allToolNames = tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)
     expect(allToolNames).toEqual([
       "orchestrator_goal_get",
@@ -144,6 +144,7 @@ describe("server plugin contract", () => {
       "orchestrator_github_pr_view",
       "orchestrator_github_pr_list",
       "orchestrator_github_pr_create",
+      "orchestrator_github_pr_merge",
       "orchestrator_worktree_list",
       "orchestrator_worktree_create",
       "orchestrator_worktree_status",
@@ -154,8 +155,8 @@ describe("server plugin contract", () => {
       "orchestrator_handoff_validate",
       "orchestrator_admission_transition",
     ])
-    expect(allToolNames).toHaveLength(20)
-    expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBeGreaterThanOrEqual(8)
+    expect(allToolNames).toHaveLength(21)
+    expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBe(9)
     expect(tools.filter((tool) => tool.options?.permission === WORKTREE_TOOL_PERMISSION).length).toBe(6)
     const goalTools = tools.filter((tool) => tool.options?.permission === GOAL_TOOL_PERMISSION)
     expect(goalTools).toHaveLength(3)
@@ -194,6 +195,8 @@ describe("server plugin contract", () => {
     expect(contextText.join("\n")).toContain("orchestrator_worktree_create")
     expect(contextText.join("\n")).toContain("orchestrator_worktree_enter")
     expect(contextText.join("\n")).toContain("orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer")
+    expect(contextText.join("\n")).toContain("GitHub lifecycle is enabled")
+    expect(contextText.join("\n")).toContain("confirm: true and checker approval are never user authorization")
     expect(contextText.join("\n")).toContain("orchestrator_task_complexity_classify")
     expect(contextText.join("\n")).toContain("orchestrator_handoff_validate")
     expect(contextText.join("\n")).toContain("orchestrator_admission_transition")
@@ -311,6 +314,19 @@ describe("server plugin contract", () => {
     // The orchestrator system prompt embeds the bounded flow guidance.
     expect(agents.get("orchestrator")?.system).toContain("Bounded review mode is configured")
     expect(agents.get("orchestrator")?.system).toContain("stop-between-steps budget mode is configured")
+
+    // With github and worktree disabled, the session context hook omits the
+    // feature lifecycle lines entirely while keeping the universal guidance.
+    const disabledContext: string[] = []
+    contextHook?.({
+      agent: "orchestrator",
+      system: { push: (item: { text: string }) => void disabledContext.push(item.text) },
+    })
+    expect(disabledContext.join("\n")).toContain("orchestrator_goal_get")
+    expect(disabledContext.join("\n")).not.toContain("orchestrator_worktree_create")
+    expect(disabledContext.join("\n")).not.toContain("GitHub lifecycle is enabled")
+    expect(disabledContext.join("\n")).not.toContain("orchestrator_github_pr_merge")
+    expect(disabledContext.join("\n")).toContain("orchestrator_task_complexity_classify")
 
     await cleanup?.()
     // Disposal order is reverse registration order: the worktree sync (inline

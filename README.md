@@ -13,6 +13,7 @@ Give the orchestrator a task in plain English — it breaks the work down, deleg
 - **Describe what you want, not how to do it.** `“Add validation to the checkout form and cover it with tests”` Just ask — the orchestrator creates a plan, assigns work, and verifies the result.
 - **Parallel where safe, serialized where it matters.** Read-only research runs in parallel. File edits are isolated so agents don’t step on each other.
 - **Built-in review.** Every implementation is audited by a dedicated reviewer before you see the final result.
+- **Asks before it guesses.** When a request is ambiguous, the orchestrator asks you a few targeted questions — with answer options — before breaking the work down. Disable with `"clarify": { "mode": "off" }`.
 - **Goals that survive idle.** Start a long-running objective and let it continue across sessions until it’s done.
 - **Optional power features** when you need them: GitHub and git worktree integration, plus budgets and review gates.
 
@@ -232,7 +233,8 @@ You mostly configure **models**, not plugin options. Use OpenCode’s native `ag
       "worktree": { "enabled": false, "allow_mutations": false, "root": null },
       "trace": { "mode": "off" },                  // off | memory | snapshot
       "budget": { "mode": "advisory" },            // advisory | stop-between-steps
-      "review": { "mode": "prompt", "max_rounds": 2 } // prompt | bounded
+      "review": { "mode": "prompt", "max_rounds": 2 }, // prompt | bounded
+      "clarify": { "mode": "auto" }                // auto | off — ask targeted clarifying questions when a task is ambiguous
     }
   }],
   // If worktree.root lives outside your project, allow it:

@@ -38,6 +38,22 @@ export type BudgetMode = (typeof BUDGET_MODES)[number]
 export const REVIEW_MODES = ["prompt", "bounded"] as const
 export type ReviewMode = (typeof REVIEW_MODES)[number]
 
+/**
+ * Clarify mode: `auto` (default — the orchestrator uses the native ask tool
+ * to ask the user a small number of targeted clarifying questions before
+ * decomposing an ambiguous task; prompt-level guidance only, never a hard
+ * gate) or `off` (previous behavior, no clarification guidance).
+ */
+export const CLARIFY_MODES = ["auto", "off"] as const
+export type ClarifyMode = (typeof CLARIFY_MODES)[number]
+
+const clarifyOptions = z
+  .object({
+    mode: z.enum(CLARIFY_MODES).default("auto"),
+  })
+  .strict()
+  .default({ mode: "auto" })
+
 const agentId = z.string().trim().min(1)
 
 // Nullable strict finite limits: explicit null or omission means "no limit";
@@ -137,6 +153,7 @@ export const OrchestratorOptionsSchema = z
     trace: traceOptions,
     budget: budgetOptions,
     review: reviewOptions,
+    clarify: clarifyOptions,
   })
   .strict()
   .superRefine((value, context) => {
@@ -172,6 +189,7 @@ export type BudgetLimits = Pick<
   "max_steps" | "max_tokens" | "max_cost_usd" | "max_wall_clock_ms" | "max_retries"
 >
 export type ReviewOptions = z.infer<typeof reviewOptions>
+export type ClarifyOptions = z.infer<typeof clarifyOptions>
 
 export function parseOptions(value: unknown): OrchestratorOptions {
   const parsed = OrchestratorOptionsSchema.safeParse(value ?? {})

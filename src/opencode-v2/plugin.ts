@@ -17,7 +17,6 @@ import { DISTRIBUTION_NAME, RUNTIME_PLUGIN_ID } from "../core/package-identity.j
 
 export const orchestratorPlugin = Plugin.define({
   id: RUNTIME_PLUGIN_ID,
-  tui: true,
   async setup(ctx: Context) {
     const options = parseOptions(ctx.options)
     const agentResponse = await ctx.agent.list()

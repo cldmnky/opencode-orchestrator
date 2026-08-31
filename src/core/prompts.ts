@@ -2,6 +2,7 @@ import {
   BUDGET_GUIDANCE,
   BOUNDED_REVIEW_GUIDANCE,
   CHILD_TASK_CONTRACT,
+  CLARIFY_GUIDANCE,
   HANDOFF_FORMAT,
   REMOTE_ORCHESTRATION_GUIDANCE,
   STRUCTURED_HANDOFF_GUIDANCE,
@@ -9,6 +10,7 @@ import {
 } from "./policy.js"
 import type { OrchestratorOptions } from "./config.js"
 import { ROLE_GUIDANCE } from "./roles.js"
+import { buildOrchestrationPrompt } from "./prompt-builder.js"
 
 export function buildOrchestratorSystem(options: OrchestratorOptions): string {
   const sections = [
@@ -22,6 +24,7 @@ export function buildOrchestratorSystem(options: OrchestratorOptions): string {
   ]
   if (options.review.mode === "bounded") sections.push("", BOUNDED_REVIEW_GUIDANCE)
   if (options.budget.mode === "stop-between-steps") sections.push("", BUDGET_GUIDANCE)
+  if (options.clarify.mode !== "off") sections.push("", CLARIFY_GUIDANCE)
   return sections.join("\n")
 }
 
@@ -52,7 +55,12 @@ export function buildCommandPrompt(name: string, argumentsText: string, options?
     .join("\n")
 
   const prompts: Record<string, string> = {
-    orchestrate: `Coordinate this task end to end. Start with repository facts, delegate independent work in parallel only with exact disjoint write scopes, integrate the results, and verify the final state directly.\n\nTask: ${args}`,
+    // The orchestrate prompt is built from the initial prompt (the objective)
+    // by the prompt builder; clarification follows the clarify mode.
+    orchestrate: buildOrchestrationPrompt({
+      objective: args,
+      clarifyEnabled: options?.clarify?.mode !== "off",
+    }),
     goal: `Manage the session goal deterministically. The argument is: ${args}. Use the namespaced goal tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update with plugin-owned durable storage: set, show, pause, resume, or clear only the current session goal. Continue only while it is active, and mark complete through orchestrator_goal_update with auditable evidence.`,
     restructure: `Perform a conservative, test-backed restructuring of: ${args}. Research references and tests first, write a phased plan under .orchestrator/plans/, execute the phases in order with behavior-preserving edits only, then run a reviewer pass over the aggregate change.`,
     "run-plan": `Execute the requested plan from .orchestrator/plans/: ${args}. Read the complete plan before changing files, follow the plan's phase order, track each step, delegate safe independent work only with disjoint write scopes, verify every step, and audit the aggregate result with the review role.`,

@@ -36,7 +36,11 @@
         },
         // review: prompt | bounded (max_rounds 1..8, rounds remaining must
         // absorb rework before the terminal circuit breaker opens)
-        "review": { "mode": "prompt", "max_rounds": 2 }
+        "review": { "mode": "prompt", "max_rounds": 2 },
+        // clarify: auto | off (auto = the orchestrator uses the native ask
+        // tool for targeted clarifying questions before decomposing an
+        // ambiguous task; off = previous behavior)
+        "clarify": { "mode": "auto" }
       }
     }
   ],

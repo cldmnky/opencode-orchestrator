@@ -116,6 +116,14 @@ describe("configuration", () => {
     // An unknown command key is still rejected by the strict schema.
     expect(() => parseOptions({ commands: { not_a_command: true } })).toThrow()
   })
+
+  test("clarify defaults to auto and validates its strict block", () => {
+    expect(parseOptions({}).clarify).toEqual({ mode: "auto" })
+    expect(parseOptions({ clarify: {} }).clarify).toEqual({ mode: "auto" })
+    expect(parseOptions({ clarify: { mode: "off" } }).clarify).toEqual({ mode: "off" })
+    expect(() => parseOptions({ clarify: { mode: "maybe" } })).toThrow()
+    expect(() => parseOptions({ clarify: { extra: true } })).toThrow()
+  })
 })
 
 describe("prompts", () => {
@@ -219,6 +227,49 @@ describe("prompts", () => {
     const plainCommand = buildCommandPrompt("orchestrate", "scope")
     expect(plainCommand).not.toContain("Bounded review mode is configured")
     expect(plainCommand).not.toContain("stop-between-steps budget mode is configured")
+  })
+
+  test("clarify guidance is embedded by default and omitted when off", () => {
+    const defaults = buildOrchestratorSystem(parseOptions({}))
+    expect(defaults).toContain("Clarify mode is enabled")
+    expect(defaults).toContain("native ask tool")
+    expect(defaults).toContain("Workers never ask")
+    expect(defaults.split("Clarify mode is enabled").length - 1).toBe(1)
+
+    const off = buildOrchestratorSystem(parseOptions({ clarify: { mode: "off" } }))
+    expect(off).not.toContain("Clarify mode is enabled")
+    expect(off).not.toContain("native ask tool")
+  })
+
+  test("the orchestrate prompt is built from the initial prompt by the prompt builder", () => {
+    const enabled = buildCommandPrompt("orchestrate", "add pagination to /api/items")
+    expect(enabled).toContain("Coordinate this task end to end.")
+    expect(enabled).toContain("Task: add pagination to /api/items")
+    expect(enabled).toContain("use the native ask tool")
+    expect(enabled.split("use the native ask tool").length - 1).toBe(1)
+
+    const off = buildCommandPrompt("orchestrate", "scope", parseOptions({ clarify: { mode: "off" } }))
+    expect(off).toContain("Task: scope")
+    expect(off).not.toContain("use the native ask tool")
+    expect(off).not.toContain("Clarify mode is enabled")
+
+    // Commands other than orchestrate never carry the builder's clarification.
+    expect(buildCommandPrompt("goal", "pause")).not.toContain("use the native ask tool")
+  })
+
+  test("clarify off composes with bounded review and empty objectives", () => {
+    const mixed = parseOptions({ clarify: { mode: "off" }, review: { mode: "bounded" } })
+    const system = buildOrchestratorSystem(mixed)
+    expect(system).toContain("Bounded review mode is configured")
+    expect(system).not.toContain("Clarify mode is enabled")
+
+    const command = buildCommandPrompt("orchestrate", "   ", mixed)
+    expect(command).toContain("Task: (no arguments)")
+    expect(command).not.toContain("use the native ask tool")
+    expect(command).toContain("orchestrator_review_transition")
+
+    // An empty objective with the default clarify mode still asks when ambiguous.
+    expect(buildCommandPrompt("orchestrate", "   ")).toContain("use the native ask tool")
   })
 })
 

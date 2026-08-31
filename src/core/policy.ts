@@ -145,3 +145,15 @@ export function orchestrationRules(maxParallel: number, requireReview: boolean):
     HANDOFF_FORMAT,
   ].join("\n")
 }
+
+/**
+ * Ask-tool clarification guidance: ask targeted questions only when the
+ * objective is genuinely ambiguous, resolve what the repository already
+ * answers, and keep all clarification owned by the orchestrator.
+ */
+export const CLARIFY_GUIDANCE = [
+  "Clarify mode is enabled: when the initial task is ambiguous (undefined scope, conflicting constraints, unclear success criteria, or a missing verification definition), use the native ask tool to ask the user a small number of targeted clarifying questions with concrete answer options before decomposing or delegating; skip asking when the objective is already precise.",
+  "Do not ask what repository facts can answer: explore first; ask only what cannot be resolved from the repository.",
+  "Record the user's answers in the task ledger; state the resolved interpretation and proceed.",
+  "Workers never ask on the user's behalf; clarification is owned by the orchestrator.",
+].join("\n")

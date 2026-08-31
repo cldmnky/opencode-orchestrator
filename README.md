@@ -119,6 +119,25 @@ The orchestrator will research the codebase, plan the changes, delegate edits to
 
 > **Make it yours:** record a 20–40s GIF with [VHS](https://github.com/charmbracelet/vhs), Screen Studio, or Peek, save it as `docs/assets/orchestrate-demo.gif` (and `goal-demo.gif`), then swap the image above. See `docs/assets/README.md` for a ready-to-use VHS tape.
 
+```mermaid
+flowchart LR
+    U([You]) --> O{orchestrator}
+    O --> P[planner<br/>breaks down task]
+    O --> E[explore<br/>maps codebase]
+    P --> O
+    E --> O
+    O --> I[implementer<br/>focused edits]
+    I --> R[reviewer<br/>audits changes]
+    R --> O
+    O --> U2([Verified result<br/>+ tests + review])
+
+    style U fill:#1a1f3a,stroke:#4a5a8a,color:#e6e8f0
+    style U2 fill:#1a3329,stroke:#4a8a6a,color:#e6e8f0
+    style O fill:#2a2f45,stroke:#6a7abb,color:#e6e8f0
+```
+
+*You talk only to the orchestrator — it coordinates the specialists and brings back a verified result.*
+
 ---
 
 ## How to use — commands & examples

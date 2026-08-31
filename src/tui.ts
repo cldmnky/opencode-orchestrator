@@ -9,6 +9,7 @@ export const tuiPlugin = {
   async setup(context: Context) {
     const options = parseOptions(context.options)
     const location = context.location ?? context.data.location.default()
+
     const stopFailureNotice = context.data.on("session.execution.failed", (event) => {
       const sessionID = event.data.sessionID
       if (activeSessionID(context) !== sessionID) return
@@ -25,15 +26,27 @@ export const tuiPlugin = {
     }
     const stopCommandUpdates = context.data.on("command.updated", refreshCommands)
 
-    context.keymap.layer(() => {
-      const available = new Map((context.data.location.command.list(location) ?? []).map((command) => [command.name, command.description]))
-      return {
-        mode: "global",
-        priority: 20,
-        commands: commandDefinitions(options)
-          .filter((spec) => available.get(spec.name) === spec.description)
-          .map((spec) => tuiCommand(context, spec.name, spec.description)),
-      }
+    // Keymap layers are owned by a component rendered inside the host's
+    // providers; `setup` runs outside them, so calling `keymap.layer` here
+    // throws "Keymap.Provider is missing". Register the layer from the
+    // always-mounted app slot's render component instead.
+    const stopLayer = context.ui.slot({
+      append: "app",
+      render: () => {
+        context.keymap.layer(() => {
+          const available = new Map(
+            (context.data.location.command.list(location) ?? []).map((command) => [command.name, command.description]),
+          )
+          return {
+            mode: "global",
+            priority: 20,
+            commands: commandDefinitions(options)
+              .filter((spec) => available.get(spec.name) === spec.description)
+              .map((spec) => tuiCommand(context, spec.name, spec.description)),
+          }
+        })
+        return null
+      },
     })
 
     try {
@@ -41,12 +54,14 @@ export const tuiPlugin = {
     } catch (error) {
       stopFailureNotice()
       stopCommandUpdates()
+      stopLayer()
       throw error
     }
 
     return () => {
       stopFailureNotice()
       stopCommandUpdates()
+      stopLayer()
     }
   },
 } satisfies Definition

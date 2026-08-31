@@ -3,36 +3,33 @@ import type { Context } from "@opencode-ai/plugin/tui/context"
 import { tuiPlugin } from "../../src/tui.js"
 
 describe("TUI plugin contract", () => {
-  test("registers its keymap layer before the first async boundary", async () => {
+  test("registers its keymap layer from the app slot before the first async boundary", async () => {
     let resolveSync: (() => void) | undefined
     const sync = new Promise<void>((resolve) => {
       resolveSync = resolve
     })
-    let layerRegistered = false
     const stopped: string[] = []
-    const context = contextWithSync(sync, stopped, () => {
-      layerRegistered = true
-    })
+    let layerRegistered = false
 
-    const setup = tuiPlugin.setup(context)
+    const setup = tuiPlugin.setup(contextWithSync(sync, stopped, () => (layerRegistered = true)))
     expect(layerRegistered).toBe(true)
 
     resolveSync?.()
     const cleanup = await setup
     await cleanup?.()
-    expect(stopped).toEqual(["session.execution.failed", "command.updated"])
+    expect(stopped).toEqual(["session.execution.failed", "command.updated", "slot"])
   })
 
-  test("stops subscriptions when initial command sync fails", async () => {
+  test("stops subscriptions and the slot when initial command sync fails", async () => {
     const stopped: string[] = []
     const error = new Error("sync failed")
 
     await expect(tuiPlugin.setup(contextWithSync(Promise.reject(error), stopped))).rejects.toBe(error)
-    expect(stopped).toEqual(["session.execution.failed", "command.updated"])
+    expect(stopped).toEqual(["session.execution.failed", "command.updated", "slot"])
   })
 })
 
-function contextWithSync(sync: Promise<void>, stopped: string[], onLayer: () => void = () => {}): Context {
+function contextWithSync(sync: Promise<void>, stopped: string[], onRender: () => void = () => {}): Context {
   return {
     options: {},
     location: { directory: "/workspace" },
@@ -47,9 +44,15 @@ function contextWithSync(sync: Promise<void>, stopped: string[], onLayer: () => 
         },
       },
     },
+    ui: {
+      slot: (claim: { render: (input: Record<string, never>) => unknown }) => {
+        onRender()
+        claim.render({})
+        return () => stopped.push("slot")
+      },
+    },
     keymap: {
       layer: (definition: () => unknown) => {
-        onLayer()
         definition()
       },
     },

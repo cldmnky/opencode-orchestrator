@@ -1,219 +1,226 @@
 # OpenCode Orchestrator
 
-V2-only TypeScript plugin that turns one OpenCode session into a coordinated team. The `orchestrator` (primary) delegates to specialized subagents — `planner`, `explore`, `implementer`, `reviewer` — via native `subagent` delegation, integrates results, and verifies before answering.
+**Turn one prompt into a coordinated team inside OpenCode.**
 
-Conductor, not worker: the orchestrator never edits as a last resort, keeps write scopes disjoint, and owns the final verification.
+Give the orchestrator a task in plain English — it breaks the work down, delegates to specialists, runs work in parallel where safe, and brings back tested, reviewed code. You stay in control while the plugin handles the choreography.
 
-## How it works
+> **Conductor, not worker:** the orchestrator plans and coordinates — specialist subagents do the focused edits.
 
-- **Roles by semantics, not model name.** `orchestrator` coordinates; `planner` decomposes without editing; `explore` maps code/tests/docs in background without editing or shell; `implementer` makes focused edits; `reviewer` audits without editing. By default, workers are instructed not to spawn subagents.
-- **Policy, not hard enforcement.** Those per-role guardrails — `explore` without shell, workers without nested `subagent` delegation, `planner`/`reviewer` without editing — are installer defaults expressed as prompt policy. V2's plugin API does not hard-block shell access or nested delegation per role at runtime, so treat them as strong instructions the model is expected to follow, not as a filesystem or security boundary.
-- **Delegation rules.** At most `max_parallel` children at once (default 4). Read-only work (`planner`, `explore`) parallelizes in background; `implementer` serializes when file ownership overlaps. The orchestrator passes an explicit self-contained child prompt for every delegation: task, expected outcome, exact file ownership, must/must-not, verification, and handoff format.
-- **Handoff.** Every worker returns the unchanged five-field prose (`Outcome / Files / Verification / Risks / Follow-up`) and is additionally asked for a version-1 structured JSON envelope (see the `docs/phase-1/` D2 contract). The orchestrator can run the callable `orchestrator_handoff_validate` tool when it wants deterministic, fail-closed structural/scope/artifact/semantics checks before using a handoff downstream; it still re-verifies worker claims directly and concatenates nothing.
-- **Review gate.** If `require_review=true` (default), implementation is incomplete until `reviewer` audits the aggregate diff. `require_review` remains validated config consumed as prompt policy — there is no hard runtime completion gate. The runtime admission vocabulary (`orchestrator_admission_transition`) is a stateless, explicitly-invoked tool, not an automatic hook.
-- **State.** Goals and plan runs persist via `ctx.storage` with session locks. Native sessions remain the source of truth for conversation.
+---
 
-## When to use it
+## What it does for you
 
-| Use | Command | When |
-|-----|---------|------|
-| Ad-hoc feature, bug, or multi-step task | `/orchestrate` | You want one prompt to fan out, integrate, and verify. |
-| Long-running objective that survives idle | `/goal` | You want the session to keep working toward a durable goal. |
-| Safe refactoring | `/restructure` | Behavior must not change; tests must pass before and after. |
-| Execute a written plan | `/run-plan` | You have `.orchestrator/plans/*.md`. |
-| Polish after a change | `/polish` | Clean up only files you just touched. |
-| Plan before coding | `/stress-plan` | You want a plan critiqued from 4 lenses before implementation. |
-| Stop automation | `/halt` | Pause goal/plan without deleting state. |
-| Hand off context | `/handover` | Produce a continuation brief for the next session or person. |
+- **Describe what you want, not how to do it.** `“Add validation to the checkout form and cover it with tests”` Just ask — the orchestrator creates a plan, assigns work, and verifies the result.
+- **Parallel where safe, serialized where it matters.** Read-only research runs in parallel. File edits are isolated so agents don’t step on each other.
+- **Built-in review.** Every implementation is audited by a dedicated reviewer before you see the final result.
+- **Goals that survive idle.** Start a long-running objective and let it continue across sessions until it’s done.
+- **Optional power features** when you need them: GitHub and git worktree integration, plus budgets and review gates.
 
-Skip the orchestrator for single-file trivial edits — just prompt the model directly.
+### The team
 
-## Install
+| Agent | What it does |
+|-------|--------------|
+| **orchestrator** | Your main partner. Understands your request, plans the work, delegates, and verifies everything. |
+| **planner** | Breaks down complex tasks without editing code. |
+| **explore** | Maps your codebase, tests, and docs — fast, read-only research. |
+| **implementer** | Makes focused, isolated code changes. |
+| **reviewer** | Audits the combined changes before they’re presented to you. |
 
-Installation from a local source build (via `npm pack`) is verified; npm
-publication of this package is not claimed. Build once — an existing checkout of
-this repository works too — then install the freshly built tarball as a
-project-local dependency and run the installer:
+You only talk to the orchestrator. It handles the rest.
+
+---
+
+## When should I use it?
+
+| You want to… | Use this | Example |
+|--------------|----------|---------|
+| Build a feature or fix a bug in one go | `/orchestrate` | *“Fix the race in session locking and add a regression test”* |
+| Keep a long objective running across sessions | `/goal` | *“Ship the checkout refactor without regressing payments”* |
+| Refactor safely | `/restructure` | `src/core/config.ts --scope=file` |
+| Run a written plan | `/run-plan` | `.orchestrator/plans/my-feature.md` |
+| Clean up code you just touched | `/polish` | `src/core/policy.ts` |
+| Critique a plan before coding | `/stress-plan` | *“Add rate limiting with Redis fallback”* |
+| Pause automation | `/halt` | — |
+| Hand context to the next session | `/handover` | *“Focus on payments regression”* |
+
+For a single-file typo or one-line edit, just prompt the model directly — you don’t need orchestration.
+
+---
+
+## Installation
+
+**Prerequisites:** [Bun](https://bun.sh), [OpenCode V2](https://opencode.ai), `git` (and `gh` CLI if you want GitHub features).
+
+The package is currently distributed as a **local build** (no npm registry publish yet). Build once, install into your project:
 
 ```sh
-# 1. Build once (an existing checkout of this repository works too)
+# 1. Build the plugin
 git clone https://github.com/cldmnky/opencode-orchestrator
 cd opencode-orchestrator
 bun install
 bun run typecheck && bun test && bun run build
-npm pack --pack-destination "$TMPDIR"      # writes a fresh tarball to your temp dir
-cd ../your-project
+npm pack --pack-destination "$TMPDIR"   # creates opencode-v2-agent-orchestrator-0.1.4.tgz
 
-# 2. Install the freshly built tarball as a project-local dependency
+# 2. Install into your project
+cd ../your-project
 npm install --save-dev "$TMPDIR/opencode-v2-agent-orchestrator-0.1.4.tgz"
 
-# 3. Run the installer; with per-agent models
+# 3. Add the plugin + agents to your opencode.jsonc
 ./node_modules/.bin/opencode-v2-agent-orchestrator install \
-  --model orchestrator=openai/gpt-5#high --model explore=opencode-go/mimo-v2.5
+  --model orchestrator=openai/gpt-5#high \
+  --model explore=opencode-go/mimo-v2.5
+
+# 4. Verify
+./node_modules/.bin/opencode-v2-agent-orchestrator doctor
 ```
 
-Use the tarball your own `npm pack` just produced — there is no published
-registry package to install from. The installer writes a config-relative local
-plugin reference — `./node_modules/opencode-v2-agent-orchestrator/dist/index.js`
-for the built package, `./src/index.ts` when run from a source checkout — so V2
-resolves the file directly. The exported `installConfig(path)` (`./installer`)
-does the same, deriving the reference from its own location.
+What the installer does:
+- Adds the plugin to `opencode.jsonc` (as a local file reference like `./node_modules/.../dist/index.js`)
+- Adds the five agents (`orchestrator`, `planner`, `explore`, `implementer`, `reviewer`) if they’re missing
+- Leaves your existing config and commands untouched — re-running it is safe
 
-Global installation (`install --global`) is **not currently supported**: the CLI
-writes a config-relative local reference (e.g.
-`./node_modules/opencode-v2-agent-orchestrator/dist/index.js`), which only
-resolves against a project-local dependency in the target project's
-`node_modules`. A scoped/registry distribution is required before global install
-can be documented as safe.
+> Already have a checkout of this repo? You can point OpenCode directly at `./src/index.ts` for development — no pack needed. See [Development](#development).
 
-What it does: parses `opencode.jsonc` without stripping comments, adds the
-config-relative plugin entry above (migrating any legacy bare
-`opencode-orchestrator` entry in place), and adds the five agents with
-role-appropriate permissions if missing. Commands are registered at runtime by
-the plugin — `install` does not write `commands`.
-
-The distribution name is `opencode-v2-agent-orchestrator`; the runtime plugin ID
-remains `opencode-orchestrator` for compatibility (agent/tool/command names,
-storage keys, and `doctor` checks are unchanged).
-
-Reinstall is idempotent. Change models later via normal `agents.<id>.model`
-config, not plugin options.
-
-Verify:
+Check that it worked:
 
 ```sh
-./node_modules/.bin/opencode-v2-agent-orchestrator doctor        # config checks + advisory local git/gh runtime checks
 ./node_modules/.bin/opencode-v2-agent-orchestrator doctor --json
+# plus, once OpenCode is running:
+opencode2 api get /api/plugin | jq '.[].id' | grep opencode-orchestrator
 ```
 
-`doctor` merges two kinds of checks: static config checks (agents, modes, plugin options, commands) and advisory runtime checks probing *this machine's* git/gh — `git --version`, `gh --version`, `gh auth status` (exit code only, output suppressed), read-only `gh repo view`, and `git worktree list --porcelain`. Runtime checks never fail the report and never print headers or tokens; the server-side `orchestrator_github_capabilities` tool is authoritative for what the live session can actually do.
+---
 
 ## Quick start
 
 ```sh
 cd your-project
-# ensure opencode.jsonc has the plugin + five agents (see Install)
 opencode2
 ```
 
-In the TUI:
+Then in the TUI:
 
 ```
 /orchestrate add input validation to the user form and cover it with tests
 ```
 
-The orchestrator will explore, plan, delegate `implementer` edits with disjoint scopes, run `reviewer`, and report verified results.
+The orchestrator will research the codebase, plan the changes, delegate edits to `implementer` agents with isolated file ownership, run a `reviewer`, and report back with verification.
 
-## Slash commands
+---
 
-All commands are registered via `ctx.command.transform` at runtime — they do not exist as files on disk. Existing project commands with the same name win; `doctor` reports collisions.
+## See it in action
 
-### `/orchestrate <task>` — required argument
-General orchestration. Activates the orchestrator agent and its model before prompting.
+![Orchestrator demo — single prompt to tested, reviewed code](docs/assets/demo-placeholder.svg)
+
+| What you'd see | You type |
+|----------------|----------|
+| Research → plan → parallel edits → review, all summarized in one reply | `/orchestrate add pagination to /api/items with tests` |
+| Goal keeps running while you step away | `/goal implement the plan at .orchestrator/plans/checkout.md` |
+
+> **Make it yours:** record a 20–40s GIF with [VHS](https://github.com/charmbracelet/vhs), Screen Studio, or Peek, save it as `docs/assets/orchestrate-demo.gif` (and `goal-demo.gif`), then swap the image above. See `docs/assets/README.md` for a ready-to-use VHS tape.
+
+---
+
+## How to use — commands & examples
+
+All commands are available after installation. They appear inside OpenCode — no files to create manually.
+
+### `/orchestrate <task>` — your main command
+
+One prompt that fans out, integrates, and verifies.
 
 ```
 /orchestrate fix the race in session locking and add a regression test
 /orchestrate implement the new webhook endpoint with tests and docs
+/orchestrate add cursor-based pagination to /api/items with tests and update the docs
 ```
 
-### `/goal [objective | pause | resume | clear]`
-Durable session goal stored at `goal/v1/<project>/<session>`. Uses namespaced tools `orchestrator_goal_get` / `set` / `update` (orchestrator-only).
+**Tip:** Be specific about the outcome you want and any constraints (“without changing the API”, “cover with tests”).
+
+### `/goal` — for work that outlives one turn
+
+Set a durable objective that the orchestrator will keep working toward, even across idle periods.
 
 ```
 /goal ship the checkout refactor without regressing payments
 /goal            # show current goal
-/goal pause
-/goal resume
-/goal clear
+/goal pause      # pause without deleting
+/goal resume     # continue
+/goal clear      # remove it
 ```
 
-Completion requires evidence: `orchestrator_goal_update(status="complete", evidence="...")` with ≥8 chars. Auto-continuation (if `goal.auto_continue=true`) admits one queued continuation per idle edge, gated by `cooldown_ms` and `max_continuations`.
+Goals auto-continue when the session goes idle (up to 50 continuations by default, with a cooldown). The orchestrator checks before each continuation that the goal is still active and unchanged.
 
-### `/restructure <target> [--scope=file|module|project] [--risk=conservative|broad]`
-Conservative, test-backed refactoring. Validates target is inside the project, maps references/tests via `explore`, plans atomic behavior-preserving steps, verifies baseline, then delegates.
+### `/restructure` — safe refactoring
+
+Behavior must not change. The plugin maps references and tests first.
 
 ```
 /restructure src/core/config.ts --scope=file
 /restructure src/opencode-v2 --scope=module --risk=broad
 ```
 
-Stops if no meaningful verification exists in `broad` mode unless you explicitly accept risk.
+### `/run-plan` — execute a written plan
 
-### `/run-plan [plan]`
-Executes a plan from `.orchestrator/plans/*.md`. Reads the full plan, tracks a run ledger, delegates with disjoint scopes, verifies each step.
+Put plans in `.orchestrator/plans/*.md`.
 
 ```
-/run-plan                    # auto-picks sole incomplete plan or resumes active or paused stored runs
+/run-plan                    # picks the only incomplete plan, or resumes
 /run-plan my-feature         # .orchestrator/plans/my-feature.md
-/run-plan .orchestrator/plans/my-feature.md
 ```
 
-Mark a plan complete with frontmatter `status: complete` or heading `## Status / complete`.
+Mark a plan done with `status: complete` in frontmatter or a `## Status / complete` heading.
 
-### `/halt [goal|run|all]`
-Pauses automation without deleting recoverable state. Default `all`.
+### Other commands
 
 ```
-/halt        # pauses goal + plan run + sets automation stop flag
+/halt              # pause goal + plan runs
 /halt goal
-/halt run
-```
-
-Resume with `/goal resume` or `/run-plan`.
-
-### `/handover [focus]`
-Factual continuation brief from `ctx.session.context` + `ctx.vcs.status/diff`. Redacts secrets, separates facts from assumptions.
-
-```
-/handover
+/handover          # get a summary brief for the next person/session
 /handover focus on payments regression
-```
-
-### `/polish [scope]`
-Behavior-preserving cleanup of changed files. One `implementer` per disjoint scope, bounded by `max_parallel`, then aggregate `reviewer`.
-
-```
-/polish                      # changed files in working copy
+/polish            # clean up only files changed in this branch
 /polish src/core/policy.ts src/core/prompts.ts
-```
-
-### `/stress-plan <request>` — required argument
-Drafts a plan after `explore`, runs parallel critiques (correctness/testing, simplicity/scope, security/ops, feasibility — possibly same agent ID with different prompts), then synthesizes one revised plan under `.orchestrator/plans/`.
-
-```
 /stress-plan add rate limiting to the API with redis fallback
 ```
 
+`/stress-plan` drafts a plan, then critiques it from four angles (correctness, simplicity, security, feasibility) before finalizing.
+
+---
+
 ## Configuration
 
-Use native `agents.<id>.model` for per-agent models. Plugin options are orchestration wiring only:
+You mostly configure **models**, not plugin options. Use OpenCode’s native `agents.<id>.model`:
 
 ```jsonc
+// opencode.jsonc
 {
   "plugins": [{
     "package": "./node_modules/opencode-v2-agent-orchestrator/dist/index.js",
     "options": {
       "orchestrator": "orchestrator",
-      "roles": { "planning": "planner", "research": "explore", "implementation": "implementer", "review": "reviewer" },
-      "max_parallel": 4,        // 1..8
-      "require_review": true,
-      "strict_agents": true,    // fail setup if mapped agent missing
-      "commands": {},           // e.g. { "polish": false }
+      "roles": {
+        "planning": "planner",
+        "research": "explore",
+        "implementation": "implementer",
+        "review": "reviewer"
+      },
+      "max_parallel": 4,        // how many subagents at once (1..8)
+      "require_review": true,   // always run reviewer before finishing
+      "strict_agents": true,    // fail if a required agent is missing
+      "commands": {},           // disable a command, e.g. { "polish": false }
       "goal": { "auto_continue": true, "max_continuations": 50, "cooldown_ms": 1000 },
-      "github": { "enabled": false, "allow_mutations": false },   // orchestrator-only gh tools; both off by default
-      "worktree": { "enabled": false, "allow_mutations": false, "root": null },  // orchestrator-only git worktrees
-      "trace": { "mode": "off" },            // off | memory | snapshot (S3, metadata only)
-      "budget": { "mode": "advisory" },      // advisory | stop-between-steps + nullable limits
-      "review": { "mode": "prompt", "max_rounds": 2 }  // prompt | bounded (max_rounds 1..8)
+      "github": { "enabled": false, "allow_mutations": false },
+      "worktree": { "enabled": false, "allow_mutations": false, "root": null },
+      "trace": { "mode": "off" },                  // off | memory | snapshot
+      "budget": { "mode": "advisory" },            // advisory | stop-between-steps
+      "review": { "mode": "prompt", "max_rounds": 2 } // prompt | bounded
     }
   }],
-  // When worktree.root is non-null and sits outside the project directory, grant
-  // the worktree root scope so managed worktrees are usable, e.g.:
-  // "permissions": [
-  //   { "action": "external_directory", "resource": "/srv/worktrees/*", "effect": "allow" }
-  // ],
+  // If worktree.root lives outside your project, allow it:
+  // "permissions": [{ "action": "external_directory", "resource": "/srv/worktrees/*", "effect": "allow" }],
+
   "agents": {
-    "orchestrator": { "mode": "primary", "model": "openai/gpt-5#high" },
+    "orchestrator": { "mode": "primary",  "model": "openai/gpt-5#high" },
     "planner":      { "mode": "subagent", "model": "openai/gpt-5-mini" },
     "explore":      { "mode": "subagent", "model": "opencode-go/mimo-v2.5" },
     "implementer":  { "mode": "subagent", "model": "opencode-go/deepseek-v4-flash#high" },
@@ -222,113 +229,151 @@ Use native `agents.<id>.model` for per-agent models. Plugin options are orchestr
 }
 ```
 
-### Model tiering (1=cheap/fast, 5=frontier)
+### Choosing models
 
-`orchestrator` **5** — never downgrade first; `reviewer` **4–5**; `implementer`/`planner` **4**; `explore` **2** (parallel, cheapest wins). Example root `opencode.jsonc` in this repo uses `openai/gpt-5.6-sol#xhigh` for orchestrator and `mimo-v2.5` for explore.
+| Agent | Recommended tier | Why |
+|-------|----------------|-----|
+| `orchestrator` | 5 (frontier) | Never downgrade this one first — it does all coordination |
+| `reviewer` | 4–5 | Needs strong judgment |
+| `implementer` / `planner` | 4 | Capable but cheaper than frontier |
+| `explore` | 2 (cheap/fast) | Runs in parallel — cheap wins |
 
-## Examples
+Example from this repo uses `openai/gpt-5.6-sol#xhigh` for orchestrator and `mimo-v2.5` for explore.
 
-**Multi-step feature**
+Change a model later by editing `agents.<id>.model` directly — no reinstall needed.
+
+---
+
+## Real-world examples
+
+**Add a feature with tests**
 
 ```
-/orchestrate add cursor-based pagination to /api/items with tests and update the docs
+/orchestrate add cursor-based pagination to GET /api/items,
+  keep the existing offset param working, and update the API docs
 ```
 
-**Research without editing**
+→ The orchestrator will explore existing pagination, plan the API change, delegate implementation with tests, run a reviewer, and summarize.
 
-Ask the orchestrator to delegate: it will run `explore` in background and `planner` in foreground, then synthesize — you stay in the parent session with a ledger.
+**Fix a bug with a regression test**
 
-**Goal that survives idle**
+```
+/orchestrate fix the checkout race when two tabs submit at once,
+  add a regression test that reproduces it first
+```
+
+**Long-running objective**
 
 ```
 /goal implement the plan at .orchestrator/plans/checkout.md
-# ... idle continuations run ...
-/halt goal
-/goal resume
+# close your laptop, come back later
+/goal   # check progress
 ```
 
-## GitHub and managed worktrees
+**Safe restructure**
 
-Both families are orchestrator-only (one shared permission action per family, denied to every worker) and disabled by default.
+```
+/restructure src/services/payments --scope=module --risk=conservative
+```
 
-**GitHub via `gh` (`github.enabled`).** `github_capabilities` probes the `gh` binary, its auth state, and the resolved repository; `github_repo_view`, `github_issue_view`/`list`/`create`, and `github_pr_view`/`list`/`create` shell out to `gh` with `shell: false` and no model-supplied arguments. Credentials are owned by the host — configure `gh auth login` with least-privilege scopes there; the plugin never reads, stores, or prints headers, tokens, or environment secrets. The server-side `github_capabilities` probe is authoritative for what a session can actually do; the CLI `doctor` can only advisory-check this machine's `gh`.
+---
 
-**Worktrees via git (`worktree.enabled`).** `worktree_list`/`create`/`status`/`enter`/`push`/`cleanup` operate on one tracked worktree per current session, restricted to the configured absolute `worktree.root`, with durable per-session/project records and git-verified results. When managed worktrees are used for implementation, the required order is `orchestrator_worktree_create` → `orchestrator_worktree_enter` → delegate to the implementer. `orchestrator_worktree_enter` moves only the current session into its tracked ready worktree (session ID, history, and durable anchor preserved) and requires only `worktree.enabled` — it never runs git, so it needs no `allow_mutations` and no `confirm`; children delegated afterward inherit or start from that context, while no atomic child isolation is guaranteed.
+## Optional power features
 
-**Mutation opt-in, evidence, and cleanup.** Every mutating Git/GitHub tool (`github_issue_create`, `github_pr_create`, `worktree_create`, `worktree_push`, `worktree_cleanup`) requires both `allow_mutations: true` in plugin options **and** a literal `confirm: true` field in the tool call; read-only tools need only `enabled: true`. Successful GitHub/worktree results carry typed, per-invocation `evidence` metadata: marker (`EVIDENCE_LIVE` for probes/reads/worktree operations, `EVIDENCE_MUTATION` for issue/PR creates), freshness `per-invocation`, authority (`authoritative-for-tested-fields`), `source`, `sessionID`, and `capturedAt`. Mutation evidence additionally embeds a validated https proof of the created object — `verified: true` plus its `id`, `number`, and `html_url`. List tools keep the evidence repeated per list item; error results are redacted strings that carry no evidence. Evidence is metadata only: nothing persists it, it is never process/transcript/header/token data, and worktree evidence never claims child isolation. `worktree_cleanup` refuses the main worktree, a worktree owned by another session, and uncommitted changes, and removes the durable record only after `git worktree remove` succeeds.
+All disabled by default. Enable only what you need.
 
-## S3 observability and V1 bounded review (opt-in)
+### GitHub integration
 
-All three controls default to the previous behavior (`trace off`, `budget advisory`,
-`review prompt`) and add surfaces only when enabled — the default tool contract and
-hook count are unchanged.
+Let the orchestrator create and list issues/PRs via your local `gh` CLI.
 
-**Trace (`trace.mode`).** `memory` keeps bounded metadata summaries in memory;
-`snapshot` additionally persists one bounded current record per session under
-`trace/v1/<project>/<session>`. Records are **metadata only**: counts, timestamps,
-per-tool aggregates (count/failed/duration), steps, retries, and the latest usage
-snapshot. They never contain prompts, transcripts, tool input/output, shell output,
-result/error text, raw credentials, or call IDs. Usage comes from the
-`session.usage.updated` event and is treated as an aggregate **snapshot** (replace,
-never add) so nothing is double counted; missing coverage is unknown, never zero.
+```jsonc
+"github": { "enabled": true, "allow_mutations": false }
+```
 
-**Budget (`budget.mode`).** Deterministic `within | exceeded | unknown` evaluations
-over the nullable strict finite limits (`max_steps`, `max_tokens`, `max_cost_usd`,
-`max_wall_clock_ms`, `max_retries`; an explicit `null` or omission means no limit).
-`advisory` never blocks. `stop-between-steps` checks **only plugin-owned next
-dispatches** — goal auto-continuation and slash-command prompt delivery — before
-reservation and delivery. Exceeded limits stop the next dispatch; **in-flight
-provider and tool calls are never interrupted** and nothing is cancelled
-automatically. Unknown token/cost coverage fails closed for stop-between-steps
-checks (the reason is reported). Inspect `orchestrator_observability_get` for the
-evaluation. Budget enforcement works best with trace enabled; with budget
-stop-between-steps and no observations at all, unknown tokens/cost fail closed.
+- Read-only (list/view) needs only `enabled: true`
+- Creating issues/PRs needs `allow_mutations: true` **and** `confirm: true` on each call
+- Auth stays with `gh` — run `gh auth login` with least privilege. The plugin never reads tokens.
+- Verify: `orchestrator_github_capabilities` (inside OpenCode) or `gh auth status` locally
 
-**Bounded review (`review.mode`).** `bounded` adds `orchestrator_review_get` and
-`orchestrator_review_transition`. One bounded version-1 review record per session
-(`review/v1/<project>/<session>`, serialized through the existing process-local
-`withSessionLock`; no CAS/cross-process guarantee) with deterministic transitions
-over a record identity of **taskId + runId**. `start` (requires exactly taskId,
-runId, maker, checker, and the `review-pending` admission signal) → pending round
-1; pending `approve` requires exactly the three fixed boolean checks `diff`,
-`scope`, and `verification`, all true → approved; pending `request-changes` →
-changes-requested while rounds remain, else tripped (open, requires human);
-pending `block` → blocked (requires human); changes-requested `start` reopens the
-next round but only with the unchanged maker/checker (drift is rejected
-`identity-drift`); a different task/run (including the same task with a new run)
-can never overwrite an open record and may replace only a terminal one.
-Approved/blocked/tripped are terminal for the current task/run; tripped/blocked
-open the **circuit breaker** and stop goal auto-continuation until a new
-terminal-replacing review start. Fixed enums/reason codes only — no free-form
-reviewer text, and the model-facing tool schema mirrors the runtime checks
-exactly. Caller identity cannot be proven, and this machine is a separate
-version-1 schema that never changes D2 `reviewState` or the admission state
-semantics.
+### Git worktrees (isolated branches)
 
-## Runtime contract tools
+Work on a feature in a dedicated worktree without touching your main checkout.
 
-Three validation tools are always registered with no feature-enable gate. They live under the `orchestrator` namespace and share the single `orchestrator_validation` permission action; workers are denied them by the installer/agent transform, and each execute handler rejects non-orchestrator agents regardless of visibility rules. They are **callable/advisory primitives, not automatic hooks**: nothing routes worker output through them, they accept no `confirm` input, and no completion gate is enforced.
+```jsonc
+"worktree": { "enabled": true, "allow_mutations": true, "root": "/srv/worktrees" }
+```
 
-| Tool | Inputs | Outcome | Boundary |
-|---|---|---|---|
-| `orchestrator_task_complexity_classify` | The eight structured D4 facts (`independent_subtasks`, `dependent_stages`, `files_modules`, `independent_review`, `external_side_effects`, `shared_mutable_state`, `security_compliance_risk`, `expected_parallelism_value`), each nullable when unknown | Advisory, user-overridable recommendation: `collect-facts`, `direct-execution-candidate`, `orchestrate-candidate`, `orchestrate-serialized`, or `orchestrate-with-review`, with the firing rule, unknown dimensions, and rationale (`advisory: true`) | Accepts structured features only, never raw request text; missing/null facts force `collect-facts`; nothing is enforced, delegated, or blocked automatically |
-| `orchestrator_handoff_validate` | `level` (`worker`/`orchestrator`), the version-1 D2 envelope, and a task contract (`taskId`, `writeScope`, `requiredCommands`, `reviewRequired`) | Deterministic fail-closed verdict + per-check results + mapped admission state + five-heading prose rendering | Worker level runs C1–C7 structural/status/scope/command/artifact/semantics/redaction checks; orchestrator level re-runs them and adds live VCS comparison, local evidence/artifact existence, foreign-file blocking, and authority checks. Never runs a shell; non-trivial contracts typically block at orchestrator level because the pinned plugin cannot re-run required commands and cannot authenticate URL evidence refs |
-| `orchestrator_admission_transition` | `from` admission state + a strict `signal` (`action` plus optional `reason`/`reviewRequired`/`humanDecision`) | Deterministic `accepted`/`rejected` result with next state, `requiresHuman`, and `replacementReceipt` over the eight-state vocabulary | Stateless — persists nothing; `blocked-unknown` never auto-advances without an explicit human decision; D2 `reviewState` is self-declared and never treated as reviewer proof |
+- One worktree per session, under the `root` you choose
+- The orchestrator creates → enters → then delegates. Children inherit the worktree.
+- Verify: `./node_modules/.bin/opencode-v2-agent-orchestrator doctor` checks `git worktree list`
 
-The underlying pure primitives — `classifyTaskComplexity`, the D2 Zod mirror with `parseD2Handoff`/`validateD2Handoff`/`validateD2Semantics`/`renderD2Handoff`, and `transitionAdmission` — are re-exported from the package entrypoint (`src/index.ts`) with no subpath. `docs/phase-1/` contains the full contract detail, status, and remaining limitations.
+### Budgets, tracing & review gates (observability)
 
-## V2 Boundary
+For teams that want cost/usage limits or a stricter review gate:
 
-- **`gh` is the GitHub transport.** The `orchestrator_github_*` tools call the host-installed `gh` CLI with no shell; credentials are host-managed (`gh auth login`, least-privilege scopes) and never touched by the plugin. Host-configured GitHub MCP servers remain a separate deployment concern, not a plugin feature.
-- **Worktrees are plain `git worktree` operations** in the live session's server environment, tracked durably — the plugin does not fabricate an isolated filesystem for agents.
-- **No atomic subagent isolation.** The current V2 native `subagent` API does not atomically accept both a parent session and a plugin-created worktree, so the plugin does not enforce per-agent worktree or GitHub issue/PR isolation; `doctor` reports that boundary as a warning. Prompts stay policy, not a filesystem or security boundary.
-- **`doctor` cannot prove the server.** Its runtime checks probe this machine's PATH only and are always advisory; the server-side capabilities/worktree tools are authoritative.
-- **Validation is callable, not automatic.** The three orchestration validation tools exist and are always registered, but no plugin hook intercepts worker output, nothing persists admission or classification results, and there is no completion gate. `handoff_validate` never runs a shell and can never re-run a required command itself (the pinned V2 API offers no mechanism for it to do so), so orchestrator-level contracts that name required commands deterministically yield `blocked-unknown` until the parent independently re-runs them with its own tools; URL evidence refs likewise block because their authority cannot be authenticated from D2 strings in this version.
-- **No structured child-output hook.** The plugin prompts workers for the version-1 envelope, but it does not parse, validate, or transform child output automatically; the orchestrator must call `orchestrator_handoff_validate` explicitly.
-- **No server-plugin statistics surface.** The pinned Promise `SessionDomain` exposes no `statistics`/`tokenCount`/`usage` surface, so the plugin cannot read session token stats server-side. This absence claim is scoped to the pinned package declarations — the official HTTP API may expose session statistics (e.g. `/api/session/stats`), which is a separate surface the plugin does not consume. The S3 trace/budget feature therefore observes `session.usage.updated` events (aggregate snapshots) instead; missing coverage is reported as unknown.
-- **No evidence persistence.** Tool `evidence` records are returned to the model as metadata and are not stored; there is no durable receipt/evidence ledger.
-- **No automatic gating and no in-flight cancellation.** The S3/V1 controls are callable/advisory primitives plus checks at plugin-owned dispatch boundaries only: nothing intercepts worker output automatically, no hook reads review/budget state as a completion gate, `session.interrupt` is never called automatically, recognized tool-call IDs survive only in memory, and in-flight provider/tool calls are never cancelled. `stop-between-steps` stops only the next plugin-owned dispatch (goal auto-continuation and slash-command prompt delivery where practical), and the bounded review breaker stops only goal auto-continuation on blocked/tripped.
-- **No model-vendor tiering.** V1 review escalation stays within the configured semantic role map; there is no model-tier escalation, no per-vendor pricing, and no migration of D2/admission semantics.
+```jsonc
+"trace":  { "mode": "snapshot" },  // keep a bounded summary per session (metadata only)
+"budget": { "mode": "stop-between-steps", "max_steps": 1000, "max_cost_usd": 10 },
+"review": { "mode": "bounded", "max_rounds": 2 } // requires explicit approve before finishing
+```
+
+- **Trace** is metadata only (counts and durations) — never prompts or file contents
+- **Budget** `advisory` only reports; `stop-between-steps` pauses *between* steps, never mid-tool
+- **Bounded review** needs an explicit `approve` with three checks (`diff`, `scope`, `verification`)
+
+> These are opt-in. The defaults (`off` / `advisory` / `prompt`) change nothing until you enable them. Curious about the details? See the collapsed **Advanced** sections below.
+
+---
+
+## Troubleshooting
+
+**Is the plugin loaded?**
+
+```sh
+./node_modules/.bin/opencode-v2-agent-orchestrator doctor
+./node_modules/.bin/opencode-v2-agent-orchestrator doctor --json
+```
+
+`doctor` checks config, agents, and commands (always) plus advisory checks for `git`/`gh` on *this* machine. Runtime checks never fail the report — they’re informational. Inside OpenCode, the server-side tools (`orchestrator_github_capabilities`, `worktree_status`) are authoritative.
+
+**Plugin not appearing in OpenCode?**
+- Make sure `opencode.jsonc` points at the built file: `./node_modules/opencode-v2-agent-orchestrator/dist/index.js` (or `./src/index.ts` for a source checkout)
+- Restart OpenCode: `opencode2 service restart` then reopen from your project dir
+- Check logs: `~/.local/share/opencode/log/opencode.log` should show `loading plugin .../dist/index.js` and `agent.updated` / `command.updated`
+
+**GitHub or worktree not working?**
+- Ensure `gh` is installed and authenticated (`gh auth status` exit code 0)
+- Ensure `git worktree list --porcelain` works and your `worktree.root` is an absolute path
+- Check plugin options: `enabled` and `allow_mutations` must be on for writes
+
+---
+
+<details>
+<summary>How the orchestration works (for the curious)</summary>
+
+- **Roles are prompt policy, not hard sandboxing.** `explore` is told not to use shell, `planner`/`reviewer` not to edit, workers not to spawn subagents — but V2’s plugin API doesn’t enforce this at the filesystem level. Treat it as strong instructions.
+- **File ownership is disjoint by design.** The orchestrator assigns exact file scopes to each `implementer` so edits don’t overlap. `max_parallel` (default 4) caps concurrency.
+- **Handoffs are structured.** Workers return a five-field summary (`Outcome / Files / Verification / Risks / Follow-up`) plus a version-1 JSON envelope. The orchestrator can run `orchestrator_handoff_validate` for deterministic checks before using a handoff.
+- **Review is prompt-based by default.** `require_review: true` means the orchestrator *asks* a reviewer. There’s no hard runtime gate — `bounded` review adds an explicit `review_get` / `review_transition` flow with a circuit breaker if you need it.
+- **State lives in OpenCode storage.** Goals and plan runs persist via `ctx.storage` with per-session locks. Conversations remain the source of truth.
+
+Want the formal contracts? `docs/phase-1/` has them (D2 handoff, D4 gate, etc.) — you don’t need them to get started.
+
+</details>
+
+<details>
+<summary>Limitations & V2 boundaries</summary>
+
+- No atomic isolation for subagents — worktrees are plain `git worktree` dirs, not containers.
+- `doctor` probes *this* machine’s `PATH`; the live server’s capabilities are checked via server-side tools.
+- Validation tools (`orchestrator_handoff_validate`, etc.) are callable helpers — they don’t run automatically on every worker output.
+- No persistence of evidence receipts beyond the tool response.
+- Token/cost tracking uses `session.usage.updated` snapshots; if the host doesn’t emit them, budgets report `unknown`.
+- S3/V1 controls are opt-in and bounded: budgets pause only *between* steps, review gates only after an explicit transition. No in-flight cancellation.
+
+</details>
+
+---
 
 ## Development
 
@@ -336,21 +381,21 @@ The underlying pure primitives — `classifyTaskComplexity`, the D2 Zod mirror w
 bun install
 bun run dev:setup        # writes gitignored dev/project/opencode.jsonc from template
 bun run dev:v2           # standalone opencode2 with XDG dirs under dev/state
-bun run dev:v2:dist      # same, but loads ../../dist/index.js (run bun run build first)
+bun run dev:v2:dist      # loads ../../dist/index.js (run bun run build first)
 bun run typecheck
 bun test
 bun run build            # emits dist/index.js, dist/tui.js, dist/commands.js, dist/installer.js, dist/cli/index.js
 ```
 
-Isolated harness: `dev/project/opencode.jsonc` and `dev/state/*` are gitignored and never touch global `~/.config/opencode` or the shared service.
+`dev/project/opencode.jsonc` and `dev/state/*` are gitignored — they never touch global `~/.config/opencode`.
 
-## V2 Compatibility
+## Compatibility
 
 Tested against:
 
 - `@opencode-ai/plugin` `0.0.0-beta-18684`
-- `@opencode-ai/sdk` `0.0.0-dev-18683` (integration tests only)
+- `@opencode-ai/sdk` `0.0.0-dev-18683` (integration tests)
 
-Main plugin sets `tui: true` and publishes `./tui` for the TUI command layer. CLI-only plugin config belongs in global `cli.json`; this package is dual-surface and normally enabled through the main plugin registration.
+Main plugin sets `tui: true` and publishes `./tui`. CLI-only config belongs in `cli.json`.
 
-This project is behaviorally inspired by multi-agent orchestration work in `oh-my-openagent` at commit `64d89819ef1fde81712630f8e5d798be9e4e8867`. Independent implementation, no affiliation, no template copying.
+Inspired by multi-agent orchestration in `oh-my-openagent` at `64d89819ef1fde81712630f8e5d798be9e4e8867` — independent implementation, no affiliation.

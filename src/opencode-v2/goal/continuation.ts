@@ -1,5 +1,6 @@
 import type { OrchestratorOptions } from "../../core/config.js"
 import { buildContinuationPrompt } from "../../core/prompts.js"
+import type { DispatchGate } from "../observability/runtime.js"
 import {
   goalStorageKey,
   readAutomationStop,
@@ -25,7 +26,11 @@ export type ContinuationContext = {
   }
 }
 
-export function startGoalContinuation(context: ContinuationContext, options: OrchestratorOptions): () => Promise<void> {
+export function startGoalContinuation(
+  context: ContinuationContext,
+  options: OrchestratorOptions,
+  gate?: DispatchGate,
+): () => Promise<void> {
   const controller = new AbortController()
   const iterable = context.event.subscribe({ signal: controller.signal })
   const iterator = iterable[Symbol.asyncIterator]()
@@ -100,9 +105,9 @@ export function startGoalContinuation(context: ContinuationContext, options: Orc
     const stopKey = stopStorageKey(keyedLocation, sessionID)
 
     // Reserve the turn under the session lock: the ceiling, cooldown, halt,
-    // and duplicate-idle checks all happen atomically here so concurrent idle
-    // edges cannot exceed the ceiling. The reservation itself is the only
-    // shared mutation performed while holding the lock.
+    // controls gate, and duplicate-idle checks all happen atomically here so
+    // concurrent idle edges cannot exceed the ceiling. The reservation itself
+    // is the only shared mutation performed while holding the lock.
     const reserved = await withSessionLock(context.location, sessionID, async () => {
       const goal = await readGoal(context.storage, key)
       if (!goal || goal.status !== "active") return undefined
@@ -111,6 +116,13 @@ export function startGoalContinuation(context: ContinuationContext, options: Orc
         return undefined
       }
       if (controller.signal.aborted || (await readAutomationStop(context.storage, stopKey))) return undefined
+      if (gate) {
+        const decision = await gate.allowDispatch(sessionID, "auto")
+        if (!decision.allow) {
+          console.warn(`opencode-orchestrator continuation stopped by controls for ${sessionID}: ${decision.reason}`)
+          return undefined
+        }
+      }
 
       const now = Date.now()
       if (goal.lastContinuationAt !== undefined && now - goal.lastContinuationAt < options.goal.cooldown_ms) return undefined
@@ -138,10 +150,19 @@ export function startGoalContinuation(context: ContinuationContext, options: Orc
     const current = await readGoal(context.storage, key)
     if (!current || current.status !== "active") return
     if (!isSameReservation(current, reserved)) return
+    if (gate) {
+      // Re-check immediately before delivery: budget observations and the
+      // review breaker may have changed since the reservation.
+      const decision = await gate.allowDispatch(sessionID, "auto")
+      if (!decision.allow) {
+        console.warn(`opencode-orchestrator continuation stopped by controls before delivery for ${sessionID}: ${decision.reason}`)
+        return
+      }
+    }
 
     await context.session.prompt({
       sessionID,
-      text: buildContinuationPrompt(reserved.objective, reserved.continuationCount),
+      text: buildContinuationPrompt(reserved.objective, reserved.continuationCount, options),
       delivery: "queue",
     })
   }

@@ -1,7 +1,23 @@
 export { orchestratorPlugin as default, orchestratorPlugin } from "./opencode-v2/plugin.js"
 export { commandDefinitions, COMMAND_NAMES } from "./opencode-v2/commands/index.js"
-export { OrchestratorOptionsSchema, parseOptions } from "./core/config.js"
-export type { OrchestratorOptions, CommandName } from "./core/config.js"
+export {
+  OrchestratorOptionsSchema,
+  parseOptions,
+  TRACE_MODES,
+  BUDGET_MODES,
+  REVIEW_MODES,
+} from "./core/config.js"
+export type {
+  OrchestratorOptions,
+  CommandName,
+  TraceMode,
+  BudgetMode,
+  ReviewMode,
+  TraceOptions,
+  BudgetOptions,
+  BudgetLimits,
+  ReviewOptions,
+} from "./core/config.js"
 
 // Serialized runtime public pure APIs. No package subpath: these are exported
 // from the main entrypoint only. The orchestration tools
@@ -123,3 +139,64 @@ export type {
   Assessment,
   EvidenceRequirement,
 } from "./opencode-v2/orchestration/evidence.js"
+
+// S3 state & observability — deterministic budget evaluation and bounded
+// metadata-only trace summaries. All pure/stateless; nothing here enforces an
+// automatic gate by itself (stop-between-steps checks run only inside the
+// plugin-owned dispatch surfaces below).
+export { evaluateBudget, configuredBudgetLimits, BUDGET_LIMIT_NAMES } from "./opencode-v2/observability/budget.js"
+export type {
+  BudgetObservation,
+  BudgetLimitName,
+  BudgetLimitStatus,
+  BudgetDetail,
+  BudgetVerdict,
+  BudgetEvaluation,
+} from "./opencode-v2/observability/budget.js"
+export {
+  TRACE_RECORD_VERSION,
+  TRACE_MAX_TOOL_ENTRIES,
+  TRACE_MAX_PENDING_CALLS,
+  TRACE_OTHER_TOOL,
+  traceSummarySchema,
+  traceToolUsageSchema,
+  usageSnapshotSchema,
+  newTraceSummary,
+  applyToolCallStart,
+  applyToolCallEnd,
+  applyToolCallOutcome,
+  recordStep,
+  recordRetry,
+  recordUsageSnapshot,
+  usageTokensTotal,
+  parseTraceSummary,
+  traceStorageKey,
+} from "./opencode-v2/observability/trace.js"
+export type { TraceSummary, TraceToolUsage, UsageSnapshot, UsageSnapshotInput } from "./opencode-v2/observability/trace.js"
+
+// V1 maker-checker review schema and deterministic transitions. This is a
+// separate version-1 review schema: D2 reviewState semantics and the core
+// admission state semantics are unchanged.
+export {
+  REVIEW_V1_VERSION,
+  REVIEW_V1_STATES,
+  REVIEW_V1_ACTIONS,
+  REVIEW_V1_REASONS,
+  reviewV1RecordSchema,
+  REVIEW_V1_START_SIGNAL_SCHEMA,
+  REVIEW_V1_APPROVE_SIGNAL_SCHEMA,
+  REVIEW_V1_SIGNAL_SCHEMA,
+  transitionReviewV1,
+  parseReviewRecord,
+  reviewStorageKey,
+} from "./opencode-v2/observability/review.js"
+export type {
+  ReviewV1State,
+  ReviewV1Action,
+  ReviewV1Reason,
+  ReviewV1Record,
+  ReviewV1Signal,
+  ReviewV1TransitionInput,
+  ReviewV1Transition,
+} from "./opencode-v2/observability/review.js"
+export type { DispatchGate, DispatchDecision, DispatchCheck } from "./opencode-v2/observability/runtime.js"

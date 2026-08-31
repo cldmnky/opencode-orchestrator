@@ -31,6 +31,18 @@ export const GH_TOOL_PERMISSION = "orchestrator_gh"
 export const WORKTREE_TOOL_PERMISSION = "orchestrator_worktree"
 
 /**
+ * Shared permission action for the S3/V1 observability and review tools.
+ *
+ * The conditional runtime tools (observability_get, review_get,
+ * review_transition) are registered under the `orchestrator` namespace only
+ * when their modes are enabled, and share this one explicit `permission`
+ * action so a single rule grants or revokes the whole family. They are
+ * orchestrator-only: a worker that somehow reaches an execute handler is
+ * rejected regardless of visibility rules.
+ */
+export const OBSERVABILITY_TOOL_PERMISSION = "orchestrator_observability"
+
+/**
  * Shared permission action for the serialized orchestration validation tools.
  *
  * The serialized runtime tools (task_complexity_classify, handoff_validate,
@@ -66,6 +78,7 @@ export function orchestratorOnlyPermissionRule(effect: PermissionEffect): Permis
       GH_TOOL_PERMISSION,
       WORKTREE_TOOL_PERMISSION,
       ORCHESTRATION_TOOL_PERMISSION,
+      OBSERVABILITY_TOOL_PERMISSION,
     ].join("|"),
     resource: "*",
     effect,
@@ -77,6 +90,7 @@ export function orchestratorOnlyPermissionRules(effect: PermissionEffect): Permi
     { action: GH_TOOL_PERMISSION, resource: "*", effect },
     { action: WORKTREE_TOOL_PERMISSION, resource: "*", effect },
     { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect },
+    { action: OBSERVABILITY_TOOL_PERMISSION, resource: "*", effect },
   ]
 }
 

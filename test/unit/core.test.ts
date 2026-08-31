@@ -31,6 +31,67 @@ describe("configuration", () => {
     expect(() => parseOptions({ max_parallel: 9 })).toThrow()
   })
 
+  test("strict top-level options reject typos instead of silently stripping them", () => {
+    expect(() => parseOptions({ tracer: { mode: "memory" } })).toThrow()
+    expect(() => parseOptions({ budgt: { mode: "advisory" } })).toThrow()
+    expect(() => parseOptions({ max_paralel: 4 })).toThrow()
+    expect(() => parseOptions({ review_mode: "bounded" })).toThrow()
+    // Valid top-level keys still parse and fill defaults.
+    expect(parseOptions({ max_parallel: 3 }).max_parallel).toBe(3)
+  })
+
+  test("S3/V1 controls default to the strict backward-compatible behavior", () => {
+    const options = parseOptions({})
+    expect(options.trace).toEqual({ mode: "off" })
+    expect(options.budget).toEqual({ mode: "advisory" })
+    expect(options.budget.max_steps).toBeUndefined()
+    expect(options.budget.max_tokens).toBeUndefined()
+    expect(options.budget.max_cost_usd).toBeUndefined()
+    expect(options.budget.max_wall_clock_ms).toBeUndefined()
+    expect(options.budget.max_retries).toBeUndefined()
+    expect(options.review).toEqual({ mode: "prompt", max_rounds: 2 })
+  })
+
+  test("S3/V1 opt-in blocks accept every mode and nullable strict limits", () => {
+    const options = parseOptions({
+      trace: { mode: "snapshot" },
+      budget: {
+        mode: "stop-between-steps",
+        max_steps: 12,
+        max_tokens: 10_000,
+        max_cost_usd: 5.5,
+        max_wall_clock_ms: 3_600_000,
+        max_retries: 3,
+      },
+      review: { mode: "bounded", max_rounds: 8 },
+    })
+    expect(options.trace.mode).toBe("snapshot")
+    expect(options.budget).toMatchObject({
+      mode: "stop-between-steps",
+      max_steps: 12,
+      max_tokens: 10_000,
+      max_cost_usd: 5.5,
+      max_wall_clock_ms: 3_600_000,
+      max_retries: 3,
+    })
+    expect(options.review).toEqual({ mode: "bounded", max_rounds: 8 })
+    // Explicit null limits are accepted as "no limit".
+    expect(parseOptions({ budget: { mode: "advisory", max_tokens: null, max_steps: null } }).budget.max_tokens).toBe(null)
+  })
+
+  test("S3/V1 strict blocks reject unknown keys, bad modes, and bad limits", () => {
+    expect(() => parseOptions({ trace: { mode: "log" } })).toThrow()
+    expect(() => parseOptions({ trace: { retention: 5 } })).toThrow()
+    expect(() => parseOptions({ budget: { mode: "block" } })).toThrow()
+    expect(() => parseOptions({ budget: { max_tokens: -0.01 } })).toThrow()
+    expect(() => parseOptions({ budget: { max_tokens: Number.NaN } })).toThrow()
+    expect(() => parseOptions({ budget: { max_steps: 1.5 } })).toThrow()
+    expect(() => parseOptions({ review: { mode: "circle" } })).toThrow()
+    expect(() => parseOptions({ review: { max_rounds: 0 } })).toThrow()
+    expect(() => parseOptions({ review: { max_rounds: 9 } })).toThrow()
+    expect(() => parseOptions({ review: { max_rounds: 2.5 } })).toThrow()
+  })
+
   test("accepts legacy commands.cd but ignores it completely", () => {
     // Strict option parsing keeps accepting `commands: { cd: true|false }` for
     // backward compatibility, but the parsed legacy key never surfaces in
@@ -126,6 +187,38 @@ describe("prompts", () => {
 
   test("renders complete command arguments", () => {
     expect(buildCommandPrompt("goal", "pause")).toContain("pause")
+  })
+
+  test("bounded review and stop-between-steps guidance appear only when enabled", () => {
+    const defaults = buildOrchestratorSystem(parseOptions({}))
+    expect(defaults).not.toContain("Bounded review mode is configured")
+    expect(defaults).not.toContain("stop-between-steps budget mode is configured")
+
+    const bounded = parseOptions({ review: { mode: "bounded" }, budget: { mode: "stop-between-steps" } })
+    const system = buildOrchestratorSystem(bounded)
+    expect(system).toContain("Bounded review mode is configured")
+    expect(system).toContain("orchestrator_review_transition")
+    expect(system).toContain("Reach admission state review-pending")
+    expect(system).toContain("stop-between-steps budget mode is configured")
+    expect(system).toContain("in-flight provider and tool calls are never interrupted")
+    expect(system).toContain("not an automatic completion gate")
+
+    const command = buildCommandPrompt("orchestrate", "scope", bounded)
+    expect(command).toContain("orchestrator_review_transition")
+    expect(command).toContain("stop-between-steps budget mode is configured")
+    const continuation = buildContinuationPrompt("objective", 1, bounded)
+    expect(continuation).toContain("orchestrator_review_transition")
+    expect(continuation).toContain("Bounded review mode is configured")
+    expect(continuation).toContain("stop-between-steps budget mode is configured")
+    expect(continuation).not.toContain("automatic gate is enforced")
+
+    // Default continuation and command prompts carry none of the guidance.
+    const plainContinuation = buildContinuationPrompt("objective", 1)
+    expect(plainContinuation).not.toContain("Bounded review mode is configured")
+    expect(plainContinuation).not.toContain("stop-between-steps budget mode is configured")
+    const plainCommand = buildCommandPrompt("orchestrate", "scope")
+    expect(plainCommand).not.toContain("Bounded review mode is configured")
+    expect(plainCommand).not.toContain("stop-between-steps budget mode is configured")
   })
 })
 

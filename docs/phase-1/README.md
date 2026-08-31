@@ -3,9 +3,9 @@
 **Date:** 2026-08-30
 **Issue:** [#8 — Phase 1 contracts and design artifacts](https://github.com/cldmnky/opencode-orchestrator/issues/8) (historical design) · [#10 — Phase 1 runtime contracts](https://github.com/cldmnky/opencode-orchestrator/issues/10) (callable implementation)
 **Branches:** `feat/8-orchestration-phase1-contracts` (issue #8, merged) · `feat/10-phase1-runtime-contracts` (issue #10, current)
-**Status:** The ten design artifacts from issue #8 are complete. Issue #10 added **callable runtime implementations** of the phase-1 contracts (three orchestrator-only tools plus public pure APIs and typed evidence metadata). The split is documented throughout: **implemented callable surfaces** below are real and test-covered, while **enforcement, telemetry, isolation, and persistence** remain unimplemented. Parent-verified outcomes (see [Verification](#6-validation-commands)):
+**Status:** The ten design artifacts from issue #8 are complete. Issue #10 added **callable runtime implementations** of the phase-1 contracts (three orchestrator-only tools plus public pure APIs and typed evidence metadata). `feat/s3-v1-controls` added the **opt-in S3 observability/budget controls and V1 bounded maker-checker review** ([`./s3-v1-controls.md`](./s3-v1-controls.md)) with default-backward-compatible behavior. The split is documented throughout: **implemented callable surfaces** below are real and test-covered, while **enforcement, telemetry, isolation, and persistence** remain unimplemented (the S3/V1 addition is opt-in metadata-only tracing/budget evaluation and bounded explicit review rounds — still no automatic completion gate, no in-flight cancellation, and no self-declared gate). Parent-verified outcomes (see [Verification](#6-validation-commands)):
 
-- `bun run typecheck` **passed**; full `bun test` **456 pass / 1 skip / 0 fail** (457 tests across 18 files, 2477 `expect()` calls; the single skip is the pre-existing cross-volume platform case); `bun run build` **passed** and emitted all five bundles (`dist/index.js`, `dist/tui.js`, `dist/commands.js`, `dist/installer.js`, `dist/cli/index.js`).
+- `bun run typecheck` **passed**; full `bun test` on `feat/s3-v1-controls` is **524 pass / 1 skip / 0 fail** (525 tests across 20 files; the single skip is the pre-existing cross-volume platform case; the issue #10-era run was 456 pass / 1 skip / 0 fail across 18 files); `bun run build` **passed** and emitted all five bundles (`dist/index.js`, `dist/tui.js`, `dist/commands.js`, `dist/installer.js`, `dist/cli/index.js`).
 - `npm pack` of the source build into the approved temp area contained `package.json`, the README, and all five bundles; importing the unpacked `dist/index.js` exposed and executed `classifyTaskComplexity` and exported `D2_HANDOFF_SCHEMA`, `transitionAdmission`, `evidenceSchema`, and `assessEvidence`.
 - Embedded V2 host tests (part of the full suite) **passed**: source, config-relative source, and package-like local dist loading. `bun run src/cli/index.ts doctor` **passed** static options/agents and the local advisory git/gh/auth/repo/worktree checks, with the expected workflow/MCP/runtime-authority warnings.
 - **The shared-service live-reload smoke is inconclusive, not a pass:** `opencode2 api get /api/plugin` from the repo `cwd` did **not** list `opencode-orchestrator` (it listed built-ins and an unrelated failed global nono-sandbox plugin), and the shared service was **not** restarted because restarting/reopening it could interrupt the current session. A shared-service plugin load is therefore unverified.
@@ -32,10 +32,10 @@ restarted). The independent aggregate source/test/docs review passed.
 
 **Still not implemented (unchanged from issue #8) — do not read the above as these:**
 
-- **No runtime enforcement:** `max_parallel`/`require_review` remain validated config consumed as prompt text; there is no scheduler, semaphore, or completion gate. The admission states are a stateless vocabulary, not a state store. D4 remains advisory (`runtimeEnforced: false`); the D2 validator is callable, not automatic.
-- **No collected telemetry:** there are no measured results anywhere in this directory. The D4 corpus labels are hypotheses, the evaluation template's result fields are `null`/`"not-collected"`, and no token/latency/quality number is a measurement.
+- **No runtime enforcement:** `max_parallel`/`require_review` remain validated config consumed as prompt text; there is no scheduler, semaphore, or completion gate. The admission states are a stateless vocabulary, not a state store. D4 remains advisory (`runtimeEnforced: false`); the D2 validator is callable, not automatic. The S3/V1 addition gates **only plugin-owned next dispatches** when explicitly configured (`stop-between-steps` budget, bounded review breaker); it never calls `session.interrupt`, never cancels in-flight calls, and never acts as a completion gate.
+- **No collected telemetry:** there are no measured results anywhere in this directory. The D4 corpus labels are hypotheses, the evaluation template's result fields are `null`/`"not-collected"`, and no token/latency/quality number is a measurement. S3 `trace` records are opt-in bounded metadata summaries (never persisted prompts/transcripts/payloads); their counts are records of observed events, not measured evaluation metrics.
 - **No atomic child isolation:** prompt-level disjoint write scopes and managed `worktree/v2` bookkeeping are **not** filesystem or process isolation.
-- **No exactly-once claim** and **no persistence of evidence receipts:** tool `evidence` metadata is returned to the model and not stored; there is no durable receipt/evidence ledger.
+- **No exactly-once claim** and **no persistence of evidence receipts:** tool `evidence` metadata is returned to the model and not stored; there is no durable receipt/evidence ledger. S3/V1 storage is one bounded current record per session under process-local locking only (no CAS/transactions/cross-process guarantee).
 - **No automatic child-output hook:** no plugin hook intercepts worker output; the D2 validator runs only when the orchestrator calls it.
 
 The parent plan's constraints apply unchanged: no GitHub/worktree/merge/issue/PR operations by this
@@ -60,7 +60,8 @@ All ten sibling artifacts below live in this directory. The design artifacts wer
 | [`d2-handoff.schema.json`](./d2-handoff.schema.json) | The D2 envelope JSON Schema (13 required fields, strict). | Design schema complete; **mirrored by the runtime Zod contract** (`src/core/contracts.ts`); the JSON file is a contract/reference document, not loaded at runtime. |
 | [`d2-handoff.example.json`](./d2-handoff.example.json) | Illustrative validating envelope (`taskId: issue-8-d2-handoff-schema-draft`). | Historical issue #8 example, kept schema-valid; **passes the current runtime mirror** (`parseD2Handoff`/`D2_HANDOFF_SCHEMA`); time-scoped facts updated; issue #10 completed its follow-up. |
 | [`v2-validation-checklist.md`](./v2-validation-checklist.md) | **V2 — Two-Level Validation Checklist and Admission-State Vocabulary.** C1–C7 / O1–O9 / J1–J5, eight states, evidence admission rules, worked example. | Implemented as a **stateless vocabulary + callable validator** (`src/core/admission.ts`, `validateHandoff` in `src/opencode-v2/orchestration/validation.ts`); enforcement, telemetry, and persistence remain unimplemented; the worked example stays illustrative (its envelope never traversed a real child hook). |
-| [`assumptions.md`](./assumptions.md) | **A1–A12 assumption and verification ledger**, evidence index, backlog. | Ledger complete with a dated issue #10 implementation note; A11 stays **Verified (negative)**; A4/A5 stay **Partially verified**; no backlog command was executed for the original ledger. |
+| [`assumptions.md`](./assumptions.md) | **A1–A12 assumption and verification ledger**, evidence index, backlog. | Ledger complete with a dated issue #10 implementation note; A11 stays **Verified (negative)**; A4/A5 stay **Partially verified**; no backlog command was executed for the original ledger. `feat/s3-v1-controls` appended a dated note and A13/A14 rows (statuses below). |
+| [`s3-v1-controls.md`](./s3-v1-controls.md) | **S3 — observability/budget controls + V1 — bounded maker-checker review** (opt-in). | **Implemented** on `feat/s3-v1-controls`: strict defaulted config, metadata-only trace summaries (snapshots, unknown≠zero), deterministic within/exceeded/unknown budget evaluation, fail-closed token/cost only for stop-between-steps, separate version-1 review schema with fixed transitions and a terminal breaker, one bounded record per session, conditional orchestrator-only tools, and exact limitations. No automatic completion gate, no in-flight cancellation, no D2/admission changes, no tiering, no migrations. |
 
 ---
 
@@ -78,6 +79,8 @@ All ten sibling artifacts below live in this directory. The design artifacts wer
    the callable validator and stateless admission machine).
 6. **Machine assets last** — re-read the two JSON trios (D4 table/corpus/template, D2
    schema/example) against the markdown that explains them.
+7. **S3/V1 controls last** — `s3-v1-controls.md` (the opt-in bounded implementation added on
+   `feat/s3-v1-controls`), cross-linked from §4.
 
 ---
 
@@ -156,6 +159,50 @@ nothing below is a measurement.
   **[A6] Partially verified**, **[A11] Verified (negative)** — still no durable GitHub/evidence
   record ledger.
 
+### S3/V1 controls (opt-in, bounded, metadata only — `feat/s3-v1-controls`)
+
+- The three config blocks are strict with defaults that preserve prior behavior: `trace`
+  `off|memory|snapshot` (default `off`), `budget` `advisory|stop-between-steps` (default
+  `advisory`) with nullable finite `max_steps`/`max_tokens`/`max_cost_usd`/`max_wall_clock_ms`/
+  `max_retries`, and `review` `prompt|bounded` (default `prompt`, `max_rounds` 1..8 default 2)
+  (`src/core/config.ts`). Unknown keys, bad modes, negative/NaN/Infinity limits, and out-of-range
+  rounds are rejected.
+- The observability runtime (`src/opencode-v2/observability/runtime.ts`) activates only when a
+  mode is enabled and uses **only** pinned tool `execute.before/after` hooks and typed
+  `event.subscribe` events; it never builds a separate HTTP client (the pinned Promise
+  `SessionDomain` has no `session.stats`). Usage aggregate events are snapshots that **replace**
+  stored values (never add), so no double counting occurs; missing coverage is **unknown, never
+  zero**. `session.usage.recorded` (incremental) events are deliberately ignored. Event/hook
+  failures are caught and never break orchestration; cleanup awaits event consumption and
+  disposes hook registrations.
+- The bounded trace/review records are metadata only: no prompts, transcripts, tool
+  input/output, shell output, result/error text, credentials, or call IDs (call IDs live only
+  in the in-memory pending map). One current record per session under
+  `trace/v1/<project>/<session>` and `review/v1/<project>/<session>`, written through
+  `withSessionLock` with **no CAS/cross-process guarantee**.
+- Budget evaluation is deterministic `within|exceeded|unknown` (`evaluateBudget`,
+  `src/opencode-v2/observability/budget.ts`); exact-boundary is `within`; unknown token/cost
+  coverage fails closed **only** for `stop-between-steps` checks (reason recorded); `advisory`
+  never blocks. `stop-between-steps` gates **only** goal auto-continuation (before reservation
+  and before delivery) and slash-command prompt delivery; `session.interrupt` is never called
+  and nothing is cancelled in flight.
+- `review_transition`/`transitionReviewV1` is a **separate version-1 review schema** with fixed
+  enums/reasons only; it does not change D2 `reviewState` (`src/core/contracts.ts`) or the
+  admission machine (`src/core/admission.ts`). Deterministic transitions: absent+start →
+  pending r1; pending+approve(all checks true) → approved (terminal); pending+request-changes →
+  changes-requested while rounds remain, else tripped (terminal, requires human); pending+block
+  → blocked (terminal, requires human); changes-requested+start → next round. Approved/blocked/
+  tripped are terminal for the current task; tripped/blocked open the **circuit breaker** for
+  goal auto-continuation until a terminal-replacing start.
+- Tools (`observability_get`, `review_get`, `review_transition`) are registered **only when the
+  corresponding mode is enabled** under the `orchestrator` namespace with the shared
+  `orchestrator_observability` permission action; the default tool contract/count is unchanged.
+  Outputs carry explicit limitations (no CAS, unprovable caller identity, one bounded record per
+  session). They are callable/advisory — no automatic gate.
+- Tests: `test/unit/observability.test.ts`, `test/unit/review.test.ts` plus focused extensions
+  in `test/unit/{core,continuation,runtime,session-state,installer,orchestration-tools}.test.ts`
+  and `test/contract/plugin.test.ts`. Full suite/typecheck/build pass on the branch (see §6).
+
 ### Worktree boundary
 
 - Managed `worktree/v2` records are **current-session bookkeeping**, not isolation; prompt-level
@@ -190,8 +237,9 @@ nothing below is a measurement.
 | V3 | Capability authority matrix with explicit unknowns; evidence vocabulary implemented as a typed runtime schema + `assessEvidence` + factories and attached as metadata to GH/worktree tool results; doctor/MCP/unknown/session-stats boundaries preserved. | **Complete (design + runtime vocabulary)** |
 | D2 | Strict Draft 2020-12 schema + validating example; five-field prose mapping; implemented as a strict runtime Zod mirror + prompt/tool integration `orchestrator_handoff_validate`; one-way rendering; callable, no automatic hook. | **Complete (draft + runtime mirror)** — example remains an issue #8 artifact honored as such |
 | V2 | Three-level checklist (C1–C7, O1–O9, J1–J5), eight-state admission vocabulary, evidence admission rules; implemented as a stateless vocabulary (`transitionAdmission`) + callable fail-closed validator; enforcement/telemetry/persistence not implemented; worked example stays illustrative. | **Complete (proposal + callable validator)** |
-| A1–A12 | Every assumption recorded with a status, exact evidence, remaining unknown, and next verification step; A11 **Verified** (negative); the rest Partially verified / Unverified / Not supported; dated issue #10 implementation note appended without falsifying the historical read-only ledger. | **Ledger complete** — **no backlog command executed** |
-| Repository checks | `bun run typecheck` **passed**; full `bun test` **456 pass / 1 skip / 0 fail** (457 tests across 18 files; the skip is the pre-existing cross-volume platform case); `bun run build` **passed** all five bundles; `npm pack` + unpacked `dist/index.js` import **passed**; final independent aggregate review passed with no blocking or major findings (see §6). | **Complete (verified)** — shared-service live-reload smoke remains **inconclusive** (not a pass) |
+| A1–A12 | Every assumption recorded with a status, exact evidence, remaining unknown, and next verification step; A11 **Verified** (negative); the rest Partially verified / Unverified / Not supported; dated issue #10 implementation note appended without falsifying the historical read-only ledger. **A13/A14 added by `feat/s3-v1-controls`** (see assumptions.md). | **Ledger complete** — **no backlog command executed** |
+| S3/V1 | Opt-in strict controls: metadata-only bounded trace summaries (snapshots, unknown≠zero), deterministic budget evaluation with fail-closed token/cost only for stop-between-steps, separate V1 review schema with fixed transitions/terminal breaker, one bounded record per session, conditional orchestrator-only tools, exact limitations; default behavior unchanged. | **Complete (implemented + tests)** on `feat/s3-v1-controls` — still no automatic completion gate, no in-flight cancellation, no D2/admission changes |
+| Repository checks | `bun run typecheck` **passed**; full `bun test` **524 pass / 1 skip / 0 fail** (525 tests across 20 files on `feat/s3-v1-controls`; the skip is the pre-existing cross-volume platform case; issue #10-era run was 456 pass / 1 skip / 0 fail across 18 files); `bun run build` **passed** all five bundles; `npm pack` + unpacked `dist/index.js` import **passed** (issue #10) and the `dist/index.js` export sweep for the S3/V1 pure APIs passed; final independent aggregate review passed with no blocking or major findings (issue #10). | **Complete (verified)** — shared-service live-reload smoke remains **inconclusive** (not a pass) |
 
 Whether all ten artifacts satisfy the parent plan's Phase 1 exit evidence
 (`docs/orchestrator-improvements-plan.md:1022-1039`) is a **parent-side review decision**: the
@@ -245,12 +293,14 @@ git diff --check -- docs/phase-1/README.md
 **Repository checks (parent-verified, all as recorded):**
 
 ```sh
-bun run typecheck                                          # passed
-bun test                                                   # 456 pass / 1 skip / 0 fail (457 tests, 18 files)
+bun run typecheck                                          # passed (incl. feat/s3-v1-controls)
+bun test                                                   # 524 pass / 1 skip / 0 fail (525 tests, 20 files) on feat/s3-v1-controls
 bun run build                                              # passed: dist/index.js, dist/tui.js, dist/commands.js, dist/installer.js, dist/cli/index.js
-npm pack --pack-destination "$TMPDIR"                      # tarball contains package.json, README, all five bundles
+npm pack --pack-destination "$TMPDIR"                      # tarball contains package.json, README, all five bundles (issue #10)
 # unpacked dist/index.js import exposed/executed classifyTaskComplexity, D2_HANDOFF_SCHEMA,
-# transitionAdmission, evidenceSchema, assessEvidence       # passed
+# transitionAdmission, evidenceSchema, assessEvidence       # passed (issue #10)
+# dist/index.js export sweep for evaluateBudget, transitionReviewV1, TRACE_MODES/BUDGET_MODES/
+# REVIEW_MODES, parseTraceSummary, reviewStorageKey        # passed (feat/s3-v1-controls)
 bun run src/cli/index.ts doctor                            # static options/agents + local advisory git/gh/auth/repo/worktree checks passed
                                                            # (expected workflow/MCP/runtime-authority warnings)
 # Embedded V2 host tests (source, config-relative source, package-like local dist) — part of full suite, passed

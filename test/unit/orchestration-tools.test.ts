@@ -114,6 +114,16 @@ describe("orchestration validation tool registration", () => {
     }
   })
 
+  test("the orchestration family stays separate from the conditional observability/review tools", () => {
+    // addOrchestrationTools never registers the S3/V1 tools; they are added by
+    // addObservabilityTools (src/opencode-v2/observability/tools.ts) only when
+    // a mode is enabled, so default tool registration is unchanged.
+    const tools = collect()
+    for (const name of ["observability_get", "review_get", "review_transition"]) {
+      expect(tools.has(name)).toBe(false)
+    }
+  })
+
   test("registers unconditionally as core tools with no confirm input or persistence surface", () => {
     const tools = collect()
     for (const tool of tools.values()) {

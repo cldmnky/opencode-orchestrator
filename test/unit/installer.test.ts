@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { inspectConfig, mergeStatus, runtimeChecks, type DoctorRunner } from "../../src/cli/doctor.js"
 import { configRelativePluginReference, installConfig, isLocalPluginReference, pluginEntryForRuntimeFile } from "../../src/cli/install.js"
 import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../../src/core/package-identity.js"
-import { GOAL_TOOL_PERMISSION, ORCHESTRATION_TOOL_PERMISSION } from "../../src/core/permissions.js"
+import { GOAL_TOOL_PERMISSION, OBSERVABILITY_TOOL_PERMISSION, ORCHESTRATION_TOOL_PERMISSION } from "../../src/core/permissions.js"
 
 describe("plugin reference helpers", () => {
   test("derives the source entrypoint from src/cli/index.ts", () => {
@@ -505,6 +505,25 @@ describe("installer", () => {
     expect(rules.filter((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toEqual([
       { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect: "ask" },
     ])
+  })
+
+  test("installs the observability permission: allowed for the orchestrator, denied to every worker", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+
+    const orchestratorPermissions = document.agents.orchestrator.permissions as Rule[]
+    expect(orchestratorPermissions.filter((rule) => rule.action === OBSERVABILITY_TOOL_PERMISSION)).toEqual([
+      { action: OBSERVABILITY_TOOL_PERMISSION, resource: "*", effect: "allow" },
+    ])
+
+    for (const id of ["planner", "explore", "implementer", "reviewer"]) {
+      const workerPermissions = document.agents[id].permissions as Rule[]
+      expect(workerPermissions.filter((rule) => rule.action === OBSERVABILITY_TOOL_PERMISSION)).toEqual([
+        { action: OBSERVABILITY_TOOL_PERMISSION, resource: "*", effect: "deny" },
+      ])
+    }
   })
 })
 

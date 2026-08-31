@@ -1,4 +1,6 @@
 import {
+  BUDGET_GUIDANCE,
+  BOUNDED_REVIEW_GUIDANCE,
   CHILD_TASK_CONTRACT,
   HANDOFF_FORMAT,
   REMOTE_ORCHESTRATION_GUIDANCE,
@@ -9,7 +11,7 @@ import type { OrchestratorOptions } from "./config.js"
 import { ROLE_GUIDANCE } from "./roles.js"
 
 export function buildOrchestratorSystem(options: OrchestratorOptions): string {
-  return [
+  const sections = [
     ROLE_GUIDANCE.orchestrator,
     "",
     "You are the conductor, not a worker of last resort. Understand the task, gather facts, then delegate focused work.",
@@ -17,7 +19,10 @@ export function buildOrchestratorSystem(options: OrchestratorOptions): string {
     orchestrationRules(options.max_parallel, options.require_review),
     "",
     STRUCTURED_HANDOFF_GUIDANCE,
-  ].join("\n")
+  ]
+  if (options.review.mode === "bounded") sections.push("", BOUNDED_REVIEW_GUIDANCE)
+  if (options.budget.mode === "stop-between-steps") sections.push("", BUDGET_GUIDANCE)
+  return sections.join("\n")
 }
 
 export function buildWorkerSystem(role: keyof typeof ROLE_GUIDANCE): string {
@@ -34,14 +39,17 @@ export function buildWorkerSystem(role: keyof typeof ROLE_GUIDANCE): string {
   ].join("\n")
 }
 
-export function buildCommandPrompt(name: string, argumentsText: string): string {
+export function buildCommandPrompt(name: string, argumentsText: string, options?: OrchestratorOptions): string {
   const args = argumentsText.trim() || "(no arguments)"
   const common = [
     "Use the configured orchestration roles and native OpenCode subagent delegation.",
     "Do not claim completion without evidence.",
     REMOTE_ORCHESTRATION_GUIDANCE,
     STRUCTURED_HANDOFF_GUIDANCE,
-  ].join("\n")
+    controlsGuidance(options),
+  ]
+    .filter((section) => section.trim().length > 0)
+    .join("\n")
 
   const prompts: Record<string, string> = {
     orchestrate: `Coordinate this task end to end. Start with repository facts, delegate independent work in parallel only with exact disjoint write scopes, integrate the results, and verify the final state directly.\n\nTask: ${args}`,
@@ -57,7 +65,7 @@ export function buildCommandPrompt(name: string, argumentsText: string): string 
   return `${prompts[name] ?? `Execute ${name}: ${args}`}\n\n${common}`
 }
 
-export function buildContinuationPrompt(objective: string, continuationCount: number): string {
+export function buildContinuationPrompt(objective: string, continuationCount: number, options?: OrchestratorOptions): string {
   return [
     "Continue the active orchestration goal.",
     `Objective: ${objective}`,
@@ -67,5 +75,16 @@ export function buildContinuationPrompt(objective: string, continuationCount: nu
     "Completion requires a direct verification result and an evidence string through orchestrator_goal_update.",
     REMOTE_ORCHESTRATION_GUIDANCE,
     STRUCTURED_HANDOFF_GUIDANCE,
-  ].join("\n")
+    controlsGuidance(options),
+  ]
+    .filter((section) => section.trim().length > 0)
+    .join("\n")
+}
+
+function controlsGuidance(options: OrchestratorOptions | undefined): string {
+  if (!options) return ""
+  const sections: string[] = []
+  if (options.review.mode === "bounded") sections.push(BOUNDED_REVIEW_GUIDANCE)
+  if (options.budget.mode === "stop-between-steps") sections.push(BUDGET_GUIDANCE)
+  return sections.join("\n")
 }

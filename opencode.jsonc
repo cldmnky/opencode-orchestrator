@@ -28,6 +28,24 @@
           "enabled": true,
           "allow_mutations": true,
           "root": "/private/tmp/opencode-orchestrator-worktrees"
+        },
+        // S3/V1 controls enabled for live verification of the plugin surface.
+        // trace snapshot: bounded metadata-only summaries persisted per session.
+        "trace": {
+          "mode": "snapshot"
+        },
+        // stop-between-steps with conservative step/retry limits only: no
+        // token/cost/wall-clock limits, so nothing fails closed before live
+        // usage snapshots are observed.
+        "budget": {
+          "mode": "stop-between-steps",
+          "max_steps": 1000,
+          "max_retries": 100
+        },
+        // Bounded maker-checker review with the default round ceiling.
+        "review": {
+          "mode": "bounded",
+          "max_rounds": 2
         }
       }
     }

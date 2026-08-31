@@ -6,6 +6,7 @@ import type { Context } from "@opencode-ai/plugin/promise/plugin"
 import { parseOptions } from "../../src/core/config.js"
 import type { CommandInvocationLike } from "../../src/opencode-v2/commands/index.js"
 import { runCommand } from "../../src/opencode-v2/commands/runtime.js"
+import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
 import { goalStorageKey, runStorageKey, stopStorageKey } from "../../src/opencode-v2/goal/state.js"
 
 describe("runtime commands", () => {
@@ -131,6 +132,30 @@ describe("runtime commands", () => {
 
     expect(fixture.values.has(goalKey)).toBe(false)
     expect(fixture.values.has(stopKey)).toBe(false)
+  })
+
+  test("a blocked dispatch gate stops a slash command before any prompt or plan run", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    mkdirSync(join(directory, ".orchestrator", "plans"), { recursive: true })
+    writeFileSync(join(directory, ".orchestrator", "plans", "release.md"), "# Release\n\n- Verify the build\n")
+    const fixture = runtimeFixture(directory)
+    const switches: string[] = []
+    fixture.session.switchAgent = async () => void switches.push("agent")
+    const gate: DispatchGate = {
+      allowDispatch: async () => ({
+        allow: false,
+        reason: "stop-between-steps: max_steps exceeded (observed 12, configured 10)",
+        evaluation: { version: 1, mode: "stop-between-steps", verdict: "exceeded", limits: [] },
+      }),
+    }
+
+    await runCommand(fixture.context, parseOptions({}), "run-plan", invocation("release"), undefined, gate)
+
+    expect(fixture.prompts).toHaveLength(0)
+    expect(fixture.statuses[0]).toContain("Dispatch blocked by configured controls")
+    expect(fixture.values.has(runStorageKey(fixture.context.location, "session"))).toBe(false)
+    // The blocked command must not have activated the orchestrator either.
+    expect(switches).toEqual([])
   })
 
   test("rebuilds the prompt without explicit undefined attachments", async () => {

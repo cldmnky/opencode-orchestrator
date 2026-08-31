@@ -5,6 +5,7 @@ import type { Model } from "@opencode-ai/schema/model"
 import type { CommandName, CommandInvocationLike } from "./index.js"
 import { commandDefinitions } from "./index.js"
 import { buildCommandPrompt } from "../../core/prompts.js"
+import type { DispatchGate } from "../observability/runtime.js"
 import { redact } from "../process/redact.js"
 import {
   goalStorageKey,
@@ -30,6 +31,7 @@ export async function runCommand(
   name: CommandName,
   input: CommandInvocationLike,
   orchestratorModel: ModelRefLike | undefined,
+  gate?: DispatchGate,
 ): Promise<void> {
   const args = input.prompt.text.trim()
   const spec = commandDefinitions(options).find((item) => item.name === name)
@@ -53,6 +55,16 @@ export async function runCommand(
     return
   }
 
+  // stop-between-steps budget checks run before any plan run is activated or
+  // any prompt is delivered, so a blocked dispatch never starts new work.
+  if (gate) {
+    const decision = await gate.allowDispatch(input.sessionID, "command")
+    if (!decision.allow) {
+      await emitStatus(context, input.sessionID, `Dispatch blocked by configured controls: ${decision.reason}`)
+      return
+    }
+  }
+
   const planSelection = name === "run-plan" ? await startPlanRun(context, input.sessionID, args) : undefined
   if (name === "run-plan" && !planSelection) return
   const validatedArguments = name === "restructure"
@@ -68,7 +80,7 @@ export async function runCommand(
     const commandArguments = planSelection ? `${planSelection.relativePath}\n\nValidated plan:\n${planSelection.content}` : validatedArguments
     await context.session.prompt({
       sessionID: input.sessionID,
-      text: buildCommandPrompt(name, commandArguments),
+      text: buildCommandPrompt(name, commandArguments, options),
       delivery: input.delivery,
       // Rebuild the prompt instead of spreading input.prompt: the native command
       // invocation carries explicit undefined arrays for files/agents/skills, which

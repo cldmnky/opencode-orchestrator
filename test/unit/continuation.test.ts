@@ -9,6 +9,7 @@ import {
   type StorageLike,
 } from "../../src/opencode-v2/goal/state.js"
 import { startGoalContinuation } from "../../src/opencode-v2/goal/continuation.js"
+import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
 
 describe("goal continuation", () => {
   test("deduplicates idle events, applies the ceiling, and closes the iterator", async () => {
@@ -333,6 +334,108 @@ describe("goal continuation", () => {
     stream.push({ id: "idle-after-delete", type: "session.idle", data: { sessionID: "session" } })
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(prompts).toHaveLength(0)
+    stop()
+  })
+
+  test("does not admit a gate-blocked continuation and does not burn a reservation", async () => {
+    const location = { directory: "/workspace", project: { id: "project-gate-block" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const gate: DispatchGate = {
+      allowDispatch: async () => ({
+        allow: false,
+        reason: "stop-between-steps: budget exceeded",
+        evaluation: { version: 1, mode: "stop-between-steps", verdict: "exceeded", limits: [] },
+      }),
+    }
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+      gate,
+    )
+
+    stream.push({ id: "idle-gate-block", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(prompts).toHaveLength(0)
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(0)
+    stop()
+  })
+
+  test("skips delivery when the gate closes between reservation and delivery", async () => {
+    const location = { directory: "/workspace", project: { id: "project-gate-delivery" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    let calls = 0
+    const gate: DispatchGate = {
+      allowDispatch: async () => {
+        calls += 1
+        const allow = calls === 1
+        return {
+          allow,
+          reason: allow ? undefined : "review circuit is open",
+          evaluation: { version: 1, mode: "advisory", verdict: "within", limits: [] },
+        }
+      },
+    }
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+      gate,
+    )
+
+    stream.push({ id: "idle-gate-delivery", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // The reservation advanced, but the delivery re-check stopped the prompt.
+    expect(prompts).toHaveLength(0)
+    expect(calls).toBe(2)
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(1)
+    stop()
+  })
+
+  test("auto-continuation prompts include bounded-review and budget guidance only when enabled", async () => {
+    const location = { directory: "/workspace", project: { id: "project-guidance" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const options = parseOptions({
+      review: { mode: "bounded", max_rounds: 3 },
+      budget: { mode: "stop-between-steps", max_steps: 5 },
+    })
+    const stop = startGoalContinuation(fixture(location, values, prompts, stream), options)
+
+    stream.push({ id: "idle-guidance", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 1)
+    expect(prompts[0]?.text).toContain("Bounded review mode is configured")
+    expect(prompts[0]?.text).toContain("orchestrator_review_transition")
+    expect(prompts[0]?.text).toContain("stop-between-steps budget mode is configured")
+    expect(prompts[0]?.text).toContain("in-flight provider and tool calls are never interrupted")
+    expect(prompts[0]?.text).toContain("not an automatic completion gate")
+    stop()
+  })
+
+  test("default auto-continuation prompts carry no review or budget guidance", async () => {
+    const location = { directory: "/workspace", project: { id: "project-guidance-default" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0 } }),
+    )
+
+    stream.push({ id: "idle-guidance-default", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 1)
+    expect(prompts[0]?.text).not.toContain("Bounded review mode is configured")
+    expect(prompts[0]?.text).not.toContain("orchestrator_review_transition")
+    expect(prompts[0]?.text).not.toContain("stop-between-steps budget mode is configured")
     stop()
   })
 

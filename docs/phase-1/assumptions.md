@@ -28,6 +28,21 @@
 > `opencode2 api get /api/plugin` probe did not list this plugin and the service was not restarted),
 > while the final independent aggregate review passed with no blocking or major findings.
 
+> **Added 2026-08-30 by feat/s3-v1-controls.** This note supplements, but does not rewrite, the
+> historical ledger above or the issue #10 note. The branch added **opt-in bounded S3/V1
+> controls** (`src/opencode-v2/observability/{budget,trace,review,runtime,tools}.ts`,
+> `docs/phase-1/s3-v1-controls.md`): strict defaulted config (`trace off`, `budget advisory`,
+> `review prompt`), metadata-only bounded trace summaries (usage snapshots replace, missing
+> coverage is unknown/never zero), deterministic `within|exceeded|unknown` budget evaluation
+> (unknown token/cost fails closed **only** for `stop-between-steps` checks), a separate
+> version-1 review schema with fixed transitions/terminal breaker, one bounded current record
+> per session under `withSessionLock` (no CAS/cross-process guarantee), and conditional
+> orchestrator-only tools. New rows **A13** and **A14** record the statuses. None of this changes
+> the A1–A12 statuses, and no backlog command was executed. Full suite on the branch:
+> `bun run typecheck` passed, `bun test` was **524 pass / 1 skip / 0 fail** (525 tests across
+> 20 files), `bun run build` passed all five bundles, and the built `dist/index.js` export sweep
+> for the S3/V1 pure APIs passed. The shared-service live-reload smoke remains **inconclusive**.
+
 ## Status vocabulary
 
 | Status | Meaning |
@@ -53,6 +68,8 @@
 | A10 | Source reliability | Unverified | `docs/orchestrator-improvements-plan.md:1106-1107` (vendor articles, community repositories, secondary benchmark claims, deprecated packages, closed PRs); `docs/orchestrator-improvements-plan.md:15-16` (web sources "directional evidence, not automatically authoritative"); `docs/orchestrator-improvements-plan.md:1127` (research-only draft, no verification commands run) | The plan itself labels all external evidence directional; issue/PR references (e.g., #20849) are proposals, not contracts; no phase-1 run has validated them | Which external claims survive independent validation against pinned docs/API; which sources are deprecated, closed, or stale | Re-validate each cited external source against the pinned declarations and live docs; drop deprecated/closed sources; annotate remaining claims with their provenance |
 | A11 | GitHub durability | Verified (negative claim) | `src/opencode-v2/gh/tools.ts:20-40` (docstring: "`storage` and `location` are accepted for the stage contract but not yet used; durable GitHub records are a later stage"); `src/opencode-v2/gh/client.ts:7-19` (all access via `gh` CLI, fixed endpoint templates, validated typed evidence only); **issue #10**: per-invocation `evidence` records (`src/opencode-v2/orchestration/evidence.ts`) are returned to the model as payload metadata and are never written to storage (`src/opencode-v2/gh/tools.ts`, `src/opencode-v2/worktree/tools.ts`); `docs/orchestrator-improvements-plan.md:1107,126` | The plugin does **not** persist GitHub operation records or evidence receipts: tool results are validated in-memory evidence (`id`/`number`/`html_url` + typed `evidence` metadata) returned to the model, and `storage`/`location` are accepted but unused. This verifies the negative claim only — it is not evidence of any positive durable-support capability | The design of the later-stage durable record storage (key scheme, retention, crash consistency) | Verify no `gh`-related or evidence-ledger record keys exist in storage; when the later stage lands, verify durable records exist under a defined key and re-open A11 |
 | A12 | Isolation/security separation | Partially verified | `src/core/policy.ts:48-51` (secret-handling rules), `:53-57` (prompt rules advisory, no filesystem isolation), `:59-62` (per-session worktree ownership only); `src/cli/doctor.ts:149-152`; worktree implementation `src/opencode-v2/worktree/git.ts` (shell off, fixed subcommand allowlist, bounded output — see `docs/orchestrator-improvements-plan.md:113`); `src/opencode-v2/gh/tools.ts:26-28` (shared `orchestrator_gh` permission action + runtime agent check); `src/core/policy.ts:60-61` (worktree records durable, session-scoped) | The code separates the properties: permission action, runtime agent check, redaction layer, prompt guidance, and per-session worktree bookkeeping are distinct mechanisms; prompt rules are explicitly advisory for filesystem isolation | OS-level containment (none implemented); behavior against a hostile or compromised session; whether permission visibility matches actual enforcement on a live host | Attempt cross-session access to another session's managed worktree; verify permission enforcement and agent-check behavior on a live host |
+| A13 | S3 trace/budget semantics | Partially verified | `src/core/config.ts` (strict blocks: `trace off|memory|snapshot`, `budget advisory|stop-between-steps` + nullable finite limits, `review prompt|bounded`); `src/opencode-v2/observability/budget.ts` (deterministic `within|exceeded|unknown`; unknown token/cost fails closed only for `stop-between-steps`); `src/opencode-v2/observability/trace.ts` (versioned bounded metadata summaries, snapshots replace, bounded tool/pending collections, no call IDs persisted); `src/opencode-v2/observability/runtime.ts` (pinned `execute.before/after` hooks + typed events only, `session.usage.recorded` ignored, event failures never break orchestration, cleanup awaits consumption); `docs/phase-1/s3-v1-controls.md` | Record semantics are established by source/test (`test/unit/observability.test.ts`): metadata only, unknown ≠ zero, no double counting, gate only at plugin-owned next dispatches, `advisory` never blocks, `session.interrupt` never called | Whether the live host actually delivers `session.usage.updated` snapshots (and their exact token/cost aggregation); whether shared-service event delivery matches the fake-stream tests; durability of the snapshot record across server restarts | Probe a live shared-service session with trace+stop-between-steps enabled and compare observed events with the unit-level expectations; restart the service and confirm the snapshot record survives |
+| A14 | V1 review semantics | Partially verified | `src/opencode-v2/observability/review.ts` (separate version-1 schema: states/actions/reason codes, deterministic transitions, maker/checker ≠ and role constraints, terminal breaker); `src/opencode-v2/observability/tools.ts` (conditional orchestrator-only `review_get`/`review_transition`, shared `orchestrator_observability` permission, limitations in output); `src/opencode-v2/goal/continuation.ts` + `src/opencode-v2/commands/runtime.ts` (gate checked before reservation and delivery); `test/unit/review.test.ts`, `test/unit/observability.test.ts` | The transition table, bounded one-record storage under `review/v1/<project>/<session>` with `withSessionLock`, and the blocker/tripped breaker for goal auto-continuation are established by source/tests; D2 `reviewState` and the admission machine are unchanged by source inspection | Whether any live host hook or workflow actually gates completion (it should not — the tools are callable/advisory); behavior when a different process writes the same session key (no cross-process guarantee) | Run a live bounded-review flow end to end in a shared-service session and confirm no automatic gate fires; attempt a second process write to the same session key and record the interleave |
 
 ## Evidence index (paths verified to exist)
 
@@ -73,6 +90,10 @@
 - `src/core/config.ts:51-52` — `max_parallel` / `require_review` defaults
 - `src/opencode-v2/plugin.ts:90,96` — parallelism ceiling and no-atomic-isolation prompt text; `:75-80` — orchestration tool wiring; `:97` — validation-tools context text
 - `src/core/prompts.ts:16` — policy embedding
+- `src/opencode-v2/observability/{budget,trace,review,runtime,tools}.ts` — S3/V1 opt-in implementation (feat/s3-v1-controls); `docs/phase-1/s3-v1-controls.md` — design/implementation record
+- `src/opencode-v2/goal/continuation.ts` and `src/opencode-v2/commands/runtime.ts` — dispatch gate checks (before reservation and before delivery) wired from `src/opencode-v2/plugin.ts`
+- `test/unit/observability.test.ts`, `test/unit/review.test.ts` — S3/V1 module tests (feat/s3-v1-controls), part of the full 524-pass/0-fail suite on the branch
+- `src/core/permissions.ts` — `OBSERVABILITY_TOOL_PERMISSION` (`orchestrator_observability`) included in `orchestratorOnlyPermissionRules`
 - `package.json:37,45` — pinned `@opencode-ai/plugin@0.0.0-beta-18684`, `@opencode-ai/sdk@0.0.0-dev-18683`
 - `node_modules/@opencode-ai/plugin/dist/tui/context.d.ts:40` — pinned TUI context `Data.session` (`cost`, `status`); no statistics surface in the pinned Promise `SessionDomain` (grep, no matches)
 - `AGENTS.md` — "OpenCode V2 Contract" (beta/experimental; README boundary stale)
@@ -100,6 +121,8 @@
 - **A10** — re-validate each external source against pinned docs; drop deprecated/closed sources.
 - **A11** — confirm no `gh`-related or evidence-ledger record keys exist in storage (negative claim re-check); re-open when the durable-record stage lands.
 - **A12** — cross-session worktree access attempt; permission/agent-check verification on live host.
+- **A13** — live shared-service session with trace + stop-between-steps enabled: observe actual `session.usage.updated` delivery, confirm gate blocks only at plugin-owned dispatches, restart the service and confirm snapshot record survival.
+- **A14** — run a live bounded-review flow end to end and confirm no automatic gate fires; attempt a second-process write to the same review key and record the interleave (no cross-process guarantee).
 
 ### Future implementation (post-phase-1 changes; listed here per repository requirements)
 

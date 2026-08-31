@@ -3,21 +3,23 @@ import type { Context } from "@opencode-ai/plugin/promise/plugin"
 import {
   GH_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
+  OBSERVABILITY_TOOL_PERMISSION,
   ORCHESTRATION_TOOL_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
 } from "../../src/core/permissions.js"
 import { orchestratorPlugin } from "../../src/index.js"
 
 describe("server plugin contract", () => {
-  test("registers runtime surfaces, dispatches a command, and cleans up", async () => {
-    type FakeAgent = {
-      id: string
-      mode: "primary" | "subagent"
-      model?: { id: string; providerID: string }
-      system?: string
-      description?: string
-    }
-    const agents = new Map<string, FakeAgent>(
+  type FakeAgent = {
+    id: string
+    mode: "primary" | "subagent"
+    model?: { id: string; providerID: string }
+    system?: string
+    description?: string
+  }
+
+  function seedAgents(): Map<string, FakeAgent> {
+    return new Map<string, FakeAgent>(
       [
         ["orchestrator", "primary"],
         ["planner", "subagent"],
@@ -33,6 +35,10 @@ describe("server plugin contract", () => {
         },
       ]),
     )
+  }
+
+  test("registers runtime surfaces, dispatches a command, and cleans up", async () => {
+    const agents = seedAgents()
     const commands: Array<{ name: string; execute(input: any): Promise<void> }> = []
     const tools: Array<{
       name: string
@@ -86,7 +92,7 @@ describe("server plugin contract", () => {
           callback({ add: (tool) => tools.push(tool) })
           return registration("tool")
         },
-        hook: async () => registration("hook"),
+        hook: async (name: string) => registration(name),
       },
       event: {
         subscribe: () => stream,
@@ -201,9 +207,117 @@ describe("server plugin contract", () => {
     expect(prompts[0].delivery).toBe("queue")
 
     await cleanup?.()
-    expect(disposed).toEqual(["hook", "session-hook", "tool", "command", "agent"])
+    expect(disposed).toEqual(["execute.after", "session-hook", "tool", "command", "agent"])
     // The worktree event sync registered its own real dispose, which closed
     // the subscribed event stream.
+    expect(stream.closed).toBe(true)
+  })
+
+  test("enabled S3/V1 modes add their tools, gates, and hooks without breaking the default contract", async () => {
+    const agents = seedAgents()
+    const commands: Array<{ name: string; execute(input: any): Promise<void> }> = []
+    const tools: Array<{
+      name: string
+      options?: { namespace?: string; permission?: string }
+      execute(input: unknown, context: any): Promise<any>
+    }> = []
+    const disposed: string[] = []
+    const switches: string[] = []
+    const prompts: any[] = []
+    const stream = eventStream()
+    let contextHook: ((event: any) => void) | undefined
+    const registration = (name: string) => ({
+      dispose: async () => {
+        disposed.push(name)
+      },
+    })
+    const draft = {
+      list: () => [...agents.values()],
+      get: (id: string) => agents.get(id),
+      update: (id: string, update: (agent: any) => void) => {
+        const agent = agents.get(id)
+        if (agent) update(agent)
+      },
+    }
+    const storage = new Map<string, unknown>()
+    const context = {
+      options: {
+        goal: { auto_continue: false },
+        trace: { mode: "snapshot" },
+        budget: { mode: "stop-between-steps", max_steps: 5, max_tokens: 1000 },
+        review: { mode: "bounded", max_rounds: 2 },
+      },
+      location: { directory: "/workspace", project: { id: "project" } },
+      agent: {
+        list: async () => [...agents.values()],
+        get: async ({ agentID }: { agentID: string }) => agents.get(agentID),
+        transform: async (callback: (draft: any) => void) => {
+          callback(draft)
+          return registration("agent")
+        },
+      },
+      command: {
+        list: async () => [],
+        transform: async (callback: (draft: { add(definition: any): void }) => void) => {
+          callback({ add: (definition) => commands.push(definition) })
+          return registration("command")
+        },
+      },
+      tool: {
+        transform: async (callback: (draft: { add(tool: any): void }) => void) => {
+          callback({ add: (tool) => tools.push(tool) })
+          return registration("tool")
+        },
+        hook: async (name: string) => registration(name),
+      },
+      event: {
+        subscribe: () => stream,
+      },
+      storage: {
+        get: async (key: string) => storage.get(key),
+        set: async (key: string, value: unknown) => void storage.set(key, value),
+        remove: async (key: string) => void storage.delete(key),
+      },
+      session: {
+        hook: async (name: string, callback: (event: any) => void) => {
+          if (name === "context") contextHook = callback
+          return registration("session-hook")
+        },
+        switchAgent: async ({ agent }: { agent: string }) => void switches.push(`agent:${agent}`),
+        switchModel: async ({ model }: { model: { id: string } }) => void switches.push(`model:${model.id}`),
+        prompt: async (input: unknown) => void prompts.push(input),
+      },
+    } as unknown as Context
+
+    const cleanup = await orchestratorPlugin.setup(context)
+
+    // The existing families are unchanged and the conditional tools are added.
+    for (const name of [
+      "orchestrator_goal_get",
+      "orchestrator_handoff_validate",
+      "orchestrator_admission_transition",
+      "orchestrator_observability_get",
+      "orchestrator_review_get",
+      "orchestrator_review_transition",
+    ]) {
+      expect(tools.some((tool) => `${tool.options?.namespace}_${tool.name}` === name)).toBe(true)
+    }
+    expect(tools.filter((tool) => tool.options?.permission === OBSERVABILITY_TOOL_PERMISSION).map((tool) => tool.name).sort()).toEqual([
+      "observability_get",
+      "review_get",
+      "review_transition",
+    ])
+
+    // The orchestrator system prompt embeds the bounded flow guidance.
+    expect(agents.get("orchestrator")?.system).toContain("Bounded review mode is configured")
+    expect(agents.get("orchestrator")?.system).toContain("stop-between-steps budget mode is configured")
+
+    await cleanup?.()
+    // Disposal order is reverse registration order: the worktree sync (inline
+    // dispose, no named registration), the plugin's execute.after warn hook,
+    // the session hook, the tool/command/agent transforms, and the
+    // observability runtime last (which disposes its before/after hooks).
+    expect(disposed).toEqual(["execute.after", "session-hook", "tool", "command", "agent", "execute.before", "execute.after"])
     expect(stream.closed).toBe(true)
   })
 })

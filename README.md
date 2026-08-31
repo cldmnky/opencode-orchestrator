@@ -59,11 +59,11 @@ git clone https://github.com/cldmnky/opencode-orchestrator
 cd opencode-orchestrator
 bun install
 bun run typecheck && bun test && bun run build
-npm pack --pack-destination "$TMPDIR"   # creates opencode-v2-agent-orchestrator-0.1.8.tgz
+npm pack --pack-destination "$TMPDIR"   # creates opencode-v2-agent-orchestrator-0.1.9.tgz
 
 # 2. Install into your project
 cd ../your-project
-npm install --save-dev "$TMPDIR/opencode-v2-agent-orchestrator-0.1.8.tgz"
+npm install --save-dev "$TMPDIR/opencode-v2-agent-orchestrator-0.1.9.tgz"
 
 # 3. Add the plugin + agents to your opencode.jsonc
 ./node_modules/.bin/opencode-v2-agent-orchestrator install \

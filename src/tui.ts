@@ -9,7 +9,6 @@ export const tuiPlugin = {
   async setup(context: Context) {
     const options = parseOptions(context.options)
     const location = context.location ?? context.data.location.default()
-    await context.data.location.command.sync(location)
     const stopFailureNotice = context.data.on("session.execution.failed", (event) => {
       const sessionID = event.data.sessionID
       if (activeSessionID(context) !== sessionID) return
@@ -36,6 +35,14 @@ export const tuiPlugin = {
           .map((spec) => tuiCommand(context, spec.name, spec.description)),
       }
     })
+
+    try {
+      await context.data.location.command.sync(location)
+    } catch (error) {
+      stopFailureNotice()
+      stopCommandUpdates()
+      throw error
+    }
 
     return () => {
       stopFailureNotice()

@@ -87,7 +87,7 @@ export function applyAgentTransform(draft: AgentDraftLike, options: Orchestrator
     if (!draft.get(id)) continue
     draft.update(id, (agent) => {
       agent.description = appendOnce(agent.description, roleDescription(role))
-      agent.system = appendOnce(agent.system, buildWorkerSystem(role))
+      agent.system = appendOnce(agent.system, buildWorkerSystem(role, options))
       // Fail closed by default: workers get the goal tools and the
       // orchestrator-only feature tools denied unless an exact user-authored
       // rule for the action already exists. The installer appends the deny

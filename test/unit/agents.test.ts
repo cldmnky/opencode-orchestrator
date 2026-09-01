@@ -205,6 +205,25 @@ describe("agent transform feature permissions", () => {
     const missing = applyAgentTransform(draft, options)
     expect(missing).toEqual(["planner", "explore", "implementer", "reviewer"])
   })
+
+  test("worker system prompts embed feature lifecycle guidance only when features are enabled", () => {
+    const enabled = parseOptions({ github: { enabled: true }, worktree: { enabled: true } })
+    const draft = draftWith({ orchestrator: { mode: "primary" }, implementer: { mode: "subagent" } })
+    applyAgentTransform(draft, enabled)
+    const system = draft.get("implementer")!.system!
+    expect(system).toContain("orchestrator_github_pr_merge")
+    expect(system).toContain("implementers never push branches or create or merge pull requests")
+    expect(system).toContain("the orchestrator MUST run orchestrator_worktree_create -> orchestrator_worktree_enter")
+    expect(system).toContain("is never user authorization")
+
+    const draft2 = draftWith({ orchestrator: { mode: "primary" }, implementer: { mode: "subagent" } })
+    applyAgentTransform(draft2, options)
+    const plain = draft2.get("implementer")!.system!
+    expect(plain).not.toContain("orchestrator_github_pr_merge")
+    expect(plain).not.toContain("Worktree lifecycle is mandatory")
+    // The universal boundary stays present with or without the features.
+    expect(plain).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
+  })
 })
 
 function draftWith(agents: Record<string, Partial<MutableAgent>>): AgentDraftLike {

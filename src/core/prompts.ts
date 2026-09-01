@@ -3,9 +3,12 @@ import {
   BOUNDED_REVIEW_GUIDANCE,
   CHILD_TASK_CONTRACT,
   CLARIFY_GUIDANCE,
+  GITHUB_LIFECYCLE_GUIDANCE,
   HANDOFF_FORMAT,
   REMOTE_ORCHESTRATION_GUIDANCE,
   STRUCTURED_HANDOFF_GUIDANCE,
+  WORKTREE_LIFECYCLE_GUIDANCE,
+  orchestrationCapabilities,
   orchestrationRules,
 } from "./policy.js"
 import type { OrchestratorOptions } from "./config.js"
@@ -18,7 +21,7 @@ export function buildOrchestratorSystem(options: OrchestratorOptions): string {
     "",
     "You are the conductor, not a worker of last resort. Understand the task, gather facts, then delegate focused work.",
     `Role map: planning=${options.roles.planning}; research=${options.roles.research}; implementation=${options.roles.implementation}; review=${options.roles.review}.`,
-    orchestrationRules(options.max_parallel, options.require_review),
+    orchestrationRules(options.max_parallel, options.require_review, orchestrationCapabilities(options)),
     "",
     STRUCTURED_HANDOFF_GUIDANCE,
   ]
@@ -28,18 +31,21 @@ export function buildOrchestratorSystem(options: OrchestratorOptions): string {
   return sections.join("\n")
 }
 
-export function buildWorkerSystem(role: keyof typeof ROLE_GUIDANCE): string {
+export function buildWorkerSystem(role: keyof typeof ROLE_GUIDANCE, options?: OrchestratorOptions): string {
   return [
     ROLE_GUIDANCE[role],
     "",
     CHILD_TASK_CONTRACT,
     REMOTE_ORCHESTRATION_GUIDANCE,
+    featureGuidance(options),
     "",
     "Worker handoff format:",
     HANDOFF_FORMAT,
     "",
     STRUCTURED_HANDOFF_GUIDANCE,
-  ].join("\n")
+  ]
+    .filter((section) => section.length > 0)
+    .join("\n")
 }
 
 export function buildCommandPrompt(name: string, argumentsText: string, options?: OrchestratorOptions): string {
@@ -48,6 +54,7 @@ export function buildCommandPrompt(name: string, argumentsText: string, options?
     "Use the configured orchestration roles and native OpenCode subagent delegation.",
     "Do not claim completion without evidence.",
     REMOTE_ORCHESTRATION_GUIDANCE,
+    featureGuidance(options),
     STRUCTURED_HANDOFF_GUIDANCE,
     controlsGuidance(options),
   ]
@@ -82,11 +89,27 @@ export function buildContinuationPrompt(objective: string, continuationCount: nu
     "Read and update the goal with the namespaced tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update.",
     "Completion requires a direct verification result and an evidence string through orchestrator_goal_update.",
     REMOTE_ORCHESTRATION_GUIDANCE,
+    featureGuidance(options),
     STRUCTURED_HANDOFF_GUIDANCE,
     controlsGuidance(options),
   ]
     .filter((section) => section.trim().length > 0)
     .join("\n")
+}
+
+/**
+ * Feature-specific lifecycle guidance, embedded only for enabled features:
+ * the worktree lifecycle text appears only when `worktree.enabled` and the
+ * GitHub lifecycle text only when `github.enabled`. The universal guidance
+ * (catalog preflight, secrets, the no-atomic-child-isolation boundary) is
+ * already embedded separately in every prompt kind.
+ */
+function featureGuidance(options: OrchestratorOptions | undefined): string {
+  if (!options) return ""
+  const sections: string[] = []
+  if (options.worktree.enabled) sections.push(WORKTREE_LIFECYCLE_GUIDANCE)
+  if (options.github.enabled) sections.push(GITHUB_LIFECYCLE_GUIDANCE)
+  return sections.join("\n")
 }
 
 function controlsGuidance(options: OrchestratorOptions | undefined): string {

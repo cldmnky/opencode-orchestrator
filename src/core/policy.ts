@@ -62,11 +62,48 @@ export const MANAGED_WORKTREE_GUIDANCE = [
   "That managed ownership covers the current session only; it is not atomic child isolation, and parallel children still share the parent filesystem.",
 ].join("\n")
 
+/**
+ * Feature-specific worktree lifecycle guidance, embedded only when
+ * `worktree.enabled`. Makes create -> enter -> implementer delegation a
+ * mandatory orchestrator precondition and keeps the whole lifecycle
+ * orchestrator-owned, with truthful stop-and-ask behavior instead of falling
+ * back to delegating implementation from the main checkout.
+ */
+export const WORKTREE_LIFECYCLE_GUIDANCE = [
+  MANAGED_WORKTREE_GUIDANCE,
+  "Worktree lifecycle is mandatory for implementation when worktree support is enabled: before delegating to the implementer, the orchestrator MUST run orchestrator_worktree_create -> orchestrator_worktree_enter, and only the orchestrator creates, enters, pushes, and cleans up managed worktrees.",
+  "When the worktree tools, a whitelisted worktree.root, worktree.allow_mutations, a ready tracked worktree, or a successful orchestrator_worktree_enter result are unavailable, stop and ask the user; never delegate implementation from the main checkout instead.",
+].join("\n")
+
+/**
+ * Feature-specific GitHub lifecycle guidance, embedded only when
+ * `github.enabled`. The orchestrator owns the branch push -> PR create ->
+ * merge lifecycle; implementers never push or create/merge PRs, and a merge
+ * happens only after a separate explicit user request plus a fresh view, the
+ * exact expected head SHA, a literal `confirm: true`, and post-merge evidence.
+ */
+export const GITHUB_LIFECYCLE_GUIDANCE = [
+  "GitHub lifecycle is orchestrator-owned: preflight with orchestrator_github_capabilities and use only the tools the host actually exposes; implementers never push branches or create or merge pull requests.",
+  "The orchestrator pushes the worktree branch (orchestrator_worktree_push) and creates the pull request (orchestrator_github_pr_create) only after validated maker/checker review and direct verification of the branch, changes, and commits.",
+  "Merge a pull request only after a separate explicit user request and confirmation: run orchestrator_github_pr_merge with a fresh orchestrator_github_pr_view result and the exact expected head SHA, with a literal confirm: true, then verify merged:true again with a fresh orchestrator_github_pr_view. A confirm: true flag or a checker's approval is never user authorization.",
+  "Stale, refused, or failed merges (expected-head SHA mismatch, branch protection, required checks or reviews, conflicts, permission failures, merge queues, merged:false, or a failed post-merge view) stop truthfully; never retry, fall back, or report a merge without direct evidence.",
+].join("\n")
+
+/**
+ * Capability flags that decide which feature-specific lifecycle guidance a
+ * prompt embeds. Universal guidance (catalog preflight, secrets, the truthful
+ * no-atomic-child-isolation boundary) is always present; feature lifecycle
+ * text appears only for enabled features.
+ */
+export type OrchestrationCapabilities = {
+  worktree?: boolean
+  github?: boolean
+}
+
 export const REMOTE_ORCHESTRATION_GUIDANCE = [
   TOOL_AVAILABILITY_GUIDANCE,
   SECRET_HANDLING_GUIDANCE,
   WORKTREE_BOUNDARY_GUIDANCE,
-  MANAGED_WORKTREE_GUIDANCE,
 ].join("\n")
 
 /**
@@ -119,7 +156,11 @@ export const STRUCTURED_HANDOFF_GUIDANCE = [
   "These validation tools are callable/advisory, not automatic hooks: the orchestrator invokes them explicitly, results are advisory (D4) or deterministic fail-closed checks (D2/admission), and no automatic completion gate is enforced.",
 ].join("\n")
 
-export function orchestrationRules(maxParallel: number, requireReview: boolean): string {
+export function orchestrationRules(
+  maxParallel: number,
+  requireReview: boolean,
+  capabilities: OrchestrationCapabilities = {},
+): string {
   return [
     `At most ${maxParallel} independent child tasks may run at once.`,
     "Route by the configured semantic role map, never by model name.",
@@ -132,7 +173,8 @@ export function orchestrationRules(maxParallel: number, requireReview: boolean):
     TOOL_AVAILABILITY_GUIDANCE,
     SECRET_HANDLING_GUIDANCE,
     WORKTREE_BOUNDARY_GUIDANCE,
-    MANAGED_WORKTREE_GUIDANCE,
+    ...(capabilities.worktree ? [WORKTREE_LIFECYCLE_GUIDANCE] : []),
+    ...(capabilities.github ? [GITHUB_LIFECYCLE_GUIDANCE] : []),
     "Start independent read-only work in parallel/background mode.",
     "Record the original branch, HEAD, changed files, commits, and verification in the task ledger when those facts are available.",
     "Do not claim automated GitHub issue or pull request coordination unless the user explicitly performs and verifies those steps.",
@@ -144,6 +186,20 @@ export function orchestrationRules(maxParallel: number, requireReview: boolean):
     "Return each worker result using the handoff format below.",
     HANDOFF_FORMAT,
   ].join("\n")
+}
+
+/**
+ * Feature capabilities for the configured options: which feature-specific
+ * lifecycle guidance is embedded depends on `worktree.enabled` and
+ * `github.enabled`. The parameter is the structural slice of
+ * `OrchestratorOptions` so callers only need the flags, not the full options
+ * type.
+ */
+export function orchestrationCapabilities(options: {
+  worktree: { enabled: boolean }
+  github: { enabled: boolean }
+}): OrchestrationCapabilities {
+  return { worktree: options.worktree.enabled, github: options.github.enabled }
 }
 
 /**

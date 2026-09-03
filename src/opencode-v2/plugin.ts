@@ -22,25 +22,34 @@ export const orchestratorPlugin = (Plugin.define as any)({
     const options = parseOptions(ctx.options)
     const agentResponse = await ctx.agent.list()
     const agents = responseData<AgentInfoLike>(agentResponse)
-    const bootstrapIsEmpty = isEmptyResponse(agentResponse, agents)
     const agentIssues = validateAgentSet(agents, options)
-    if (!bootstrapIsEmpty && agentIssues.length > 0 && options.strict_agents) {
+    // Config-backed agents are materialized by a later built-in plugin during
+    // beta startup. On 187xx the early list was an empty `{data:[]}` envelope;
+    // on 18999 it is the built-in set (build/general/explore/...) without the
+    // configured roles yet. Either shape means "pending", never fatal: warn
+    // and finish via the `agent.updated` late setup instead of throwing.
+    const missingAgents = requiredAgentIDs(options).filter((id) => !agents.some((agent) => agent.id === id))
+    const pendingAgents = missingAgents.length > 0 || isEmptyResponse(agentResponse, agents)
+    if (pendingAgents && agentIssues.length > 0) {
+      console.warn(
+        `${RUNTIME_PLUGIN_ID} agent setup is pending (config-backed agents not yet materialized): ${agentIssues.join("; ")}`,
+      )
+    } else if (agentIssues.length > 0 && options.strict_agents) {
       throw new Error(
         `${RUNTIME_PLUGIN_ID} agent setup failed: ${agentIssues.join("; ")}. Run ${DISTRIBUTION_NAME} install.`,
       )
-    }
-    if (!bootstrapIsEmpty && agentIssues.length > 0) {
+    } else if (agentIssues.length > 0) {
       console.warn(`${RUNTIME_PLUGIN_ID} agent setup is partial: ${agentIssues.join("; ")}`)
     }
 
     const existingCommands = responseData<{ name: string }>(await ctx.command.list())
-    // Config-backed agents are loaded by a later built-in plugin during startup.
-    // An empty response is therefore not evidence that the configured roles are missing.
-    const semanticRoles = bootstrapIsEmpty
+    // Optimistic when pending: assume all semantic roles so commands register
+    // now; the late transform applies the system prompts once agents arrive.
+    const semanticRoles = pendingAgents
       ? new Set(["orchestrator", ...Object.keys(options.roles)])
       : availableRoles(agents, options)
     const registrations: Array<{ dispose(): Promise<void> }> = []
-    const lateAgentSetup = bootstrapIsEmpty ? startLateAgentSetup(ctx, options) : undefined
+    const lateAgentSetup = pendingAgents ? startLateAgentSetup(ctx, options) : undefined
 
     // S3/V1 observability runtime: started only when trace, stop-between-steps
     // budget, or bounded review is configured. Defaults keep the previous

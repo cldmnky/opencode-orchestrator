@@ -39,8 +39,8 @@ export const CHILD_TASK_CONTRACT = [
 // truth. Prompt generation embeds these constants verbatim so every prompt
 // kind states the same truthful policy without duplicating text.
 export const TOOL_AVAILABILITY_GUIDANCE = [
-  "Preflight: inspect the tool catalog the connected host actually exposes before using any GitHub tool; never infer availability from MCP server names or status.",
-  "Use only GitHub tools the host has already configured and exposed; never assume, register, or invent tools.",
+  "Preflight: inspect the tool catalog the connected host actually exposes — that is, only tools already visible in this session plus the plugin probes orchestrator_github_capabilities and orchestrator_worktree_status — before using any GitHub tool; never infer availability from MCP server names or status.",
+  "Use only GitHub tools the host has already configured and exposed; never assume, register, or invent tools (there is no tool named search; do not call search).",
   "For issue, branch, pull request, review, merge, or closure operations, require direct evidence from the tool result — the object, its identifier, and its URL — before reporting completion.",
   "If the connected host does not expose the tools needed for issue or pull request automation, stop and ask the user; do not silently claim the work, fall back to unverified steps, or fabricate results.",
 ].join("\n")

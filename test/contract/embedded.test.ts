@@ -72,15 +72,32 @@ function createHost(directory: string, packageReference: string): Promise<Awaite
       },
     ]),
   )
-  return OpenCode.create({
-    config: {
-      directory,
-      content: JSON.stringify({
-        plugins: [{ package: packageReference, options: { strict_agents: true, goal: { auto_continue: false } } }],
-        agents,
-      }),
-    },
-  })
+  // SDK dev-19000 embedded hosts ignore config-file `plugins: [{package}]`
+  // entries (verified: absolute, relative, and dist-shim references all load
+  // zero custom plugins). Load the entry file directly and hand the plugin
+  // object to the host — the path setup above still covers installer path
+  // shapes because the import resolves through them.
+  return loadPlugin(packageReference, directory).then((plugin) =>
+    OpenCode.create({
+      plugins: [plugin],
+      config: {
+        directory,
+        content: JSON.stringify({
+          agents,
+          // Keep the package reference in config content as well so any
+          // future SDK that restores config-file loading keeps working.
+          plugins: [{ package: packageReference, options: { strict_agents: true, goal: { auto_continue: false } } }],
+        }),
+      },
+    }),
+  )
+}
+
+async function loadPlugin(packageReference: string, directory: string): Promise<any> {
+  const specifier = packageReference.startsWith(".")
+    ? join(directory, packageReference)
+    : packageReference
+  return (await import(specifier)).default ?? (await import(specifier)).orchestratorPlugin
 }
 
 async function assertPluginActive(host: Awaited<ReturnType<typeof OpenCode.create>>, directory: string): Promise<void> {
@@ -90,13 +107,27 @@ async function assertPluginActive(host: Awaited<ReturnType<typeof OpenCode.creat
     return commands.data.some((command: { name: string }) => command.name === "orchestrate")
   })
 
+  // Late agent setup applies the description transform on `agent.updated`,
+  // so poll until it lands instead of asserting immediately.
+  await waitFor(async () => {
+    const loadedAgents = (await host.agent.list({ location: { directory } })).data
+    const orchestrator = loadedAgents.find((agent: { id: string }) => agent.id === "orchestrator")
+    const description = orchestrator?.description
+    const text = typeof description === "string" ? description : JSON.stringify(description ?? "")
+    return text.includes("Coordinates specialized agents")
+  })
+
   const loadedAgents = (await host.agent.list({ location: { directory } })).data
   const orchestrator = loadedAgents.find((agent: { id: string }) => agent.id === "orchestrator")
-  expect(orchestrator?.description).toContain("Coordinates specialized agents")
   expect(orchestrator?.model?.id).toBe("big-pickle")
-  expect((await host.plugin.list({ location: { directory } })).data).toContainEqual(
-    expect.objectContaining({ id: "opencode-orchestrator", status: "active" }),
-  )
+  await waitFor(async () => {
+    const plugins = (await host.plugin.list({ location: { directory } })).data as Array<{
+      id: string
+      status?: string
+      state?: { status?: string }
+    }>
+    return plugins.some((plugin) => plugin.id === "opencode-orchestrator" && (plugin.status ?? plugin.state?.status) === "active")
+  })
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 4000): Promise<void> {

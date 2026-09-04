@@ -1,5 +1,5 @@
 import { resolve } from "node:path"
-import { stat } from "node:fs/promises"
+import { realpath, stat } from "node:fs/promises"
 import {
   moveSessionAnchor,
   newSessionAnchor,
@@ -58,6 +58,8 @@ export type MoveSessionDeps = {
   location: { directory: string; workspaceID?: string; project: { id: string } }
   /** Injectable existence/directory probe; defaults to `stat`. */
   pathInfo?: (directory: string) => Promise<{ exists: boolean; isDirectory: boolean }>
+  /** Injectable bounded-delay hook for post-move session verification. */
+  wait?: (milliseconds: number) => Promise<void>
 }
 
 export type SessionInfoLike = {
@@ -77,6 +79,10 @@ export type MoveSessionInput = {
 export type MoveSessionFailure = { ok: false; reason: string }
 export type MoveSessionSuccess = { ok: true; session: SessionInfoLike; anchor: SessionAnchor }
 export type MoveSessionOutcome = MoveSessionSuccess | MoveSessionFailure
+
+/** One immediate read plus three bounded retries for a lagging session projection. */
+const POST_MOVE_VERIFICATION_ATTEMPTS = 4
+const POST_MOVE_VERIFICATION_DELAY_MS = 50
 
 export async function moveSessionToDirectory(deps: MoveSessionDeps, input: MoveSessionInput): Promise<MoveSessionOutcome> {
   const before = sessionInfo(await deps.session.get({ sessionID: input.sessionID }))
@@ -104,13 +110,9 @@ export async function moveSessionToDirectory(deps: MoveSessionDeps, input: MoveS
     return { ok: false, reason: `session move failed: ${redact(errorMessage(error))}` }
   }
 
-  const after = sessionInfo(await deps.session.get({ sessionID: input.sessionID }))
-  if (!after) return { ok: false, reason: "could not re-read the session after moving" }
-  if (after.id !== input.sessionID) return { ok: false, reason: `session move verification failed: session ID changed` }
-  const afterDirectory = typeof after.location?.directory === "string" ? after.location.directory : ""
-  if (resolve(afterDirectory) !== target) {
-    return { ok: false, reason: `session move verification failed: session is at ${redact(afterDirectory)}, expected ${redact(target)}` }
-  }
+  const verified = await verifyMovedSession(deps, input.sessionID, target)
+  if (!verified.ok) return verified
+  const after = verified.session
 
   const anchor = await relocateAnchor(deps, input.sessionID, {
     before,
@@ -119,6 +121,41 @@ export async function moveSessionToDirectory(deps: MoveSessionDeps, input: MoveS
     fallbackOrigin: { directory: baseDirectory, projectID: before.projectID ?? deps.location.project.id },
   })
   return { ok: true, session: after, anchor }
+}
+
+/**
+ * Session moves are asynchronous in the beta server: immediately after a
+ * successful `session.move`, a `session.get` can briefly expose the previous
+ * location. Retry only this read-after-write check, with a short fixed bound,
+ * before deciding the move failed. Canonical filesystem paths make equivalent
+ * aliases (such as `/tmp` and `/private/tmp` on macOS) compare equal.
+ */
+async function verifyMovedSession(
+  deps: MoveSessionDeps,
+  sessionID: string,
+  target: string,
+): Promise<{ ok: true; session: SessionInfoLike } | MoveSessionFailure> {
+  const expected = await canonicalDirectory(target)
+  let after: SessionInfoLike | undefined
+  let afterDirectory = ""
+
+  for (let attempt = 0; attempt < POST_MOVE_VERIFICATION_ATTEMPTS; attempt += 1) {
+    after = sessionInfo(await deps.session.get({ sessionID }))
+    afterDirectory = typeof after?.location?.directory === "string" ? after.location.directory : ""
+    const actual = afterDirectory ? await canonicalDirectory(afterDirectory) : ""
+    if (after?.id === sessionID && actual === expected) return { ok: true, session: after }
+
+    if (attempt < POST_MOVE_VERIFICATION_ATTEMPTS - 1) {
+      await (deps.wait ?? wait)(POST_MOVE_VERIFICATION_DELAY_MS)
+    }
+  }
+
+  if (!after) return { ok: false, reason: "could not re-read the session after moving" }
+  if (after.id !== sessionID) return { ok: false, reason: "session move verification failed: session ID changed" }
+  return {
+    ok: false,
+    reason: `session move verification failed: session is at ${redact(afterDirectory)}, expected ${redact(target)}`,
+  }
 }
 
 async function relocateAnchor(
@@ -252,6 +289,15 @@ async function statProbe(directory: string): Promise<{ exists: boolean; isDirect
   const info = await stat(directory).catch(() => undefined)
   if (!info) return { exists: false, isDirectory: false }
   return { exists: true, isDirectory: info.isDirectory() }
+}
+
+async function canonicalDirectory(directory: string): Promise<string> {
+  const absolute = resolve(directory)
+  return realpath(absolute).catch(() => absolute)
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((done) => setTimeout(done, milliseconds))
 }
 
 function errorMessage(error: unknown): string {

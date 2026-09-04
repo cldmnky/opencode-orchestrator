@@ -3,7 +3,7 @@
 ## OpenCode V2 Contract
 
 - This repository targets OpenCode V2 only. Before changing plugin or API integration code, re-read the current [plugin guide](https://opencode.ai/v2/docs/build/plugins), [CLI plugin guide](https://opencode.ai/v2/docs/build/plugins/cli), and [HTTP API reference](https://opencode.ai/v2/docs/api); the API is beta/experimental and the README's "V2 Boundary" section is already stale.
-- The repository is pinned to `@opencode-ai/plugin` `0.0.0-beta-18999` and `@opencode-ai/sdk` `0.0.0-dev-19000` for integration tests. Production code uses `Plugin.define` and the Promise plugin contract from the installed packages; do not mix package generations without updating the contract suite.
+- The repository is pinned to `@opencode-ai/plugin` `0.0.0-beta-19086` and `@opencode-ai/sdk` `0.0.0-dev-19087` for integration tests. Production code uses `Plugin.define` and the Promise plugin contract from the installed packages; do not mix package generations without updating the contract suite.
 - The existing default export is a server plugin, not a terminal UI plugin. A V2 CLI plugin imports `@opencode-ai/plugin/tui` directly, is exported as `./tui`, and is auto-loaded from the main plugin only when that plugin sets `tui: true`.
 - Put a CLI-only plugin in global `cli.json`, not project `opencode.json(c)`; this is the form that remains active when the TUI connects to a remote server. Add the OpenTUI/Solid peer dependencies only when rendering JSX.
 - In a CLI plugin, use `context.client` for the connected server and `context.data.on`/`listen` for typed events. Return cleanup functions for subscriptions, slots, routes, renderers, and other owned resources.

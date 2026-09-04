@@ -72,7 +72,7 @@ function createHost(directory: string, packageReference: string): Promise<Awaite
       },
     ]),
   )
-  // SDK dev-19000 embedded hosts ignore config-file `plugins: [{package}]`
+  // SDK dev-19087 embedded hosts ignore config-file `plugins: [{package}]`
   // entries (verified: absolute, relative, and dist-shim references all load
   // zero custom plugins). Load the entry file directly and hand the plugin
   // object to the host — the path setup above still covers installer path

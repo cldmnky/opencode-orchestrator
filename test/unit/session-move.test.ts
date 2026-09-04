@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import type { Context } from "@opencode-ai/plugin/promise/plugin"
@@ -90,7 +90,7 @@ function buildDeps(
   directory: string,
   projectID = "origin",
 ): MoveSessionDeps {
-  return { session, storage, location: { directory, project: { id: projectID } } }
+  return { session, storage, location: { directory, project: { id: projectID } }, wait: async () => {} }
 }
 
 describe("session move helper", () => {
@@ -312,6 +312,57 @@ describe("session move helper", () => {
     expect(outcome.ok).toBe(false)
     if (!outcome.ok) expect(outcome.reason).toContain("verification failed")
     expect(storage.values.size).toBe(0)
+  })
+
+  test("retries a stale post-move location before writing durable state", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-move-"))
+    mkdirSync(join(directory, "app"))
+    const storage = memStorage()
+    const session = sessionFixture({ id: "s1", projectID: "origin", directory })
+    let reads = 0
+    const staleThenCurrent: MoveSessionDeps["session"] = {
+      get: async () => {
+        reads += 1
+        if (reads === 2 || reads === 3) return { ...session.state(), location: { directory } }
+        return session.get({ sessionID: "s1" })
+      },
+      move: session.move,
+    }
+    const delays: number[] = []
+    const deps = buildDeps(staleThenCurrent, storage, directory)
+    deps.wait = async (milliseconds) => void delays.push(milliseconds)
+
+    const outcome = await moveSessionToDirectory(deps, { sessionID: "s1", target: "app" })
+
+    expect(outcome.ok).toBe(true)
+    expect(reads).toBe(4)
+    expect(delays).toEqual([50, 50])
+    expect(storage.values.has(sessionIndexStorageKey("s1"))).toBe(true)
+  })
+
+  test("accepts a canonically equivalent post-move directory", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-move-"))
+    const real = join(directory, "real")
+    const link = join(directory, "link")
+    mkdirSync(join(real, "app"), { recursive: true })
+    symlinkSync(real, link, "dir")
+    const session = sessionFixture({ id: "s1", projectID: "origin", directory: link })
+    let reads = 0
+    const canonicalResponse: MoveSessionDeps["session"] = {
+      get: async () => {
+        reads += 1
+        if (reads > 1) return { ...session.state(), location: { directory: join(real, "app") } }
+        return session.get({ sessionID: "s1" })
+      },
+      move: session.move,
+    }
+
+    const outcome = await moveSessionToDirectory(buildDeps(canonicalResponse, memStorage(), link), {
+      sessionID: "s1",
+      target: "app",
+    })
+
+    expect(outcome.ok).toBe(true)
   })
 })
 

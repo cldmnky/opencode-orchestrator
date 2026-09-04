@@ -1,5 +1,6 @@
 node_modules/
 dist/
+package-lock.json
 dev/project/opencode.jsonc
 dev/state/
 .DS_Store

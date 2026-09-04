@@ -7,6 +7,7 @@ import {
   writeWorktree,
   type StorageLike,
 } from "./state.js"
+import type { SessionMoveCoordinator } from "../session/move-coordinator.js"
 
 /**
  * `session.moved` synchronization (stage 2).
@@ -25,6 +26,8 @@ export type WorktreeEventsContext = {
     subscribe(options?: { signal?: AbortSignal }): AsyncIterable<unknown>
   }
   storage: StorageLike
+  /** Helper-owned moves are verified and reconciled by the move helper. */
+  moveCoordinator?: SessionMoveCoordinator
 }
 
 type SessionMovedEvent = {
@@ -69,6 +72,7 @@ export function startWorktreeEventSync(
   async function reconcile(event: SessionMovedEvent): Promise<void> {
     const { sessionID, projectID } = event.data
     const directory = event.data.location?.directory ?? ""
+    if (await context.moveCoordinator?.awaitEvent(sessionID, directory)) return
     const workspaceID = event.data.location?.workspaceID
     const subpath = event.data.subpath
 

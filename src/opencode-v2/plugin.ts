@@ -13,6 +13,7 @@ import { addObservabilityTools } from "./observability/tools.js"
 import { createDispatchGate, shouldStartObservability, startObservability } from "./observability/runtime.js"
 import { startWorktreeEventSync } from "./worktree/events.js"
 import { SpawnRunner } from "./process/runner.js"
+import { createSessionMoveCoordinator } from "./session/move-coordinator.js"
 import { DISTRIBUTION_NAME, RUNTIME_PLUGIN_ID } from "../core/package-identity.js"
 
 export const orchestratorPlugin = (Plugin.define as any)({
@@ -59,6 +60,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
       : undefined
     if (observability) registrations.push({ dispose: () => observability.dispose() })
     const controlGate = createDispatchGate({ options, storage: ctx.storage, location: ctx.location, runtime: observability })
+    const moveCoordinator = createSessionMoveCoordinator()
 
     try {
       registrations.push(
@@ -91,7 +93,14 @@ export const orchestratorPlugin = (Plugin.define as any)({
         await ctx.tool.transform((draft) => {
           addGoalTools(draft, ctx.storage, ctx.location, options)
           addGhTools(draft, { storage: ctx.storage, runner, location: ctx.location, options })
-          addWorktreeTools(draft, { storage: ctx.storage, runner, location: ctx.location, options, session: ctx.session })
+          addWorktreeTools(draft, {
+            storage: ctx.storage,
+            runner,
+            location: ctx.location,
+            options,
+            session: ctx.session,
+            moveCoordinator,
+          })
           addOrchestrationTools(draft, {
             options,
             location: ctx.location,
@@ -161,8 +170,12 @@ export const orchestratorPlugin = (Plugin.define as any)({
       // orchestrator_worktree_enter): relocates the durable anchor to the new
       // project, preserves the origin, and marks any tracked worktree owned by
       // the moved session as moved.
+      const stopWorktreeEventSync = startWorktreeEventSync({ ...ctx, moveCoordinator }, options)
       registrations.push({
-        dispose: startWorktreeEventSync(ctx, options),
+        dispose: async () => {
+          moveCoordinator.dispose()
+          await stopWorktreeEventSync()
+        },
       })
 
       const stopContinuation = options.goal.auto_continue ? startGoalContinuation(ctx, options, controlGate) : undefined

@@ -27,6 +27,7 @@ import {
   type WorktreeRecord,
 } from "./state.js"
 import { moveSessionToDirectory } from "../session/move.js"
+import type { SessionMoveCoordinator } from "../session/move-coordinator.js"
 
 /**
  * `orchestrator_worktree_*` tools (stage 2), registered via the tool
@@ -89,6 +90,7 @@ export type WorktreeToolsDeps = {
    * `/private/tmp` aliases of the same directory compare equal.
    */
   realpath?: (directory: string) => Promise<string | undefined>
+  moveCoordinator?: SessionMoveCoordinator
 }
 
 export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps): void {
@@ -366,7 +368,7 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
         // the session is moved into. No caller-supplied path is accepted.
         const directory = await canon(record.dir)
         const outcome = await moveSessionToDirectory(
-          { session: deps.session, storage: deps.storage, location: deps.location },
+          { session: deps.session, storage: deps.storage, location: deps.location, moveCoordinator: deps.moveCoordinator },
           { sessionID: tool.sessionID, target: directory },
         )
         if (!outcome.ok) {

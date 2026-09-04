@@ -15,6 +15,7 @@ import {
   writeWorktree,
   type StorageLike as WorktreeStorageLike,
 } from "../worktree/state.js"
+import type { SessionMoveCoordinator } from "./move-coordinator.js"
 
 /**
  * Reusable session-move primitive (stage 4).
@@ -60,6 +61,8 @@ export type MoveSessionDeps = {
   pathInfo?: (directory: string) => Promise<{ exists: boolean; isDirectory: boolean }>
   /** Injectable bounded-delay hook for post-move session verification. */
   wait?: (milliseconds: number) => Promise<void>
+  /** Coordinates helper-owned moves with `session.moved` event reconciliation. */
+  moveCoordinator?: SessionMoveCoordinator
 }
 
 export type SessionInfoLike = {
@@ -85,7 +88,12 @@ const POST_MOVE_VERIFICATION_ATTEMPTS = 4
 const POST_MOVE_VERIFICATION_DELAY_MS = 50
 
 export async function moveSessionToDirectory(deps: MoveSessionDeps, input: MoveSessionInput): Promise<MoveSessionOutcome> {
-  const before = sessionInfo(await deps.session.get({ sessionID: input.sessionID }))
+  let before: SessionInfoLike | undefined
+  try {
+    before = sessionInfo(await deps.session.get({ sessionID: input.sessionID }))
+  } catch {
+    return { ok: false, reason: "could not read the current session before moving" }
+  }
   if (!before) return { ok: false, reason: "could not read the current session before moving" }
 
   const baseDirectory = typeof before.location?.directory === "string" ? before.location.directory : deps.location.directory
@@ -99,6 +107,7 @@ export async function moveSessionToDirectory(deps: MoveSessionDeps, input: MoveS
   if (!info.isDirectory) return { ok: false, reason: `target is not a directory: ${redact(target)}` }
 
   const workspaceID = typeof before.location?.workspaceID === "string" ? before.location.workspaceID : deps.location.workspaceID
+  const lease = deps.moveCoordinator?.begin(input.sessionID, target)
   try {
     await deps.session.move({
       sessionID: input.sessionID,
@@ -107,20 +116,27 @@ export async function moveSessionToDirectory(deps: MoveSessionDeps, input: MoveS
       ...(input.delivery ? { delivery: input.delivery } : {}),
     })
   } catch (error) {
+    lease?.cancel()
     return { ok: false, reason: `session move failed: ${redact(errorMessage(error))}` }
   }
 
-  const verified = await verifyMovedSession(deps, input.sessionID, target)
-  if (!verified.ok) return verified
-  const after = verified.session
+  try {
+    const verified = await verifyMovedSession(deps, input.sessionID, target)
+    if (!verified.ok) return verified
+    const after = verified.session
 
-  const anchor = await relocateAnchor(deps, input.sessionID, {
-    before,
-    after,
-    target,
-    fallbackOrigin: { directory: baseDirectory, projectID: before.projectID ?? deps.location.project.id },
-  })
-  return { ok: true, session: after, anchor }
+    const anchor = await relocateAnchor(deps, input.sessionID, {
+      before,
+      after,
+      target,
+      fallbackOrigin: { directory: baseDirectory, projectID: before.projectID ?? deps.location.project.id },
+    })
+    return { ok: true, session: after, anchor }
+  } finally {
+    // A successful native move may emit before, during, or just after the
+    // verification loop. Only this helper may reconcile that event.
+    lease?.suppressEvent()
+  }
 }
 
 /**
@@ -140,7 +156,11 @@ async function verifyMovedSession(
   let afterDirectory = ""
 
   for (let attempt = 0; attempt < POST_MOVE_VERIFICATION_ATTEMPTS; attempt += 1) {
-    after = sessionInfo(await deps.session.get({ sessionID }))
+    try {
+      after = sessionInfo(await deps.session.get({ sessionID }))
+    } catch {
+      after = undefined
+    }
     afterDirectory = typeof after?.location?.directory === "string" ? after.location.directory : ""
     const actual = afterDirectory ? await canonicalDirectory(afterDirectory) : ""
     if (after?.id === sessionID && actual === expected) return { ok: true, session: after }

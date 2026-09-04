@@ -34,6 +34,8 @@ import {
 } from "../../src/opencode-v2/worktree/state.js"
 import { addWorktreeTools } from "../../src/opencode-v2/worktree/tools.js"
 import { startWorktreeEventSync } from "../../src/opencode-v2/worktree/events.js"
+import { moveSessionToDirectory } from "../../src/opencode-v2/session/move.js"
+import { createSessionMoveCoordinator } from "../../src/opencode-v2/session/move-coordinator.js"
 import { sessionAnchorStorageKey, type SessionAnchor } from "../../src/opencode-v2/session/state.js"
 import { evidenceSchema, type EvidenceRecord } from "../../src/opencode-v2/orchestration/evidence.js"
 
@@ -1485,6 +1487,50 @@ describe("worktree tool evidence", () => {
 })
 
 describe("session.moved reconciliation", () => {
+  test("defers a helper-owned move event until verification decides durable state", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "orchestrator-event-race-"))
+    const target = path.join(directory, "app")
+    await mkdir(target)
+    const values = new Map<string, unknown>()
+    const storage = memStorage(values)
+    const stream = createEventStream()
+    const moveCoordinator = createSessionMoveCoordinator()
+    const stop = startWorktreeEventSync({ event: { subscribe: () => stream }, storage, moveCoordinator }, parseOptions({}))
+    const base = sessionFixture({ id: "session-1", projectID: "origin", directory })
+    let reads = 0
+    const session = {
+      get: async () => {
+        reads += 1
+        if (reads > 1) return { ...base.state(), location: { directory: "/somewhere-else" } }
+        return base.get({ sessionID: "session-1" })
+      },
+      move: async (input: Record<string, unknown>) => {
+        await base.move(input)
+        stream.push({
+          type: "session.moved",
+          data: { sessionID: "session-1", projectID: "origin", location: { directory: String(input.directory) } },
+        })
+      },
+    }
+
+    const outcome = await moveSessionToDirectory(
+      {
+        session,
+        storage,
+        location,
+        moveCoordinator,
+        wait: async () => {},
+      },
+      { sessionID: "session-1", target },
+    )
+
+    expect(outcome.ok).toBe(false)
+    await new Promise((done) => setTimeout(done, 20))
+    expect(values.size).toBe(0)
+    await stop()
+    moveCoordinator.dispose()
+  })
+
   test("first observed move writes an anchor and session index at the new project", async () => {
     const values = new Map<string, unknown>()
     const storage = memStorage(values)

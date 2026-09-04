@@ -340,6 +340,30 @@ describe("session move helper", () => {
     expect(storage.values.has(sessionIndexStorageKey("s1"))).toBe(true)
   })
 
+  test("retries transient post-move session read failures", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-move-"))
+    mkdirSync(join(directory, "app"))
+    const session = sessionFixture({ id: "s1", projectID: "origin", directory })
+    let reads = 0
+    const flaky: MoveSessionDeps["session"] = {
+      get: async () => {
+        reads += 1
+        if (reads === 2 || reads === 3) throw new Error("temporarily unavailable")
+        return session.get({ sessionID: "s1" })
+      },
+      move: session.move,
+    }
+    const delays: number[] = []
+    const deps = buildDeps(flaky, memStorage(), directory)
+    deps.wait = async (milliseconds) => void delays.push(milliseconds)
+
+    const outcome = await moveSessionToDirectory(deps, { sessionID: "s1", target: "app" })
+
+    expect(outcome.ok).toBe(true)
+    expect(reads).toBe(4)
+    expect(delays).toEqual([50, 50])
+  })
+
   test("accepts a canonically equivalent post-move directory", async () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-move-"))
     const real = join(directory, "real")

@@ -103,6 +103,12 @@ export function applyAgentTransform(
       // allow/ask remains authoritative. The same deny-all seeding applies so
       // the deny targets are not the only rules in a sparse array that would
       // widen every other action.
+      //
+      // Nested delegation (`subagent`) rules are deliberately NOT appended or
+      // modified here: an existing permissions array is the user's authored
+      // policy, and the installer writes the bounded role-graph edges only for
+      // agents it creates. Preserved agents keep whatever subagent policy the
+      // operator wrote and are migrated by hand (see README).
       agent.permissions = appendFeaturePermissions(agent.permissions, "deny")
     })
   }

@@ -44,26 +44,136 @@
       }
     }
   ],
+  // Native OpenCode subagent nesting depth: defaults to 1, which would stop
+  // the approved deepest chain (orchestrator -> implementer -> planner ->
+  // explore) after the first hop. The installer adds this top-level key only
+  // when it is absent; an explicit value you set is always preserved.
+  "experimental": {
+    "subagent_depth": 3
+  },
+  // The `permissions` blocks below mirror the installer's fresh-install
+  // defaults (src/cli/install.ts): a broad `subagent` deny followed by exact
+  // target-specific allows for the bounded nested-delegation graph
+  // (orchestrator→all roles; implementer→planner+explore; planner→explore;
+  // reviewer→explore; explore→no delegation). The agent transform never
+  // overrides user-authored permission rules; agents preserved from an older
+  // install must be migrated by hand (see README).
   "agents": {
     "orchestrator": {
       "mode": "primary",
-      "model": "opencode/big-pickle"
+      "model": "opencode/big-pickle",
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_goal", "resource": "*", "effect": "allow" },
+        { "action": "orchestrator_gh", "resource": "*", "effect": "allow" },
+        { "action": "orchestrator_worktree", "resource": "*", "effect": "allow" },
+        { "action": "orchestrator_validation", "resource": "*", "effect": "allow" },
+        { "action": "orchestrator_observability", "resource": "*", "effect": "allow" },
+        { "action": "read", "resource": "*", "effect": "allow" },
+        { "action": "glob", "resource": "*", "effect": "allow" },
+        { "action": "grep", "resource": "*", "effect": "allow" },
+        { "action": "webfetch", "resource": "*", "effect": "allow" },
+        { "action": "websearch", "resource": "*", "effect": "allow" },
+        { "action": "shell", "resource": "*", "effect": "ask" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "planner", "effect": "allow" },
+        { "action": "subagent", "resource": "explore", "effect": "allow" },
+        { "action": "subagent", "resource": "implementer", "effect": "allow" },
+        { "action": "subagent", "resource": "reviewer", "effect": "allow" },
+        { "action": "read", "resource": "*.env", "effect": "ask" },
+        { "action": "read", "resource": "*.env.*", "effect": "ask" },
+        { "action": "read", "resource": "*.env.example", "effect": "allow" }
+      ]
     },
     "planner": {
       "mode": "subagent",
-      "model": "opencode/big-pickle"
+      "model": "opencode/big-pickle",
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_goal", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_gh", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_worktree", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_validation", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_observability", "resource": "*", "effect": "deny" },
+        { "action": "read", "resource": "*", "effect": "allow" },
+        { "action": "glob", "resource": "*", "effect": "allow" },
+        { "action": "grep", "resource": "*", "effect": "allow" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "explore", "effect": "allow" },
+        { "action": "shell", "resource": "*", "effect": "ask" },
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "read", "resource": "*.env", "effect": "ask" },
+        { "action": "read", "resource": "*.env.*", "effect": "ask" },
+        { "action": "read", "resource": "*.env.example", "effect": "allow" }
+      ]
     },
     "explore": {
       "mode": "subagent",
-      "model": "opencode/big-pickle"
+      "model": "opencode/big-pickle",
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_goal", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_gh", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_worktree", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_validation", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_observability", "resource": "*", "effect": "deny" },
+        { "action": "read", "resource": "*", "effect": "allow" },
+        { "action": "glob", "resource": "*", "effect": "allow" },
+        { "action": "grep", "resource": "*", "effect": "allow" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "webfetch", "resource": "*", "effect": "allow" },
+        { "action": "websearch", "resource": "*", "effect": "allow" },
+        { "action": "read", "resource": "*.env", "effect": "ask" },
+        { "action": "read", "resource": "*.env.*", "effect": "ask" },
+        { "action": "read", "resource": "*.env.example", "effect": "allow" }
+      ]
     },
     "implementer": {
       "mode": "subagent",
-      "model": "opencode/big-pickle"
+      "model": "opencode/big-pickle",
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_goal", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_gh", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_worktree", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_validation", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_observability", "resource": "*", "effect": "deny" },
+        { "action": "read", "resource": "*", "effect": "allow" },
+        { "action": "glob", "resource": "*", "effect": "allow" },
+        { "action": "grep", "resource": "*", "effect": "allow" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "planner", "effect": "allow" },
+        { "action": "subagent", "resource": "explore", "effect": "allow" },
+        { "action": "edit", "resource": "*", "effect": "allow" },
+        { "action": "shell", "resource": "*", "effect": "ask" },
+        { "action": "webfetch", "resource": "*", "effect": "allow" },
+        { "action": "websearch", "resource": "*", "effect": "allow" },
+        { "action": "read", "resource": "*.env", "effect": "ask" },
+        { "action": "read", "resource": "*.env.*", "effect": "ask" },
+        { "action": "read", "resource": "*.env.example", "effect": "allow" }
+      ]
     },
     "reviewer": {
       "mode": "subagent",
-      "model": "opencode/big-pickle"
+      "model": "opencode/big-pickle",
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_goal", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_gh", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_worktree", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_validation", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_observability", "resource": "*", "effect": "deny" },
+        { "action": "read", "resource": "*", "effect": "allow" },
+        { "action": "glob", "resource": "*", "effect": "allow" },
+        { "action": "grep", "resource": "*", "effect": "allow" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "explore", "effect": "allow" },
+        { "action": "shell", "resource": "*", "effect": "ask" },
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "read", "resource": "*.env", "effect": "ask" },
+        { "action": "read", "resource": "*.env.*", "effect": "ask" },
+        { "action": "read", "resource": "*.env.example", "effect": "allow" }
+      ]
     }
   }
 }

@@ -202,6 +202,37 @@ describe("agent transform feature permissions", () => {
     ])
   })
 
+  test("never adds, removes, or overrides subagent rules in transforms", () => {
+    // Nested delegation permissions are user-authored policy: the installer
+    // writes the bounded role-graph edges only for agents it creates, and the
+    // transform must not grant, revoke, or rewrite `subagent` rules on
+    // preserved agents.
+    const plannerRules = [
+      { action: "subagent", resource: "*", effect: "deny" },
+      { action: "subagent", resource: "explore", effect: "allow" },
+    ]
+    const draft = draftWith({
+      orchestrator: { mode: "primary", permissions: [{ action: "subagent", resource: "planner", effect: "allow" }] },
+      planner: { mode: "subagent", permissions: [...plannerRules] },
+      explore: { mode: "subagent" },
+    })
+    applyAgentTransform(draft, options)
+
+    expect(draft.get("orchestrator")!.permissions!.filter((rule) => rule.action === "subagent")).toEqual([
+      { action: "subagent", resource: "planner", effect: "allow" },
+    ])
+    // The user's exact subagent rules survive verbatim and in order, with only
+    // the goal/feature families appended after them.
+    const plannerResult = draft.get("planner")!.permissions!
+    expect(plannerResult.slice(0, plannerRules.length)).toEqual(plannerRules)
+    expect(plannerResult.filter((rule) => rule.action === "subagent")).toEqual(plannerRules)
+    // A worker missing permissions gets the deny-all seeding, and that seeding
+    // carries no subagent rules either: delegation stays entirely user-owned.
+    const seeded = draft.get("explore")!.permissions!
+    expect(seeded[0]).toEqual(DENY_ALL)
+    expect(seeded.filter((rule) => rule.action === "subagent")).toEqual([])
+  })
+
   test("reports missing agents without touching their absence", () => {
     const draft = draftWith({ orchestrator: { mode: "primary" } })
     const missing = applyAgentTransform(draft, options)

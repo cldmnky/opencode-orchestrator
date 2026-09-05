@@ -1,3 +1,4 @@
+import { delegationGraphSummary } from "./roles.js"
 import type { RoleName } from "./roles.js"
 
 export type DelegationMode = "foreground" | "background"
@@ -30,9 +31,36 @@ export const CHILD_TASK_CONTRACT = [
   "Expected outcome: the definition of done for this child.",
   "Scope/file ownership: the exact files or areas the child may touch, disjoint from other children.",
   "Must do: the required steps, constraints, and verification commands.",
-  "Must not do: forbidden actions, including editing out-of-scope files or launching other agents.",
+  "Must not do: forbidden actions, including editing out-of-scope files or delegating outside the child's own role graph.",
   "Verification: the checks and commands that prove the work.",
   "Handoff: the worker handoff format below.",
+  "The parent stays accountable for every delegated child: it composes the contract, keeps child scopes disjoint, verifies child claims directly, and owns the integrated result.",
+].join("\n")
+
+/**
+ * Bounded nested-delegation guidance and the shared prompting policy. Both are
+ * embedded verbatim so every prompt kind states the same truthful policy
+ * without duplicating text, exactly like the remote-orchestration guidance
+ * below.
+ */
+export const DELEGATION_GRAPH_GUIDANCE = [
+  `Bounded nested delegation graph: ${delegationGraphSummary()}.`,
+  "A worker that delegates stays accountable for its children: compose each child prompt from the child-task contract, keep child write scopes disjoint, verify child claims directly, and own the integrated result.",
+  "Delegating outside your role graph is forbidden even when the host would allow it; if a permitted delegation is refused or unavailable, stop and report honestly instead of substituting an unauthorized path.",
+].join("\n")
+
+/**
+ * Prompting policy for every orchestration participant: autonomous authorized
+ * follow-through, explicit user-instruction precedence, legible inter-agent
+ * messages, risk-proportionate verification, and concise evidence-led user
+ * reporting.
+ */
+export const PROMPTING_POLICY_GUIDANCE = [
+  "Follow through autonomously on exactly what the task authorizes: keep going until the authorized work is done or a genuine blocker requires the user, and never expand scope beyond the authorization.",
+  "The user's explicit instructions take precedence over skill guidance and general defaults whenever they conflict; surface an unsafe conflict instead of silently resolving it.",
+  "Inter-agent messages must be clear and legible: state the task, constraints, and expected result so another agent could act on them alone, and return results that are specific, structured, and free of process chatter.",
+  "Verify in proportion to risk: run the checks the task names, state exactly what was verified and how, and never present an unexecuted or borrowed check as your own pass.",
+  "Report to the user concisely with evidence: lead with the outcome, cite the verification that proves it, and name assumptions and risks instead of padding the answer.",
 ].join("\n")
 
 // Remote (GitHub) orchestration guidance lives here as the single source of
@@ -164,12 +192,14 @@ export function orchestrationRules(
   return [
     `At most ${maxParallel} independent child tasks may run at once.`,
     "Route by the configured semantic role map, never by model name.",
+    DELEGATION_GRAPH_GUIDANCE,
     "Explore before planning when repository facts are unknown.",
     "Track the session goal with the namespaced tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update.",
     CHILD_TASK_CONTRACT,
     "Require an exact disjoint write scope from every child before any parallel write; no two children may claim the same file or area.",
     "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes.",
     "Separate established facts from assumptions: label every assumption explicitly and verify it before relying on it.",
+    PROMPTING_POLICY_GUIDANCE,
     TOOL_AVAILABILITY_GUIDANCE,
     SECRET_HANDLING_GUIDANCE,
     WORKTREE_BOUNDARY_GUIDANCE,

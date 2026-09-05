@@ -5,7 +5,7 @@ import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { commandDefinitions } from "../opencode-v2/commands/index.js"
 import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
 import { GOAL_TOOL_PERMISSION, orchestratorOnlyPermissionRules } from "../core/permissions.js"
-import { DEFAULT_ROLES, type RoleName } from "../core/roles.js"
+import { DEFAULT_ROLES, ROLE_DELEGATION, type RoleName } from "../core/roles.js"
 import { parseOptions, type OrchestratorOptions } from "../core/config.js"
 import { parseModelReference } from "../core/model-reference.js"
 import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../core/package-identity.js"
@@ -79,6 +79,18 @@ export function defaultConfigPath(target: InstallTarget, cwd = process.cwd()): s
   return join(configHome, "opencode", "opencode.jsonc")
 }
 
+/**
+ * Native V2 subagent nesting depth written by the installer.
+ *
+ * OpenCode's `experimental.subagent_depth` defaults to 1 ("Maximum subagent
+ * nesting depth. Defaults to 1, which prevents subagents from launching
+ * subagents"), which would block the approved deepest bounded-delegation path
+ * `orchestrator -> implementation -> planning -> research` (three subagent
+ * hops). The installer writes this value only when the property is absent and
+ * never enforces depth itself; an explicit user value always wins.
+ */
+const REQUIRED_SUBAGENT_DEPTH = 3
+
 export function installConfig(
   path: string,
   options: unknown = {},
@@ -115,6 +127,9 @@ export function installConfig(
   }
   if (document.agents !== undefined && !isRecord(document.agents)) {
     throw new Error(`Invalid agents entry at ${resolved}: expected an object`)
+  }
+  if (document.experimental !== undefined && !isRecord(document.experimental)) {
+    throw new Error(`Invalid experimental entry at ${resolved}: expected an object`)
   }
   const existingAgents = isRecord(document.agents) ? document.agents : {}
   const existingCommands = isRecord(document.commands) ? document.commands : {}
@@ -179,6 +194,24 @@ export function installConfig(
     if (Object.hasOwn(existingAgents, id)) continue
     result = applyEdits(result, modify(result, ["agents", id], value, { formattingOptions }))
   }
+  // Native V2 subagent nesting depth defaults to 1, which stops a subagent
+  // from launching another subagent. The approved deepest delegation path —
+  // orchestrator -> implementation -> planning -> research — is three subagent
+  // hops, so a fresh install needs top-level `experimental.subagent_depth: 3`.
+  // This is a native OpenCode setting, not a plugin-enforced one: the installer
+  // only writes it when the property is absent, an explicitly authored value
+  // (any value) is the user's policy and is preserved untouched, and every
+  // other key inside an existing `experimental` object is preserved.
+  if (isRecord(document.experimental)) {
+    if (!Object.hasOwn(document.experimental, "subagent_depth")) {
+      result = applyEdits(
+        result,
+        modify(result, ["experimental", "subagent_depth"], REQUIRED_SUBAGENT_DEPTH, { formattingOptions }),
+      )
+    }
+  } else {
+    result = applyEdits(result, modify(result, ["experimental"], { subagent_depth: REQUIRED_SUBAGENT_DEPTH }, { formattingOptions }))
+  }
   atomicWrite(resolved, result)
   return { addedAgents, preservedAgents, addedCommands: [], preservedCommands, path: resolved }
 }
@@ -204,7 +237,7 @@ function agentDefinitions(options: OrchestratorOptions, modelReferences: AgentMo
       ...(modelReferences[id] ? { model: modelReferences[id] } : {}),
       description: `${role} specialist managed by the orchestrator.`,
       system: buildWorkerSystem(role as RoleName, options),
-      permissions: workerPermissions(role),
+      permissions: workerPermissions(role as RoleName, options.roles),
     }
   }
   return entries
@@ -226,13 +259,26 @@ function orchestratorPermissions(options: OrchestratorOptions): Array<Record<str
     { action: "webfetch", resource: "*", effect: "allow" },
     { action: "websearch", resource: "*", effect: "allow" },
     { action: "shell", resource: "*", effect: "ask" },
+    // Orchestrator→all configured roles: a broad deny first, then one exact
+    // allow per configured role agent (last-match-wins), mirroring the
+    // worker-side graph edges written by workerPermissions.
     { action: "subagent", resource: "*", effect: "deny" },
     ...Array.from(new Set(Object.values(options.roles)), (id) => ({ action: "subagent", resource: id, effect: "allow" })),
     ...sensitiveReadPermissions(),
   ]
 }
 
-function workerPermissions(role: string): Array<Record<string, string>> {
+/**
+ * Permission defaults for a freshly installed worker agent.
+ *
+ * Nested delegation follows the bounded role graph (ROLE_DELEGATION): a broad
+ * `subagent` deny comes first, then one exact target-specific allow per
+ * in-graph target agent so V2's last-match-wins ordering yields exactly the
+ * role's own edges — research gets no allow at all and answers directly with
+ * webfetch/websearch. Existing (preserved) agents are never rewritten by the
+ * installer or the agent transform; operators migrate them by hand.
+ */
+function workerPermissions(role: RoleName, roles: Record<RoleName, string>): Array<Record<string, string>> {
   const common = [
     { action: "*", resource: "*", effect: "deny" },
     // Workers must never see or drive orchestration goal tools or the
@@ -243,7 +289,11 @@ function workerPermissions(role: string): Array<Record<string, string>> {
     { action: "read", resource: "*", effect: "allow" },
     { action: "glob", resource: "*", effect: "allow" },
     { action: "grep", resource: "*", effect: "allow" },
+    // Broad subagent deny first, then exact target-specific allows for the
+    // role's own graph edges only (last-match-wins keeps the denies effective
+    // for every other agent).
     { action: "subagent", resource: "*", effect: "deny" },
+    ...ROLE_DELEGATION[role].map((target) => ({ action: "subagent", resource: roles[target], effect: "allow" })),
   ]
   if (role === "research") {
     return [...common, { action: "webfetch", resource: "*", effect: "allow" }, { action: "websearch", resource: "*", effect: "allow" }, ...sensitiveReadPermissions()]

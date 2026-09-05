@@ -8,10 +8,12 @@ import {
 import { COMMAND_NAMES, parseOptions, type OrchestratorOptions } from "../../src/core/config.js"
 import { commandDefinitions } from "../../src/opencode-v2/commands/index.js"
 import {
+  DELEGATION_GRAPH_GUIDANCE,
   DELEGATION_RULES,
   GITHUB_LIFECYCLE_GUIDANCE,
   HANDOFF_FORMAT,
   MANAGED_WORKTREE_GUIDANCE,
+  PROMPTING_POLICY_GUIDANCE,
   REMOTE_ORCHESTRATION_GUIDANCE,
   SECRET_HANDLING_GUIDANCE,
   STRUCTURED_HANDOFF_GUIDANCE,
@@ -21,6 +23,7 @@ import {
   orchestrationCapabilities,
   orchestrationRules,
 } from "../../src/core/policy.js"
+import { ROLE_DELEGATION, ROLE_GUIDANCE, delegationGraphSummary } from "../../src/core/roles.js"
 
 describe("configuration", () => {
   test("fills role defaults and preserves per-agent options", () => {
@@ -506,6 +509,9 @@ describe("remote orchestration policy", () => {
         expect(prompt.split("Never request, resolve, log, paste, or copy").length - 1).toBe(1)
         expect(prompt.split("plugin-controlled atomic worktree").length - 1).toBe(1)
         expect(prompt.split("callable/advisory, not automatic hooks").length - 1).toBe(1)
+        expect(prompt.split("Bounded nested delegation graph").length - 1).toBe(1)
+        expect(prompt.split("Follow through autonomously").length - 1).toBe(1)
+        expect(prompt.split("Verify in proportion to risk").length - 1).toBe(1)
         // Feature lifecycle sections are embedded at most once each.
         expect(prompt.split("Worktree lifecycle is mandatory").length - 1).toBe(options.worktree.enabled ? 1 : 0)
         expect(prompt.split("preflight with orchestrator_github_capabilities").length - 1).toBe(
@@ -513,5 +519,103 @@ describe("remote orchestration policy", () => {
         )
       }
     }
+  })
+})
+
+describe("nested delegation policy", () => {
+  const DEFAULT = parseOptions({})
+
+  test("the delegation graph matches the agreed bounded edges", () => {
+    expect(ROLE_DELEGATION).toEqual({
+      planning: ["research"],
+      research: [],
+      implementation: ["planning", "research"],
+      review: ["research"],
+    })
+  })
+
+  test("the graph summary renders every role exactly once with research as the only leaf", () => {
+    expect(delegationGraphSummary()).toBe(
+      "orchestrator→all configured roles; planning→research; research→no delegation; implementation→planning,research; review→research",
+    )
+  })
+
+  test("delegation guidance states the exact edges, parent accountability, and the out-of-graph ban", () => {
+    expect(DELEGATION_GRAPH_GUIDANCE).toContain("orchestrator→all configured roles")
+    expect(DELEGATION_GRAPH_GUIDANCE).toContain("implementation→planning,research")
+    expect(DELEGATION_GRAPH_GUIDANCE).toContain("review→research")
+    expect(DELEGATION_GRAPH_GUIDANCE).toContain("research→no delegation")
+    expect(DELEGATION_GRAPH_GUIDANCE).toContain("stays accountable for its children")
+    expect(DELEGATION_GRAPH_GUIDANCE).toContain("Delegating outside your role graph is forbidden")
+    expect(DELEGATION_GRAPH_GUIDANCE).toContain("stop and report honestly")
+    // The guidance must not name concrete model or deployment tool names.
+    expect(DELEGATION_GRAPH_GUIDANCE).not.toMatch(/claude|github\.[a-z_]+/i)
+  })
+
+  test("prompting policy guidance carries all five authorized behaviors", () => {
+    expect(PROMPTING_POLICY_GUIDANCE).toContain("Follow through autonomously on exactly what the task authorizes")
+    expect(PROMPTING_POLICY_GUIDANCE).toContain("take precedence over skill guidance and general defaults")
+    expect(PROMPTING_POLICY_GUIDANCE).toContain("Inter-agent messages must be clear and legible")
+    expect(PROMPTING_POLICY_GUIDANCE).toContain("Verify in proportion to risk")
+    expect(PROMPTING_POLICY_GUIDANCE).toContain("Report to the user concisely with evidence")
+    expect(PROMPTING_POLICY_GUIDANCE).not.toMatch(/claude|github\.[a-z_]+/i)
+  })
+
+  test("every prompt kind embeds the graph, the prompting policy, and parent accountability exactly once", () => {
+    const kinds: Array<[string, string]> = [
+      ["orchestrator system", buildOrchestratorSystem(DEFAULT)],
+      ["worker planning", buildWorkerSystem("planning", DEFAULT)],
+      ["worker research", buildWorkerSystem("research", DEFAULT)],
+      ["worker implementation", buildWorkerSystem("implementation", DEFAULT)],
+      ["worker review", buildWorkerSystem("review", DEFAULT)],
+      ["continuation", buildContinuationPrompt("objective", 2, DEFAULT)],
+      ...["orchestrate", "goal", "restructure", "run-plan", "halt", "handover", "polish", "stress-plan"].map(
+        (name) => [`command ${name}`, buildCommandPrompt(name, "scope", DEFAULT)] as [string, string],
+      ),
+    ]
+    for (const [name, prompt] of kinds) {
+      expect(prompt.split("Bounded nested delegation graph").length - 1, name).toBe(1)
+      expect(prompt.split("Follow through autonomously").length - 1, name).toBe(1)
+      expect(prompt.split("Delegating outside your role graph is forbidden").length - 1, name).toBe(1)
+      // The child-task contract (with parent accountability) is embedded in
+      // the orchestrator and worker systems; command and continuation prompts
+      // reference it through the runtime context hook instead.
+      if (name.startsWith("worker") || name === "orchestrator system") {
+        expect(prompt.split("The parent stays accountable for every delegated child").length - 1, name).toBe(1)
+      }
+    }
+  })
+
+  test("worker prompts name exactly their own role-graph delegations", () => {
+    const planning = buildWorkerSystem("planning")
+    expect(planning).toContain("only the research role")
+    expect(planning).not.toContain("planning and research roles")
+
+    const implementation = buildWorkerSystem("implementation")
+    expect(implementation).toContain("only the planning and research roles")
+    expect(implementation).not.toContain("review role;")
+
+    const review = buildWorkerSystem("review")
+    expect(review).toContain("only the research role")
+    expect(review).not.toContain("planning and research roles")
+
+    // The orchestrator keeps the unbounded top of the graph.
+    expect(buildOrchestratorSystem(DEFAULT)).toContain("delegate to every configured role")
+  })
+
+  test("the research prompt forbids delegation and requires direct webfetch/websearch", () => {
+    expect(ROLE_GUIDANCE.research).toContain("webfetch and websearch directly")
+    expect(ROLE_GUIDANCE.research).toContain("never launch subagents")
+    const prompt = buildWorkerSystem("research")
+    expect(prompt).toContain("webfetch and websearch directly")
+    expect(prompt).toContain("research→no delegation")
+  })
+
+  test("the child contract bounds delegation to the child's own role graph", () => {
+    const prompt = buildOrchestratorSystem(DEFAULT)
+    expect(prompt).toContain("delegating outside the child's own role graph")
+    expect(prompt).not.toContain("or launching other agents.")
+    expect(orchestrationRules(4, true)).toContain(DELEGATION_GRAPH_GUIDANCE)
+    expect(orchestrationRules(4, true)).toContain(PROMPTING_POLICY_GUIDANCE)
   })
 })

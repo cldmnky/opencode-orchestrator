@@ -23,11 +23,27 @@ Give the orchestrator a task in plain English — it breaks the work down, deleg
 |-------|--------------|
 | **orchestrator** | Your main partner. Understands your request, plans the work, delegates, and verifies everything. |
 | **planner** | Breaks down complex tasks without editing code. |
-| **explore** | Maps your codebase, tests, and docs — fast, read-only research. |
+| **explore** | Maps your codebase, tests, and docs — fast, read-only research with direct `webfetch`/`websearch`. |
 | **implementer** | Makes focused code changes within an assigned file scope. |
 | **reviewer** | Audits the combined changes before they’re presented to you. |
 
 You only talk to the orchestrator. It handles the rest.
+
+### Bounded nested delegation
+
+Specialists can delegate too, but only along a fixed graph — every delegating worker stays accountable for its children, and each child gets the same self-contained task contract:
+
+```
+orchestrator → planner, explore, implementer, reviewer
+implementer  → planner, explore
+planner      → explore
+reviewer     → explore
+explore      → (nothing — answers directly, using webfetch/websearch itself)
+```
+
+Delegation outside an agent’s own graph is off-limits even if the host would allow it, and the orchestrator verifies child claims directly instead of trusting a child’s self-report.
+
+> **Native depth:** OpenCode’s native `experimental.subagent_depth` defaults to 1 — *"Maximum subagent nesting depth. Defaults to 1, which prevents subagents from launching subagents"* — so without it, a worker could never delegate further. The deepest approved chain above is three subagent hops, and the installer therefore sets `experimental.subagent_depth: 3` in your config, but only when the key is absent: an explicit value you set (lower or higher) always wins. The plugin itself does not enforce depth — it’s a native OpenCode setting.
 
 ---
 
@@ -71,7 +87,21 @@ npm install --save-dev opencode-v2-agent-orchestrator
 What the installer does:
 - Adds the plugin to `opencode.jsonc` (as a local file reference like `./node_modules/.../dist/index.js`)
 - Adds the five agents (`orchestrator`, `planner`, `explore`, `implementer`, `reviewer`) if they’re missing
+- Sets `experimental.subagent_depth: 3` (only when the key is absent) so OpenCode’s native subagent depth limit — which defaults to 1 — doesn’t block the deepest approved chain `orchestrator → implementer → planner → explore`
+- Gives new agents permission defaults that allow exactly the bounded nested-delegation graph (see [Bounded nested delegation](#bounded-nested-delegation)): a broad `subagent` deny followed by exact target-specific allows, with `webfetch`/`websearch` granted directly to `explore`
 - Leaves your existing config and commands untouched — re-running it is safe
+
+> **Upgrading?** The installer never rewrites agents that already exist in your config. If your workers were installed by an older version (before nested delegation), they carry a flat `subagent` deny and cannot delegate. Either delete the old agent entries and reinstall, or add the target-specific allows yourself — for example, to `implementer`:
+>
+> ```jsonc
+> "permissions": [
+>   { "action": "subagent", "resource": "*", "effect": "deny" },
+>   { "action": "subagent", "resource": "planner", "effect": "allow" },
+>   { "action": "subagent", "resource": "explore", "effect": "allow" }
+> ]
+> ```
+>
+> The plugin’s agent transform never overrides user-authored permission rules, so whatever you write stays authoritative. Re-running the installer also adds `experimental.subagent_depth: 3` when that key is absent; an explicit value you set is always preserved.
 
 > Working from a source checkout? Configure OpenCode to load `./src/index.ts` and see [Development](#development). This repository's live setup uses global config; the checkout has no repo-level `opencode.jsonc`.
 
@@ -118,10 +148,15 @@ flowchart LR
     U([You]) --> O{orchestrator}
     O --> P[planner<br/>breaks down task]
     O --> E[explore<br/>maps codebase]
+    O --> I[implementer<br/>focused edits]
+    O --> R[reviewer<br/>audits changes]
+    I -. bounded .-> P
+    I -. bounded .-> E
+    P -. bounded .-> E
+    R -. bounded .-> E
     P --> O
     E --> O
-    O --> I[implementer<br/>focused edits]
-    I --> R[reviewer<br/>audits changes]
+    I --> O
     R --> O
     O --> U2([Verified result<br/>+ tests + review])
 
@@ -130,7 +165,7 @@ flowchart LR
     style O fill:#2a2f45,stroke:#6a7abb,color:#e6e8f0
 ```
 
-*You talk only to the orchestrator — it coordinates the specialists and brings back a verified result.*
+*You talk only to the orchestrator — it coordinates the specialists and brings back a verified result. Dashed arrows are the bounded nested-delegation edges: workers may delegate only downward, and `explore` answers directly without delegating.*
 
 ---
 
@@ -260,6 +295,8 @@ You configure baseline **models** with OpenCode’s native `agents.<id>.model`; 
 
 Model IDs shown here are illustrative; availability varies by provider and account.
 
+The installer also writes each agent’s `permissions` for you: a broad `subagent` deny plus exact target-specific allows matching the [bounded nested-delegation graph](#bounded-nested-delegation), and direct `webfetch`/`websearch` for `explore`. Agents you add or preserve yourself keep whatever permissions you write — the plugin never overrides them.
+
 Change a baseline model later by editing `agents.<id>.model` directly — no reinstall needed. For temporary or run-specific worker choices, use `/worker-models` in the TUI instead; overrides survive service restarts, follow the repository across this plugin’s managed worktrees, and apply to children spawned after the change. Existing child sessions keep their current model. `/worker-models worker=default` clears one override and `/worker-models reset` clears them all. The orchestrator model remains config-controlled.
 
 ---
@@ -375,14 +412,18 @@ For teams that want cost/usage limits or a stricter review gate:
 - Ensure `git worktree list --porcelain` works and your `worktree.root` is an absolute path
 - For worktree create/push/cleanup, enable the feature and mutations, then pass literal `confirm: true`; enter needs only `worktree.enabled: true`
 
+**Nested delegation stops after the first hop?**
+
+OpenCode’s native `experimental.subagent_depth` defaults to 1, which prevents subagents from launching subagents. Re-run the installer — it adds `experimental.subagent_depth: 3` only when the key is absent — or set the value yourself; an explicit value you configure always wins and is never overwritten.
+
 ---
 
 <details>
 <summary>How the orchestration works (for the curious)</summary>
 
-- **Roles are prompt policy, not hard sandboxing.** `explore` is told not to use shell, `planner`/`reviewer` not to edit, workers not to spawn subagents — but V2’s plugin API doesn’t enforce this at the filesystem level. Treat it as strong instructions.
+- **Roles are prompt policy, not hard sandboxing.** `explore` is told not to use shell, `planner`/`reviewer` not to edit, and nested delegation is bounded to the role graph (implementer→planner/explore, planner→explore, reviewer→explore, explore never delegates) — the installer writes matching permission rules, but V2’s plugin API doesn’t enforce this at the filesystem level. Treat it as strong instructions plus config-level permissions.
 - **File ownership coordinates agents.** The orchestrator assigns non-overlapping file scopes to each `implementer`, but those prompt-level scopes are not filesystem isolation. `max_parallel` (default 4) caps concurrency.
-- **Handoffs are structured.** Workers return a five-field summary (`Outcome / Files / Verification / Risks / Follow-up`) plus a version-1 JSON envelope. The orchestrator can run `orchestrator_handoff_validate` for deterministic checks before using a handoff.
+- **Handoffs are structured.** Workers return a five-field summary (`Outcome / Files / Verification / Risks / Follow-up`) plus a version-1 JSON envelope. The orchestrator can run `orchestrator_handoff_validate` for deterministic checks before using a handoff. Inter-agent messages — parent→child prompts and child→parent handoffs alike — are expected to be explicit, self-contained, and legible on their own.
 - **Review is prompt-based by default.** `require_review: true` means the orchestrator *asks* a reviewer. There’s no hard runtime gate — `bounded` review adds an explicit `review_get` / `review_transition` flow with a circuit breaker if you need it.
 - **State lives in OpenCode storage.** Goals and plan runs are keyed to the current session and persist through its idle periods via `ctx.storage` with per-session locks; session deletion removes that state. Conversations remain the source of truth.
 

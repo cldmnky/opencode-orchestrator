@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode-ai/plugin"
 import type { Context } from "@opencode-ai/plugin/promise/plugin"
 import { parseOptions } from "../core/config.js"
+import { delegationGraphSummary } from "../core/roles.js"
 import { applyAgentTransform, validateAgentSet, type AgentInfoLike } from "./agents.js"
 import { applyCommandTransform } from "./commands/index.js"
 import { runCommand } from "./commands/runtime.js"
@@ -134,6 +135,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
               `Runtime role map: planning=${options.roles.planning}; research=${options.roles.research}; implementation=${options.roles.implementation}; review=${options.roles.review}.`,
               `Runtime parallelism ceiling: ${options.max_parallel}.`,
               "Delegate with the child-task contract: Task, Expected outcome, Scope/file ownership, Must do, Must not do, Verification, and handoff.",
+              `Nested delegation is bounded to the role graph: ${delegationGraphSummary()}; a delegating worker stays accountable for its children and research never delegates.`,
               "Parallel writes require an exact disjoint write scope from every child; separate established facts from assumptions.",
               "Use orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update for session goal state.",
               ...(options.worktree.enabled

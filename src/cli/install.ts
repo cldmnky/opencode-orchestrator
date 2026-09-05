@@ -7,6 +7,7 @@ import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
 import { GOAL_TOOL_PERMISSION, orchestratorOnlyPermissionRules } from "../core/permissions.js"
 import { DEFAULT_ROLES, type RoleName } from "../core/roles.js"
 import { parseOptions, type OrchestratorOptions } from "../core/config.js"
+import { parseModelReference } from "../core/model-reference.js"
 import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../core/package-identity.js"
 
 export type InstallTarget = "project" | "global"
@@ -358,8 +359,9 @@ function sensitiveReadPermissions(): Array<Record<string, string>> {
 
 function validateModelReferences(references: AgentModelReferences): void {
   for (const [agent, reference] of Object.entries(references)) {
-    const value = typeof reference === "string" ? reference.trim() : ""
-    if (!/^[^/\s#]+\/[^/\s#]+(?:#[^\s#]+)?$/.test(value)) {
+    try {
+      parseModelReference(typeof reference === "string" ? reference : "")
+    } catch {
       throw new Error(`Invalid model reference for ${agent}: expected provider/model[#variant]`)
     }
   }

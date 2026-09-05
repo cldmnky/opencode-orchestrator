@@ -57,6 +57,7 @@ export function applyCommandTransform(
 
 const descriptions: Record<CommandName, string> = {
   orchestrate: "Coordinate a task through specialized agents and verification",
+  "worker-models": "Select durable models for worker agents",
   goal: "Set, show, pause, resume, or clear the active session goal",
   restructure: "Perform a conservative, test-backed code restructuring",
   "run-plan": "Execute or resume a plan from .orchestrator/plans",
@@ -68,6 +69,7 @@ const descriptions: Record<CommandName, string> = {
 
 const requiredRoles: Record<CommandName, CommandSpec["requiredRoles"]> = {
   orchestrate: ["orchestrator", "planning", "research", "implementation", "review"],
+  "worker-models": ["orchestrator"],
   goal: ["orchestrator"],
   restructure: ["orchestrator", "planning", "research", "implementation", "review"],
   "run-plan": ["orchestrator", "planning", "implementation", "review"],

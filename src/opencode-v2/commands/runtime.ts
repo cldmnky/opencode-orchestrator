@@ -7,6 +7,8 @@ import { commandDefinitions } from "./index.js"
 import { buildCommandPrompt } from "../../core/prompts.js"
 import type { DispatchGate } from "../observability/runtime.js"
 import { redact } from "../process/redact.js"
+import { formatModelReference } from "../../core/model-reference.js"
+import { parseWorkerModelAssignment, type WorkerModelRuntime } from "../worker-models/runtime.js"
 import {
   goalStorageKey,
   newGoal,
@@ -32,6 +34,7 @@ export async function runCommand(
   input: CommandInvocationLike,
   orchestratorModel: ModelRefLike | undefined,
   gate?: DispatchGate,
+  workerModels?: WorkerModelRuntime,
 ): Promise<void> {
   const args = input.prompt.text.trim()
   const spec = commandDefinitions(options).find((item) => item.name === name)
@@ -39,6 +42,11 @@ export async function runCommand(
 
   if (spec.requiresArgument && !args) {
     await emitStatus(context, input.sessionID, `/${name} requires an argument.`)
+    return
+  }
+
+  if (name === "worker-models") {
+    await runWorkerModelsCommand(context, input.sessionID, args, workerModels)
     return
   }
 
@@ -589,6 +597,53 @@ async function configuredModel(context: Context, agentID: string): Promise<Model
     id: candidate.id,
     providerID: candidate.providerID,
     ...(typeof candidate.variant === "string" ? { variant: candidate.variant } : {}),
+  }
+}
+
+async function runWorkerModelsCommand(
+  context: Context,
+  sessionID: string,
+  args: string,
+  workerModels: WorkerModelRuntime | undefined,
+): Promise<void> {
+  if (!workerModels) {
+    await emitStatus(context, sessionID, "Worker model selection is unavailable in this plugin instance.")
+    return
+  }
+
+  try {
+    const assignment = parseWorkerModelAssignment(args)
+    if (assignment.kind === "list") {
+      const statuses = await workerModels.list()
+      const lines = statuses.map((status) => {
+        const selected = status.override ? formatModelReference(status.override) : "configured default"
+        const configured = status.configured ? formatModelReference(status.configured) : "OpenCode fallback"
+        const effective = status.effective ? formatModelReference(status.effective) : configured
+        return `- ${status.agentID}: ${selected} (configured: ${configured}; effective: ${effective})`
+      })
+      await emitStatus(context, sessionID, `Worker models:\n${lines.join("\n")}`)
+      return
+    }
+
+    if (assignment.kind === "reset") {
+      await workerModels.reset()
+      await emitStatus(context, sessionID, "Worker model overrides reset; configured agent models apply to future children.")
+      return
+    }
+
+    if (assignment.model) {
+      await workerModels.set(assignment.agentID, assignment.model)
+      await emitStatus(
+        context,
+        sessionID,
+        `${assignment.agentID} → ${formatModelReference(assignment.model)}; applies to children spawned after this point.`,
+      )
+    } else {
+      await workerModels.clear(assignment.agentID)
+      await emitStatus(context, sessionID, `${assignment.agentID} reset to its configured model for future children.`)
+    }
+  } catch (error) {
+    await emitStatus(context, sessionID, `Worker model selection failed: ${errorMessage(error)}`)
   }
 }
 

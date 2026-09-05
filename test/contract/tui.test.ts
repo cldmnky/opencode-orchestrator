@@ -27,6 +27,76 @@ describe("TUI plugin contract", () => {
     await expect(tuiPlugin.setup(contextWithSync(Promise.reject(error), stopped))).rejects.toBe(error)
     expect(stopped).toEqual(["session.execution.failed", "command.updated", "slot"])
   })
+
+  test("uses the active location for the worker model catalog and dispatches the selected model", async () => {
+    const commands: Array<{ id?: string; run(input?: string): Promise<void> | void }> = []
+    const selections: string[] = []
+    const requests: unknown[] = []
+    const context = {
+      options: {},
+      location: { directory: "/workspace" },
+      data: {
+        on: () => () => {},
+        location: {
+          default: () => ({ directory: "/workspace" }),
+          command: {
+            sync: async () => {},
+            invalidate: () => {},
+            list: () => [{ name: "worker-models", description: "Select durable models for worker agents" }],
+          },
+        },
+      },
+      ui: {
+        slot: (claim: { render: (input: Record<string, never>) => unknown }) => {
+          claim.render({})
+          return () => {}
+        },
+        router: { current: () => ({ type: "session", sessionID: "session" }) },
+        dialog: {
+          select: async (input: { title: string }) => {
+            selections.push(input.title)
+            return input.title === "Select worker agent"
+              ? { kind: "worker", agentID: "explore" }
+              : { kind: "model", reference: { providerID: "provider", id: "model", variant: "fast" } }
+          },
+          alert: async () => {},
+        },
+        toast: { show: () => {} },
+      },
+      keymap: {
+        layer: (definition: () => { commands: Array<{ id?: string; run(input?: string): Promise<void> | void }> }) => {
+          commands.push(...definition().commands)
+        },
+      },
+      client: {
+        model: {
+          list: async (input: unknown) => {
+            requests.push(input)
+            return {
+              data: [{
+                providerID: "provider",
+                id: "model",
+                name: "Worker",
+                enabled: true,
+                capabilities: { tools: true },
+                variants: [{ id: "fast" }],
+              }],
+            }
+          },
+        },
+        agent: { list: async () => ({ data: [{ id: "explore", model: { providerID: "configured", id: "old" } }] }) },
+        session: { command: async (input: unknown) => requests.push(input) },
+      },
+    } as unknown as Context
+
+    const cleanup = await tuiPlugin.setup(context)
+    await commands.find((command) => command.id?.endsWith(".worker-models"))?.run()
+    await cleanup?.()
+
+    expect(selections).toEqual(["Select worker agent", "Select model for explore"])
+    expect(requests[0]).toEqual({ location: { directory: "/workspace" } })
+    expect(requests[1]).toMatchObject({ command: "worker-models", text: "explore=provider/model#fast", sessionID: "session" })
+  })
 })
 
 function contextWithSync(sync: Promise<void>, stopped: string[], onRender: () => void = () => {}): Context {

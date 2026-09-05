@@ -8,6 +8,7 @@ import {
   orchestratorOnlyPermissionRules,
 } from "../../src/core/permissions.js"
 import { applyAgentTransform, type AgentDraftLike } from "../../src/opencode-v2/agents.js"
+import type { ModelReference } from "../../src/core/model-reference.js"
 
 const options = parseOptions({})
 
@@ -20,6 +21,7 @@ const FEATURE_ACTIONS = [
 type MutableAgent = {
   id: string
   mode: string
+  model?: { providerID: string; id: string; variant?: string }
   system?: string
   description?: string
   permissions?: Array<{ action: string; resource: string; effect: string }>
@@ -204,6 +206,19 @@ describe("agent transform feature permissions", () => {
     const draft = draftWith({ orchestrator: { mode: "primary" } })
     const missing = applyAgentTransform(draft, options)
     expect(missing).toEqual(["planner", "explore", "implementer", "reviewer"])
+  })
+
+  test("applies runtime model overrides only to configured workers", () => {
+    const draft = draftWith({
+      orchestrator: { mode: "primary", model: { providerID: "configured", id: "orchestrator" } },
+      planner: { mode: "subagent", model: { providerID: "configured", id: "planner" } },
+      explore: { mode: "subagent", model: { providerID: "configured", id: "explore" } },
+    })
+    const overrides = new Map<string, ModelReference>([["planner", { providerID: "runtime", id: "fast" }]])
+    applyAgentTransform(draft, options, overrides)
+    expect(draft.get("planner")!.model).toEqual({ providerID: "runtime", id: "fast" })
+    expect(draft.get("explore")!.model).toEqual({ providerID: "configured", id: "explore" })
+    expect(draft.get("orchestrator")!.model).toEqual({ providerID: "configured", id: "orchestrator" })
   })
 
   test("worker system prompts embed feature lifecycle guidance only when features are enabled", () => {

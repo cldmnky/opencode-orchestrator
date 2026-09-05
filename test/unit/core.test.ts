@@ -107,6 +107,7 @@ describe("configuration", () => {
     const definitions = commandDefinitions(parseOptions({ commands: { cd: true } }))
     expect(definitions.map((definition) => definition.name)).toEqual([
       "orchestrate",
+      "worker-models",
       "goal",
       "restructure",
       "run-plan",

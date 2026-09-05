@@ -34,7 +34,7 @@ bun run build
 ## Live Reload (repo root)
 
 - There is no repo-level `opencode.jsonc`; the global config (`~/.config/opencode/opencode.json`, nix-managed from `~/.config/nix/dotfiles/opencode/opencode.json`) is the single source of truth and loads the plugin from this repo's `src` directory. Saving `src/**` still triggers the server's file watcher — no restart for most changes. Watch `~/.local/share/opencode/log/opencode.log` for `loading plugin .../src/index.ts` and `agent.updated`/`command.updated`. Plugin option changes go through the nix dotfiles plus `darwin-rebuild switch` and need a service restart.
-- If `/orchestrate`/`/goal` disappear in the TUI, restart the shared service and reopen from the repo: `opencode2 service restart` then `cd repo && opencode2`. Verify the repo-scoped plugin with `opencode2 api get '/api/plugin?location[directory]=/path/to/repo' | jq -r '.data // . | .[].id'` and `bun run src/cli/index.ts doctor`.
+- If `/orchestrate`/`/worker-models`/`/goal` disappear in the TUI, restart the shared service and reopen from the repo: `opencode2 service restart` then `cd repo && opencode2`. Verify the repo-scoped plugin with `opencode2 api get '/api/plugin?location[directory]=/path/to/repo' | jq -r '.data // . | .[].id'` and `bun run src/cli/index.ts doctor`.
 - Do not set `OPENCODE_CONFIG` in normal dev; it overrides discovery.
 
 ## Ship

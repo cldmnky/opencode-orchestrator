@@ -4,6 +4,7 @@ import { RUNTIME_PLUGIN_ID } from "./package-identity.js"
 
 export const COMMAND_NAMES = [
   "orchestrate",
+  "worker-models",
   "goal",
   "restructure",
   "run-plan",

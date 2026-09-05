@@ -32,3 +32,18 @@ export const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
 export function requiredAgentIds(orchestrator: string, roles: Record<RoleName, string>): string[] {
   return [...new Set([orchestrator, ...Object.values(roles)])]
 }
+
+export function workerAgentIds(orchestrator: string, roles: Record<RoleName, string>): string[] {
+  return [...new Set(Object.values(roles))].filter((id) => id !== orchestrator)
+}
+
+export function workerAgentRoles(orchestrator: string, roles: Record<RoleName, string>): ReadonlyMap<string, string[]> {
+  const result = new Map<string, string[]>()
+  for (const [role, agentID] of Object.entries(roles)) {
+    if (agentID === orchestrator) continue
+    const names = result.get(agentID) ?? []
+    names.push(role)
+    result.set(agentID, names)
+  }
+  return result
+}

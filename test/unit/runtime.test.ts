@@ -8,8 +8,32 @@ import type { CommandInvocationLike } from "../../src/opencode-v2/commands/index
 import { runCommand } from "../../src/opencode-v2/commands/runtime.js"
 import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
 import { goalStorageKey, runStorageKey, stopStorageKey } from "../../src/opencode-v2/goal/state.js"
+import type { WorkerModelRuntime } from "../../src/opencode-v2/worker-models/runtime.js"
 
 describe("runtime commands", () => {
+  test("updates worker model overrides without dispatching a model prompt", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    const changes: string[] = []
+    const workerModels: WorkerModelRuntime = {
+      overrides: new Map(),
+      workerIDs: ["planner", "explore", "implementer", "reviewer"],
+      scope: "project-project",
+      set: async (agentID, model) => void changes.push(`${agentID}=${model.providerID}/${model.id}`),
+      clear: async (agentID) => void changes.push(`${agentID}=default`),
+      reset: async () => void changes.push("reset"),
+      list: async () => [{ agentID: "planner", effective: { providerID: "configured", id: "planner" } }],
+    }
+
+    await runCommand(fixture.context, parseOptions({}), "worker-models", invocation("planner=provider/model"), undefined, undefined, workerModels)
+    expect(changes).toEqual(["planner=provider/model"])
+    expect(fixture.prompts).toHaveLength(0)
+    expect(fixture.statuses[0]).toContain("applies to children spawned after this point")
+
+    await runCommand(fixture.context, parseOptions({}), "worker-models", invocation("planner=default"), undefined, undefined, workerModels)
+    await runCommand(fixture.context, parseOptions({}), "worker-models", invocation("reset"), undefined, undefined, workerModels)
+    expect(changes).toEqual(["planner=provider/model", "planner=default", "reset"])
+  })
+
   test("selects and includes a plan before prompting", async () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
     mkdirSync(join(directory, ".orchestrator", "plans"), { recursive: true })

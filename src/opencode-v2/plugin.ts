@@ -14,6 +14,7 @@ import { createDispatchGate, shouldStartObservability, startObservability } from
 import { startWorktreeEventSync } from "./worktree/events.js"
 import { SpawnRunner } from "./process/runner.js"
 import { createSessionMoveCoordinator } from "./session/move-coordinator.js"
+import { createWorkerModelRuntime, type WorkerModelRuntime } from "./worker-models/runtime.js"
 import { DISTRIBUTION_NAME, RUNTIME_PLUGIN_ID } from "../core/package-identity.js"
 
 export const orchestratorPlugin = (Plugin.define as any)({
@@ -21,6 +22,15 @@ export const orchestratorPlugin = (Plugin.define as any)({
   tui: true,
   async setup(ctx: Context) {
     const options = parseOptions(ctx.options)
+    const runner = new SpawnRunner()
+    const workerModels = await createWorkerModelRuntime({
+      storage: ctx.storage,
+      location: ctx.location,
+      options,
+      runner,
+      catalog: ctx.catalog,
+      agent: ctx.agent,
+    })
     const agentResponse = await ctx.agent.list()
     const agents = responseData<AgentInfoLike>(agentResponse)
     const agentIssues = validateAgentSet(agents, options)
@@ -50,7 +60,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
       ? new Set(["orchestrator", ...Object.keys(options.roles)])
       : availableRoles(agents, options)
     const registrations: Array<{ dispose(): Promise<void> }> = []
-    const lateAgentSetup = pendingAgents ? startLateAgentSetup(ctx, options) : undefined
+    const lateAgentSetup = pendingAgents ? startLateAgentSetup(ctx, options, workerModels) : undefined
 
     // S3/V1 observability runtime: started only when trace, stop-between-steps
     // budget, or bounded review is configured. Defaults keep the previous
@@ -65,7 +75,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
     try {
       registrations.push(
         await ctx.agent.transform((draft) => {
-          applyAgentTransform(draft, options)
+          applyAgentTransform(draft, options, workerModels.overrides)
         }),
       )
 
@@ -75,7 +85,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
           commandResult = applyCommandTransform(
             draft,
             options,
-            (name, input) => runCommand(ctx, options, name, input, undefined, controlGate),
+            (name, input) => runCommand(ctx, options, name, input, undefined, controlGate, workerModels),
             new Set(existingCommands.map((command) => command.name)),
             semanticRoles,
           )
@@ -88,7 +98,6 @@ export const orchestratorPlugin = (Plugin.define as any)({
         console.warn(`${RUNTIME_PLUGIN_ID} omitted commands with unavailable roles: ${commandResult.unavailable.join(", ")}`)
       }
 
-      const runner = new SpawnRunner()
       registrations.push(
         await ctx.tool.transform((draft) => {
           addGoalTools(draft, ctx.storage, ctx.location, options)
@@ -227,6 +236,7 @@ function isEmptyResponse(response: unknown, data: readonly unknown[]): boolean {
 function startLateAgentSetup(
   context: Context,
   options: ReturnType<typeof parseOptions>,
+  workerModels: WorkerModelRuntime,
 ): { stop(): Promise<void>; registration: Promise<{ dispose(): Promise<void> } | undefined> } {
   const controller = new AbortController()
   const iterable = context.event.subscribe({ signal: controller.signal })
@@ -275,7 +285,7 @@ function startLateAgentSetup(
         }
 
         const lateRegistration = await context.agent.transform((draft) => {
-          applyAgentTransform(draft, options)
+          applyAgentTransform(draft, options, workerModels.overrides)
         })
         if (stopped) {
           await lateRegistration.dispose()

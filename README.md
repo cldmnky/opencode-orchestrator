@@ -43,6 +43,7 @@ You only talk to the orchestrator. It handles the rest.
 | Critique a plan before coding | `/stress-plan` | *“Add rate limiting with Redis fallback”* |
 | Pause automation | `/halt` | — |
 | Hand context to the next session | `/handover` | *“Focus on payments regression”* |
+| Choose models for worker agents | `/worker-models` | — |
 
 For a single-file typo or one-line edit, just prompt the model directly — you don’t need orchestration.
 
@@ -195,15 +196,19 @@ Mark a plan done with `status: complete` in frontmatter or a `## Status / comple
 /polish            # clean up only files changed in this branch
 /polish src/core/policy.ts src/core/prompts.ts
 /stress-plan add rate limiting to the API with redis fallback
+/worker-models            # open the TUI worker-model picker
+/worker-models explore=default
+/worker-models reset      # restore all workers to configured models
 ```
 
 `/stress-plan` drafts a plan, then critiques it from four angles (correctness, simplicity, security, feasibility) before finalizing.
+`/worker-models` selects durable runtime models for `planner`, `explore`, `implementer`, and `reviewer` only. The TUI picker lists enabled, tool-capable models and their variants. Text form accepts `worker=provider/model[#variant]`, `worker=default`, `list`, and `reset`.
 
 ---
 
 ## Configuration
 
-You mostly configure **models**, not plugin options. Use OpenCode’s native `agents.<id>.model`:
+You configure baseline **models** with OpenCode’s native `agents.<id>.model`; the TUI can apply durable worker-only overrides at runtime:
 
 ```jsonc
 // opencode.jsonc
@@ -255,7 +260,7 @@ You mostly configure **models**, not plugin options. Use OpenCode’s native `ag
 
 Model IDs shown here are illustrative; availability varies by provider and account.
 
-Change a model later by editing `agents.<id>.model` directly — no reinstall needed.
+Change a baseline model later by editing `agents.<id>.model` directly — no reinstall needed. For temporary or run-specific worker choices, use `/worker-models` in the TUI instead; overrides survive service restarts, follow the repository across this plugin’s managed worktrees, and apply to children spawned after the change. Existing child sessions keep their current model. `/worker-models worker=default` clears one override and `/worker-models reset` clears them all. The orchestrator model remains config-controlled.
 
 ---
 

@@ -117,6 +117,7 @@ describe("server plugin contract", () => {
 
     expect(commands.map((command) => command.name)).toEqual([
       "orchestrate",
+      "worker-models",
       "goal",
       "restructure",
       "run-plan",

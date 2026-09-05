@@ -11,6 +11,7 @@ import {
 } from "../core/permissions.js"
 import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
 import { requiredAgentIds, ROLE_DESCRIPTIONS, ROLE_NAMES, type RoleName } from "../core/roles.js"
+import type { ModelReference } from "../core/model-reference.js"
 
 export type AgentInfoLike = {
   id: string
@@ -32,6 +33,7 @@ export type AgentDraftLike = {
 
 type MutableAgentLike = {
   id: unknown
+  model?: unknown
   system?: string
   description?: string
   permissions?: PermissionRuleLike[]
@@ -57,7 +59,11 @@ export function validateAgentSet(agents: readonly AgentInfoLike[], options: Orch
   return issues
 }
 
-export function applyAgentTransform(draft: AgentDraftLike, options: OrchestratorOptions): string[] {
+export function applyAgentTransform(
+  draft: AgentDraftLike,
+  options: OrchestratorOptions,
+  workerModels?: ReadonlyMap<string, ModelReference>,
+): string[] {
   const missing: string[] = []
   const agents = draft.list()
 
@@ -86,6 +92,8 @@ export function applyAgentTransform(draft: AgentDraftLike, options: Orchestrator
     const id = options.roles[role]
     if (!draft.get(id)) continue
     draft.update(id, (agent) => {
+      const model = workerModels?.get(id)
+      if (model) agent.model = { ...model }
       agent.description = appendOnce(agent.description, roleDescription(role))
       agent.system = appendOnce(agent.system, buildWorkerSystem(role, options))
       // Fail closed by default: workers get the goal tools and the

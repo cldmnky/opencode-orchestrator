@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { parse } from "jsonc-parser"
 import { inspectConfig, mergeStatus, runtimeChecks, type DoctorRunner } from "../../src/cli/doctor.js"
 import { configRelativePluginReference, installConfig, isLocalPluginReference, pluginEntryForRuntimeFile } from "../../src/cli/install.js"
 import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../../src/core/package-identity.js"
@@ -505,6 +506,194 @@ describe("installer", () => {
     expect(rules.filter((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toEqual([
       { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect: "ask" },
     ])
+  })
+
+  test("installs the bounded nested-delegation graph as exact subagent allows after a broad deny", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+
+    // The exact graph: orchestrator→all roles; implementation→planning+research;
+    // planning→research; review→research; research→no delegation at all.
+    const graph: Record<string, string[]> = {
+      orchestrator: ["planner", "explore", "implementer", "reviewer"],
+      planner: ["explore"],
+      explore: [],
+      implementer: ["planner", "explore"],
+      reviewer: ["explore"],
+    }
+    for (const [id, targets] of Object.entries(graph)) {
+      const rules = document.agents[id].permissions as Rule[]
+      const subagentRules = rules.filter((rule) => rule.action === "subagent")
+
+      // Exactly one broad deny, first among the subagent rules.
+      const denies = subagentRules.filter((rule) => rule.resource === "*" && rule.effect === "deny")
+      expect(denies, id).toEqual([{ action: "subagent", resource: "*", effect: "deny" }])
+
+      // Only the role-graph edges are allowed, each exactly once, in graph order.
+      const allows = subagentRules.filter((rule) => rule.effect === "allow")
+      expect(allows.map((rule) => rule.resource), id).toEqual(targets)
+
+      // Every allow comes after the broad deny so last-match-wins resolves to
+      // the exact edge set, and no rule targets any other agent.
+      const denyIndex = rules.findIndex((rule) => rule.action === "subagent" && rule.resource === "*" && rule.effect === "deny")
+      for (const rule of allows) {
+        expect(rules.indexOf(rule), `${id}:${rule.resource}`).toBeGreaterThan(denyIndex)
+        expect(targets).toContain(rule.resource)
+      }
+    }
+  })
+
+  test("denies every non-graph nested delegation edge", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+
+    // Simulates the V2 core decision: the last matching rule wins.
+    const effective = (rules: Rule[], resource: string): string | undefined =>
+      [...rules].reverse().find((rule) => rule.action === "subagent" && (rule.resource === "*" || rule.resource === resource))?.effect
+
+    const forbidden: Array<[string, string]> = [
+      ["planner", "implementer"],
+      ["planner", "reviewer"],
+      ["planner", "orchestrator"],
+      ["explore", "planner"],
+      ["explore", "orchestrator"],
+      ["implementer", "reviewer"],
+      ["implementer", "orchestrator"],
+      ["reviewer", "planner"],
+      ["reviewer", "implementer"],
+      ["reviewer", "orchestrator"],
+    ]
+    for (const [worker, target] of forbidden) {
+      const rules = document.agents[worker].permissions as Rule[]
+      expect(effective(rules, target), `${worker}->${target}`).toBe("deny")
+    }
+    // The orchestrator may reach every configured role.
+    const orchestratorRules = document.agents.orchestrator.permissions as Rule[]
+    for (const target of ["planner", "explore", "implementer", "reviewer"]) {
+      expect(effective(orchestratorRules, target), `orchestrator->${target}`).toBe("allow")
+    }
+  })
+
+  test("keeps research web tools directly allowed while nested delegation stays denied", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+
+    const explore = document.agents.explore.permissions as Rule[]
+    expect(explore.filter((rule) => rule.action === "webfetch")).toEqual([{ action: "webfetch", resource: "*", effect: "allow" }])
+    expect(explore.filter((rule) => rule.action === "websearch")).toEqual([{ action: "websearch", resource: "*", effect: "allow" }])
+    expect(explore.filter((rule) => rule.action === "subagent" && rule.effect === "allow")).toEqual([])
+
+    // Research behavior is stated in the installed system prompt too.
+    const exploreSystem = document.agents.explore.system as string
+    expect(exploreSystem).toContain("webfetch and websearch directly")
+    expect(exploreSystem).toContain("never launch subagents")
+    const implementerSystem = document.agents.implementer.system as string
+    expect(implementerSystem).toContain("only the planning and research roles")
+    const orchestratorSystem = document.agents.orchestrator.system as string
+    expect(orchestratorSystem).toContain("Bounded nested delegation graph")
+    expect(orchestratorSystem).toContain("orchestrator→all configured roles")
+  })
+
+  test("sets experimental.subagent_depth to 3 on a fresh install", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    // Native V2 subagent depth defaults to 1, which would block the approved
+    // deepest path orchestrator -> implementation -> planning -> research.
+    expect(document.experimental).toEqual({ subagent_depth: 3 })
+  })
+
+  test("adds subagent_depth to an existing experimental object and preserves unrelated keys", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    writeFileSync(path, JSON.stringify({ experimental: { something: true, nested: { a: 1 } }, agents: {} }))
+
+    installConfig(path, {})
+
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    expect(document.experimental).toEqual({ subagent_depth: 3, something: true, nested: { a: 1 } })
+  })
+
+  test("preserves explicit subagent_depth values, lower, higher, or otherwise", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    for (const [index, depth] of [1, 2, 8, "3", null, false].entries()) {
+      const path = join(directory, `depth-${index}.jsonc`)
+      writeFileSync(path, JSON.stringify({ experimental: { subagent_depth: depth } }))
+
+      installConfig(path, {})
+
+      const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+      expect(document.experimental.subagent_depth, String(depth)).toBe(depth)
+      // Nothing else was added inside the user's experimental object.
+      expect(Object.keys(document.experimental), String(depth)).toEqual(["subagent_depth"])
+    }
+  })
+
+  test("rejects a non-object experimental entry without writing any change", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    for (const [index, invalid] of [[1, 2], "deep", 42, null].entries()) {
+      const path = join(directory, `invalid-${index}.jsonc`)
+      const source = JSON.stringify({ experimental: invalid })
+      writeFileSync(path, source)
+
+      expect(() => installConfig(path, {}), JSON.stringify(invalid)).toThrow(
+        /Invalid experimental entry at .*: expected an object/,
+      )
+      // The rejection is consistent with the other installer validation: the
+      // file is left exactly as authored instead of being overwritten.
+      expect(readFileSync(path, "utf8")).toBe(source)
+    }
+  })
+
+  test("depth insertion is idempotent and leaves the config byte-identical on reinstall", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const first = readFileSync(path, "utf8")
+
+    const second = installConfig(path, {})
+    expect(second.addedAgents).toEqual([])
+    expect(readFileSync(path, "utf8")).toBe(first)
+
+    const document = JSON.parse(first) as Record<string, any>
+    expect(document.experimental).toEqual({ subagent_depth: 3 })
+  })
+
+  test("an older install without experimental gains the depth on reinstall without re-adding agents", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const withoutDepth = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    delete withoutDepth.experimental
+    writeFileSync(path, JSON.stringify(withoutDepth))
+
+    const result = installConfig(path, {})
+
+    expect(result.addedAgents).toEqual([])
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    expect(document.experimental).toEqual({ subagent_depth: 3 })
+  })
+
+  test("depth insertion stays localized in commented JSONC", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    writeFileSync(path, '{\n  // keep this comment\n  "experimental": { "keep": true }\n}\n')
+
+    installConfig(path, {})
+
+    const text = readFileSync(path, "utf8")
+    expect(text).toContain("// keep this comment")
+    const errors: any[] = []
+    const document = parse(text, errors, { allowTrailingComma: true }) as Record<string, any>
+    expect(errors).toEqual([])
+    expect(document.experimental).toEqual({ subagent_depth: 3, keep: true })
   })
 
   test("installs the observability permission: allowed for the orchestrator, denied to every worker", () => {

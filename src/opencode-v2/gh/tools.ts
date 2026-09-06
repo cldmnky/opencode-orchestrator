@@ -417,7 +417,7 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
         const marked = await markPullReady(gh, { owner, repo, number })
         if (marked.draft === true) {
           return result(
-            `github pr ready failed: the ready_for_review response still reports draft:true for pull ${owner}/${repo}#${number}`,
+            `github pr ready failed: the GraphQL ready mutation still reports draft:true for pull ${owner}/${repo}#${number}`,
           )
         }
 

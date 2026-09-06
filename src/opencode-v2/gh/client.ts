@@ -9,8 +9,9 @@ import type { ProcessResult, ProcessRunner } from "../process/runner.js"
  *
  * All GitHub access goes through the `gh` CLI via the stage-2 `ProcessRunner`
  * (shell off, 1 MiB output bound, 30s default timeout), so tests inject fakes
- * and nothing here ever sees or handles tokens. `gh api` is invoked with the
- * fixed endpoint templates below and `--method GET/POST/PUT`.
+ * and nothing here ever sees or handles tokens. REST calls use the fixed
+ * endpoint templates below; the ready transition uses `gh api graphql` with
+ * fixed queries and typed variables.
  *
  * Request bodies cannot ride along as `--input -` stdin because the stage-2
  * runner spawns with `stdio: ["ignore", ...]` (stdin is closed). Bodies are
@@ -247,6 +248,23 @@ export type PullReview = {
 const ISSUE_STATES = ["open", "closed", "all"] as const
 
 const MERGE_METHODS = ["merge", "squash", "rebase"] as const
+
+const PULL_REQUEST_ID_QUERY = `query PullRequestId($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+    }
+  }
+}`
+
+const MARK_PULL_READY_MUTATION = `mutation MarkPullRequestReadyForReview($pullRequestId: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
+    pullRequest {
+      id
+      isDraft
+    }
+  }
+}`
 
 /** Repo slug hygiene: endpoint segments must be URL-safe (http://gh.io/repos). */
 export function assertRepoSlug(value: string, label: string): string {
@@ -646,18 +664,50 @@ export async function compareRefs(gh: GhContext, input: CompareInput): Promise<C
 }
 
 /**
- * Mark a draft PR ready for review via the fixed
- * `POST repos/{owner}/{repo}/pulls/{number}/ready_for_review` endpoint (no
- * body) and validate the returned pull object. The caller must already hold
- * a fresh PR view proving draft/mergeability/conflict state; here only the
- * mutation and the response shape are handled.
+ * Mark a draft PR ready for review through GitHub's GraphQL mutation. GitHub's
+ * current CLI uses this mutation; the old REST `ready_for_review` path returns
+ * 404. The caller must already hold a fresh PR view proving
+ * draft/mergeability/conflict state. The mutation response is required to
+ * identify the same pull request and report `isDraft: false`.
  */
-export async function markPullReady(gh: GhContext, input: PullReadyInput): Promise<PullInfo> {
+export async function markPullReady(gh: GhContext, input: PullReadyInput): Promise<{ draft: boolean }> {
   const { owner, repo } = repoOf(input)
   const number = assertIssueNumber(input.number)
-  const result = await ghApi(gh, "POST", pullReadyEndpoint(owner, repo, number), { timeoutMs: input.timeoutMs })
-  requireZero(result, gh, "gh pr ready")
-  return assertPullShape(parseJson(result.stdout, gh))
+  const lookup = await ghGraphql(
+    gh,
+    PULL_REQUEST_ID_QUERY,
+    [
+      { name: "owner", value: owner },
+      { name: "repo", value: repo },
+      { name: "number", value: number },
+    ],
+    input.timeoutMs,
+  )
+  const repository = requiredObject(lookup.repository, "repository")
+  const pull = requiredObject(repository.pullRequest, "pullRequest")
+  const pullRequestId = pull.id
+  if (typeof pullRequestId !== "string" || pullRequestId.length === 0) {
+    throw new Error('github graphql pull request response is missing "id"')
+  }
+
+  const marked = await ghGraphql(
+    gh,
+    MARK_PULL_READY_MUTATION,
+    [{ name: "pullRequestId", value: pullRequestId }],
+    input.timeoutMs,
+  )
+  const mutation = requiredObject(marked.markPullRequestReadyForReview, "markPullRequestReadyForReview")
+  const markedPull = requiredObject(mutation.pullRequest, "pullRequest")
+  if (markedPull.id !== pullRequestId) {
+    throw new Error("github graphql ready response identified a different pull request")
+  }
+  if (typeof markedPull.isDraft !== "boolean") {
+    throw new Error('github graphql ready response is missing boolean "isDraft"')
+  }
+  if (markedPull.isDraft !== false) {
+    throw new Error(`github graphql ready response still reports isDraft=${String(markedPull.isDraft)}`)
+  }
+  return { draft: markedPull.isDraft }
 }
 
 /**
@@ -764,6 +814,26 @@ async function ghApi(
   }
 }
 
+/** `gh api graphql` with fixed query documents and typed variables. */
+async function ghGraphql(
+  gh: GhContext,
+  query: string,
+  variables: readonly { name: string; value: string | number }[],
+  timeoutMs?: number,
+): Promise<Record<string, unknown>> {
+  const args = ["api", "graphql", "-f", `query=${query}`]
+  for (const variable of variables) {
+    args.push(typeof variable.value === "number" ? "-F" : "-f", `${variable.name}=${String(variable.value)}`)
+  }
+  const result = await run(gh, args, { timeoutMs })
+  requireZero(result, gh, "gh api graphql")
+  const payload = objectOf(parseJson(result.stdout, gh))
+  if (payload.errors !== undefined) {
+    throw new Error(`github graphql response has errors: ${redactText(gh, JSON.stringify(payload.errors))}`)
+  }
+  return objectOf(payload.data)
+}
+
 async function run(
   gh: GhContext,
   args: readonly string[],
@@ -798,6 +868,13 @@ function parseJson(text: string, gh: GhContext): unknown {
 
 function objectOf(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("github response is not an object")
+  return value as Record<string, unknown>
+}
+
+function requiredObject(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`github graphql response is missing "${label}"`)
+  }
   return value as Record<string, unknown>
 }
 
@@ -891,11 +968,6 @@ export function pullsEndpoint(owner: string, repo: string): string {
 /** Fixed endpoint template: `repos/{owner}/{repo}/pulls/{number}/merge`. */
 export function pullMergeEndpoint(owner: string, repo: string, number: number): string {
   return `${pullsEndpoint(owner, repo)}/${number}/merge`
-}
-
-/** Fixed endpoint template: `repos/{owner}/{repo}/pulls/{number}/ready_for_review`. */
-export function pullReadyEndpoint(owner: string, repo: string, number: number): string {
-  return `${pullsEndpoint(owner, repo)}/${number}/ready_for_review`
 }
 
 /** Fixed endpoint template: `repos/{owner}/{repo}/pulls/{number}/reviews`. */

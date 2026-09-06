@@ -153,6 +153,24 @@ function fail(stderr = "gh: error"): ProcessResult {
   return { exitCode: 1, stdout: "", stderr }
 }
 
+const PULL_REQUEST_ID = "PR_kwDOABC123456789"
+
+function readyGraphql(call: Call, draft: boolean): ProcessResult | undefined {
+  if (call.args[0] !== "api" || call.args[1] !== "graphql") return undefined
+  const query = call.args.find((arg) => arg.startsWith("query=")) ?? ""
+  if (query.includes("query PullRequestId")) {
+    return ok(JSON.stringify({ data: { repository: { pullRequest: { id: PULL_REQUEST_ID } } } }))
+  }
+  if (query.includes("mutation MarkPullRequestReadyForReview")) {
+    return ok(
+      JSON.stringify({
+        data: { markPullRequestReadyForReview: { pullRequest: { id: PULL_REQUEST_ID, isDraft: draft } } },
+      }),
+    )
+  }
+  return undefined
+}
+
 /** A `GET /repos/{o}/{r}/branches/{branch}` response. */
 function branchJson(name: string, sha: string): string {
   return JSON.stringify({ name, commit: { sha } })
@@ -702,17 +720,20 @@ describe("gh current user, branch refs, and compare", () => {
 })
 
 describe("gh pull ready and reviews (client)", () => {
-  const READY_PULL = { ...PULL, draft: false }
-
-  test("markPullReady POSTs to the fixed ready_for_review endpoint with no body", async () => {
+  test("markPullReady uses GitHub's GraphQL ready mutation", async () => {
     const { runner, calls } = scriptedGh((call) => {
-      if (call.args.includes("repos/acme/widgets/pulls/7/ready_for_review")) return ok(JSON.stringify(READY_PULL))
-      return undefined
+      return readyGraphql(call, false)
     })
     const marked = await markPullReady({ runner }, { owner: "acme", repo: "widgets", number: 7 })
     expect(marked.draft).toBe(false)
-    expect(calls).toHaveLength(1)
-    expect(calls[0]?.args).toEqual(["api", "--method", "POST", "repos/acme/widgets/pulls/7/ready_for_review"])
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.args.slice(0, 2)).toEqual(["api", "graphql"])
+    expect(calls[0]?.args).toContain("owner=acme")
+    expect(calls[0]?.args).toContain("repo=widgets")
+    expect(calls[0]?.args).toContain("number=7")
+    expect(calls[0]?.args).toContain("-F")
+    expect(calls[1]?.args.slice(0, 2)).toEqual(["api", "graphql"])
+    expect(calls[1]?.args).toContain(`pullRequestId=${PULL_REQUEST_ID}`)
   })
 
   test("createPullReview POSTs the exact commit_id and event and verifies the echoed commit_id", async () => {
@@ -1558,12 +1579,13 @@ describe("github tools", () => {
 
     function readyScripted() {
       return scriptedGh((call, calls) => {
+        const graphql = readyGraphql(call, false)
+        if (graphql) return graphql
         if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
         if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
         if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
           return ok(compareJson("ahead", 1, 0, BASE_SHA))
         }
-        if (call.args.includes("repos/acme/widgets/pulls/7/ready_for_review")) return ok(JSON.stringify(READY_DONE))
         if (call.args.includes("repos/acme/widgets/pulls/7")) {
           const views = calls.filter((c) => c.args[0] === "api" && c.args.includes("repos/acme/widgets/pulls/7"))
           return ok(JSON.stringify(views.length <= 1 ? OPEN_DRAFT : READY_DONE))
@@ -1592,13 +1614,23 @@ describe("github tools", () => {
         capturedAt: expect.any(Number),
         mutation: { verified: true, id: 2001, number: 7, url: PULL.html_url },
       })
-      // Exact sequence: view, head ref, base ref, compare, ready POST, post-view.
-      expect(calls.map((call) => `${call.args[2]} ${call.args.at(-1)}`)).toEqual([
+      // Exact sequence: view, head ref, base ref, compare, GraphQL lookup,
+      // GraphQL mutation, post-view.
+      expect(
+        calls.map((call) => {
+          if (call.args[1] === "graphql") {
+            const query = call.args.find((arg) => arg.startsWith("query=")) ?? ""
+            return query.includes("query PullRequestId") ? "GRAPHQL pull id" : "GRAPHQL ready"
+          }
+          return `${call.args[2]} ${call.args.at(-1)}`
+        }),
+      ).toEqual([
         "GET repos/acme/widgets/pulls/7",
         "GET repos/acme/widgets/branches/feature",
         "GET repos/acme/widgets/branches/main",
         "GET repos/acme/widgets/compare/main...feature",
-        "POST repos/acme/widgets/pulls/7/ready_for_review",
+        "GRAPHQL pull id",
+        "GRAPHQL ready",
         "GET repos/acme/widgets/pulls/7",
       ])
     })
@@ -1694,15 +1726,14 @@ describe("github tools", () => {
       expect(output.content).toContain("not an ancestor")
     })
 
-    test("refuses when the ready_for_review response still reports draft:true", async () => {
+    test("refuses when the GraphQL ready response still reports isDraft:true", async () => {
       const { runner } = scriptedGh((call) => {
+        const graphql = readyGraphql(call, true)
+        if (graphql) return graphql
         if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
         if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
         if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
           return ok(compareJson("ahead", 1, 0, BASE_SHA))
-        }
-        if (call.args.includes("repos/acme/widgets/pulls/7/ready_for_review")) {
-          return ok(JSON.stringify({ ...OPEN_DRAFT, draft: true }))
         }
         if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(OPEN_DRAFT))
         return undefined
@@ -1712,17 +1743,18 @@ describe("github tools", () => {
         .get("github_pr_ready")!
         .execute(readyInput, toolContext("session-1", "orchestrator"))
       expect(output.content).toContain("github pr ready failed")
-      expect(output.content).toContain("still reports draft:true")
+      expect(output.content).toContain("still reports isDraft=true")
     })
 
     test("never claims success when the post-view does not confirm the draft transition", async () => {
       const { runner, calls } = scriptedGh((call, allCalls) => {
+        const graphql = readyGraphql(call, false)
+        if (graphql) return graphql
         if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
         if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
         if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
           return ok(compareJson("ahead", 1, 0, BASE_SHA))
         }
-        if (call.args.includes("repos/acme/widgets/pulls/7/ready_for_review")) return ok(JSON.stringify(READY_DONE))
         if (call.args.includes("repos/acme/widgets/pulls/7")) {
           const views = allCalls.filter((c) => c.args[0] === "api" && c.args.includes("repos/acme/widgets/pulls/7"))
           return ok(JSON.stringify(views.length <= 1 ? OPEN_DRAFT : { ...OPEN_DRAFT, draft: true }))
@@ -1736,7 +1768,7 @@ describe("github tools", () => {
       expect(output.content).toContain("github pr ready failed")
       expect(output.content).toContain("post-view does not confirm the draft transition")
       expect(output.content).not.toContain("evidence")
-      expect(calls).toHaveLength(6)
+      expect(calls).toHaveLength(7)
     })
 
     test("refuses without the durable publish capability pr-ready-transition", async () => {

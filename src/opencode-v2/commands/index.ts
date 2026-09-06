@@ -65,6 +65,7 @@ const descriptions: Record<CommandName, string> = {
   handover: "Create a factual continuation brief from session and VCS context",
   polish: "Make narrowly scoped quality improvements and review the result",
   "stress-plan": "Draft and independently critique a multi-agent execution plan",
+  publish: "Inspect or toggle the durable project-scoped publication capability (status|enable|disable)",
 }
 
 const requiredRoles: Record<CommandName, CommandSpec["requiredRoles"]> = {
@@ -77,6 +78,7 @@ const requiredRoles: Record<CommandName, CommandSpec["requiredRoles"]> = {
   handover: ["orchestrator"],
   polish: ["orchestrator", "research", "implementation", "review"],
   "stress-plan": ["orchestrator", "planning", "research", "review"],
+  publish: ["orchestrator"],
 }
 
 const requiresArgument = new Set<CommandName>(["orchestrate", "restructure", "stress-plan"])

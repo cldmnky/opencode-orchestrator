@@ -21,6 +21,31 @@ import { z } from "zod"
 
 export type WorktreeStatus = "pending" | "ready" | "moved" | "dirty" | "orphaned" | "cleanup-failed"
 
+/**
+ * Exact-revision sync receipt persisted by `orchestrator_worktree_sync`.
+ *
+ * A receipt exists only after a successful sync against the latest remote
+ * base: `baseRef`/`baseSha` pin the exact base fetched from `remote` at
+ * `syncedAt`, and `headSha` pins the exact feature branch HEAD after the
+ * sync (unchanged when `merged` is false). `worktree_push` fails closed
+ * without a receipt and re-verifies every field against live git state.
+ */
+export type WorktreeSyncReceipt = {
+  /** Remote the base branch was fetched from. */
+  remote: string
+  /** Base branch name (e.g. `main`), never a commit id. */
+  baseBranch: string
+  /** Full ref fetched, `refs/heads/<baseBranch>`. */
+  baseRef: string
+  /** Exact base SHA on the remote at sync time. */
+  baseSha: string
+  /** Exact feature branch head SHA after sync. */
+  headSha: string
+  /** True when a merge was performed; false when the branch already contained the base. */
+  merged: boolean
+  syncedAt: number
+}
+
 export type WorktreeRecord = {
   version: 1
   /** The session that created the worktree. */
@@ -38,6 +63,11 @@ export type WorktreeRecord = {
   /** Commit-ish the branch was created from. */
   base: string
   status: WorktreeStatus
+  /**
+   * Exact-revision sync receipt. Absent on legacy records: sync was never
+   * performed, and (for push) that fails closed.
+   */
+  sync?: WorktreeSyncReceipt
   createdAt: number
   updatedAt: number
 }
@@ -79,6 +109,21 @@ export type NewWorktreeInput = {
   base: string
 }
 
+/** Exactly one full lowercase hex git object ID (SHA-1 or SHA-256). */
+export const FULL_SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+const worktreeSyncSchema = z
+  .object({
+    remote: z.string().min(1),
+    baseBranch: z.string().min(1),
+    baseRef: z.string().min(1),
+    baseSha: z.string().regex(FULL_SHA_PATTERN),
+    headSha: z.string().regex(FULL_SHA_PATTERN),
+    merged: z.boolean(),
+    syncedAt: z.number().finite(),
+  })
+  .strict()
+
 const worktreeSchema = z
   .object({
     version: z.literal(1),
@@ -90,6 +135,7 @@ const worktreeSchema = z
     branch: z.string().min(1),
     base: z.string().min(1),
     status: z.enum(["pending", "ready", "moved", "dirty", "orphaned", "cleanup-failed"]),
+    sync: worktreeSyncSchema.optional(),
     createdAt: z.number().finite(),
     updatedAt: z.number().finite(),
   })

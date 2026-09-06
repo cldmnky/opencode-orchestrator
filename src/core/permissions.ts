@@ -31,6 +31,28 @@ export const GH_TOOL_PERMISSION = "orchestrator_gh"
 export const WORKTREE_TOOL_PERMISSION = "orchestrator_worktree"
 
 /**
+ * Shared permission actions for the publication policy and peer-orchestrator
+ * discovery tools.
+ *
+ * `orchestrator_publish_policy_get` (publish family) and
+ * `orchestrator_peer_list` (peer family) declare these explicit actions so a
+ * single rule grants or revokes each family, while any exact user-authored
+ * rule is respected. They are orchestrator-only (goal-style `allow`); worker
+ * agents cannot see or invoke them unless the operator grants the action
+ * explicitly, and each execute handler rejects non-orchestrator agents
+ * regardless of visibility.
+ *
+ * Both actions ARE part of `orchestratorOnlyPermissionRules`: the installer
+ * writes the allow (orchestrator) / deny (workers) rules for fresh installs
+ * and the agent transform appends them on preserved agents without touching
+ * exact user-authored rules. Neither family mutates Git or GitHub on its own
+ * (publish is read-only policy inspection; peer is a read-only metadata
+ * query), so the rules control visibility exactly like the other families.
+ */
+export const PUBLISH_TOOL_PERMISSION = "orchestrator_publish"
+export const PEER_TOOL_PERMISSION = "orchestrator_peer"
+
+/**
  * Shared permission action for the S3/V1 observability and review tools.
  *
  * The conditional runtime tools (observability_get, review_get,
@@ -79,6 +101,8 @@ export function orchestratorOnlyPermissionRule(effect: PermissionEffect): Permis
       WORKTREE_TOOL_PERMISSION,
       ORCHESTRATION_TOOL_PERMISSION,
       OBSERVABILITY_TOOL_PERMISSION,
+      PUBLISH_TOOL_PERMISSION,
+      PEER_TOOL_PERMISSION,
     ].join("|"),
     resource: "*",
     effect,
@@ -91,6 +115,8 @@ export function orchestratorOnlyPermissionRules(effect: PermissionEffect): Permi
     { action: WORKTREE_TOOL_PERMISSION, resource: "*", effect },
     { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect },
     { action: OBSERVABILITY_TOOL_PERMISSION, resource: "*", effect },
+    { action: PUBLISH_TOOL_PERMISSION, resource: "*", effect },
+    { action: PEER_TOOL_PERMISSION, resource: "*", effect },
   ]
 }
 

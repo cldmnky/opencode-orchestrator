@@ -33,7 +33,18 @@ import type { ProcessResult, ProcessRunner } from "../process/runner.js"
 export const GIT_CMD = "git"
 
 /** The only git subcommand families this client is allowed to run. */
-export const GIT_FAMILIES = ["worktree", "ls-remote", "push", "rev-parse", "branch", "status"] as const
+export const GIT_FAMILIES = [
+  "worktree",
+  "ls-remote",
+  "push",
+  "rev-parse",
+  "branch",
+  "status",
+  "fetch",
+  "merge",
+  "merge-base",
+  "diff",
+] as const
 
 const familySet = new Set<string>(GIT_FAMILIES)
 
@@ -105,7 +116,25 @@ export type LsRemoteInput = {
   timeoutMs?: number
 }
 
+export type FetchInput = {
+  repoRoot: string
+  remote: string
+  /** Full ref to fetch (e.g. `refs/heads/main`); updates its remote-tracking ref. */
+  ref: string
+  timeoutMs?: number
+}
+
+export type MergeInput = {
+  repoRoot: string
+  /** Commit to merge into the current branch (e.g. a remote-tracking ref). */
+  into: string
+  timeoutMs?: number
+}
+
 export type ValidationResult = { ok: true } | { ok: false; reason: string }
+
+/** Exactly one full lowercase hex git object ID (SHA-1 or SHA-256). */
+export const FULL_SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 
 /**
  * Pure, runner-free validation of a create request. Rejects relative paths,
@@ -141,6 +170,24 @@ export function isValidBranchName(branch: string): boolean {
   if (/[~^:?*[\\]/.test(branch)) return false
   if (branch.includes("..") || branch.includes("@{") || branch.includes("\0")) return false
   if (branch.endsWith(".") || branch.endsWith(".lock")) return false
+  return true
+}
+
+/**
+ * Strict remote token validation mirroring `isValidBranchName`: remote names
+ * are passed positionally (never shell-interpolated), so the real risk is
+ * option injection through a leading `-` plus malformed names that could
+ * alias other git state. Whitespace, option-shaped, metacharacter, `..`,
+ * `@{`, and NUL-bearing tokens are rejected.
+ */
+export function isValidRemoteName(remote: string): boolean {
+  if (remote.length === 0 || remote.length > 255) return false
+  if (remote === "HEAD" || remote === "@") return false
+  if (/\s/.test(remote)) return false
+  if (remote.startsWith("-") || remote.startsWith(".")) return false
+  if (/[~^:?*[\\]/.test(remote)) return false
+  if (remote.includes("..") || remote.includes("@{") || remote.includes("\0")) return false
+  if (remote.endsWith(".") || remote.endsWith(".lock")) return false
   return true
 }
 
@@ -363,6 +410,82 @@ export async function gitLsRemote(ctx: GitContext, input: LsRemoteInput): Promis
   const result = await run(ctx, input.repoRoot, args, input.timeoutMs)
   if (result.exitCode !== 0) throw new Error(`git ls-remote failed: ${result.stderr}`)
   return result.stdout
+}
+
+/**
+ * Extract the exact object ID for one ref from `git ls-remote` output.
+ * Returns `undefined` unless a line carries `<full-sha>\t<ref>` with the ref
+ * matching exactly (never a prefix or different ref) and a full hex SHA.
+ */
+export function parseLsRemoteRefSha(text: string, ref: string): string | undefined {
+  for (const line of text.split("\n")) {
+    const [sha, ...rest] = line.split("\t")
+    const name = rest.join("\t")
+    if (name === ref && FULL_SHA_PATTERN.test(sha)) return sha
+  }
+  return undefined
+}
+
+/**
+ * `git fetch <remote> <ref>`: fetches the requested ref into its
+ * remote-tracking ref (`refs/remotes/<remote>/...`) without touching the
+ * working tree. The remote and ref are validated by callers and passed
+ * positionally; no options or refspec destinations are ever constructed.
+ */
+export async function gitFetch(ctx: GitContext, input: FetchInput): Promise<ProcessResult> {
+  const args = ["fetch", input.remote, input.ref]
+  return run(ctx, input.repoRoot, args, input.timeoutMs)
+}
+
+/** `git merge --no-edit <into>`: merge a commit into the current branch. */
+export async function gitMerge(ctx: GitContext, input: MergeInput): Promise<ProcessResult> {
+  const args = ["merge", "--no-edit", input.into]
+  return run(ctx, input.repoRoot, args, input.timeoutMs)
+}
+
+/** `git merge --abort`: restore the pre-merge state after a failed merge. */
+export async function gitMergeAbort(ctx: GitContext, repoRoot: string): Promise<ProcessResult> {
+  const args = ["merge", "--abort"]
+  return run(ctx, repoRoot, args)
+}
+
+/**
+ * `git merge-base --is-ancestor <ancestor> <descendant>`: `true` when
+ * `ancestor` is an ancestor of `descendant`, `false` when both resolve and
+ * the ancestry does not hold. Any other exit (unknown refs, not a repo) is
+ * raised, so a missing ref can never be mistaken for a satisfied ancestry.
+ */
+export async function gitMergeBaseIsAncestor(
+  ctx: GitContext,
+  repoRoot: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  const args = ["merge-base", "--is-ancestor", ancestor, descendant]
+  const result = await run(ctx, repoRoot, args)
+  if (result.exitCode === 0) return true
+  if (result.exitCode === 1) return false
+  throw new Error(`git merge-base --is-ancestor failed: ${result.stderr}`)
+}
+
+/**
+ * `git diff --name-only --diff-filter=U`: list of unmerged paths after a
+ * conflicted merge. Only safe relative paths are returned: entries that are
+ * quoted by git (unusual path quoting), absolute, or NUL-bearing are dropped
+ * — never shell-interpolated, and only git-provided output is ever listed.
+ */
+export async function gitUnmergedPaths(ctx: GitContext, repoRoot: string): Promise<string[]> {
+  const args = ["diff", "--name-only", "--diff-filter=U"]
+  const result = await run(ctx, repoRoot, args)
+  if (result.exitCode !== 0) throw new Error(`git diff --diff-filter=U failed: ${result.stderr}`)
+  const paths: string[] = []
+  for (const line of result.stdout.split("\n")) {
+    const entry = line.trim()
+    if (entry.length === 0) continue
+    if (entry.startsWith('"') || entry.startsWith("/") || entry.includes("\0")) continue
+    paths.push(entry)
+  }
+  return paths
 }
 
 /** `git worktree remove <directory>` (optionally `--force`). */

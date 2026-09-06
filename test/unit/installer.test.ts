@@ -6,7 +6,13 @@ import { parse } from "jsonc-parser"
 import { inspectConfig, mergeStatus, runtimeChecks, type DoctorRunner } from "../../src/cli/doctor.js"
 import { configRelativePluginReference, installConfig, isLocalPluginReference, pluginEntryForRuntimeFile } from "../../src/cli/install.js"
 import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../../src/core/package-identity.js"
-import { GOAL_TOOL_PERMISSION, OBSERVABILITY_TOOL_PERMISSION, ORCHESTRATION_TOOL_PERMISSION } from "../../src/core/permissions.js"
+import {
+  GOAL_TOOL_PERMISSION,
+  OBSERVABILITY_TOOL_PERMISSION,
+  ORCHESTRATION_TOOL_PERMISSION,
+  PEER_TOOL_PERMISSION,
+  PUBLISH_TOOL_PERMISSION,
+} from "../../src/core/permissions.js"
 
 describe("plugin reference helpers", () => {
   test("derives the source entrypoint from src/cli/index.ts", () => {
@@ -505,6 +511,75 @@ describe("installer", () => {
     const rules = second.agents.orchestrator.permissions as Rule[]
     expect(rules.filter((rule) => rule.action === ORCHESTRATION_TOOL_PERMISSION)).toEqual([
       { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect: "ask" },
+    ])
+  })
+
+  test("allows the publish and peer permissions for the orchestrator and denies them to workers", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+
+    const orchestratorPermissions = document.agents.orchestrator.permissions as Rule[]
+    for (const action of [PUBLISH_TOOL_PERMISSION, PEER_TOOL_PERMISSION]) {
+      expect(orchestratorPermissions.filter((rule) => rule.action === action)).toEqual([
+        { action, resource: "*", effect: "allow" },
+      ])
+      const denyAllIndex = orchestratorPermissions.findIndex(
+        (rule) => rule.action === "*" && rule.resource === "*" && rule.effect === "deny",
+      )
+      expect(orchestratorPermissions.findIndex((rule) => rule.action === action)).toBeGreaterThan(denyAllIndex)
+    }
+
+    for (const id of ["planner", "explore", "implementer", "reviewer"]) {
+      const workerPermissions = document.agents[id].permissions as Rule[]
+      for (const action of [PUBLISH_TOOL_PERMISSION, PEER_TOOL_PERMISSION]) {
+        expect(workerPermissions.filter((rule) => rule.action === action)).toEqual([
+          { action, resource: "*", effect: "deny" },
+        ])
+        expect(workerPermissions.findIndex((rule) => rule.action === action)).toBeGreaterThan(
+          workerPermissions.findIndex((rule) => rule.action === "*" && rule.resource === "*" && rule.effect === "deny"),
+        )
+      }
+    }
+  })
+
+  test("reinstall never duplicates the publish or peer permission rules", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    installConfig(path, {})
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+
+    for (const action of [PUBLISH_TOOL_PERMISSION, PEER_TOOL_PERMISSION]) {
+      const orchestratorPermissions = document.agents.orchestrator.permissions as Rule[]
+      expect(orchestratorPermissions.filter((rule) => rule.action === action)).toHaveLength(1)
+      const workerPermissions = document.agents.explore.permissions as Rule[]
+      expect(workerPermissions.filter((rule) => rule.action === action)).toHaveLength(1)
+    }
+  })
+
+  test("preserves user-authored publish and peer permission rules across installs", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const first = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    const permissions = first.agents.orchestrator.permissions as Rule[]
+    for (const [index, rule] of permissions.entries()) {
+      if (rule.action === PUBLISH_TOOL_PERMISSION) permissions[index] = { action: PUBLISH_TOOL_PERMISSION, resource: "*", effect: "ask" }
+      if (rule.action === PEER_TOOL_PERMISSION) permissions[index] = { action: PEER_TOOL_PERMISSION, resource: "*", effect: "deny" }
+    }
+    writeFileSync(path, JSON.stringify(first))
+
+    installConfig(path, {})
+
+    const second = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    const rules = second.agents.orchestrator.permissions as Rule[]
+    expect(rules.filter((rule) => rule.action === PUBLISH_TOOL_PERMISSION)).toEqual([
+      { action: PUBLISH_TOOL_PERMISSION, resource: "*", effect: "ask" },
+    ])
+    expect(rules.filter((rule) => rule.action === PEER_TOOL_PERMISSION)).toEqual([
+      { action: PEER_TOOL_PERMISSION, resource: "*", effect: "deny" },
     ])
   })
 

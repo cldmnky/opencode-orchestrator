@@ -15,6 +15,7 @@ import {
   reviewStorageKey,
   reviewV1RecordSchema,
   transitionReviewV1,
+  validateApprovedReviewRevision,
   type ReviewV1Record,
   type ReviewV1Signal,
 } from "../../src/opencode-v2/observability/review.js"
@@ -381,4 +382,127 @@ test("a bounded review loop terminates deterministically at max rounds instead o
   expect(history[history.length - 1].state).toBe("tripped")
   expect(history.filter((entry) => entry.state === "pending").length).toBeGreaterThanOrEqual(2)
   expect(history.filter((entry) => entry.state === "tripped")).toHaveLength(1)
+})
+
+describe("exact-revision review receipts", () => {
+  const HEAD = "a".repeat(40)
+  const BASE = "b".repeat(40)
+  const HEAD256 = "c".repeat(64)
+
+  test("a start may pin a head/base receipt and it survives the approve transition", () => {
+    const signal = startSignal({ headSha: HEAD, baseSha: BASE })
+    expect(REVIEW_V1_SIGNAL_SCHEMA.safeParse(signal).success).toBe(true)
+    const started = transitionReviewV1({ record: undefined, signal, maxRounds: 2, now: NOW })
+    expect(started.accepted).toBe(true)
+    expect(started.record).toMatchObject({ state: "pending", headSha: HEAD, baseSha: BASE })
+
+    const approved = transitionReviewV1({ record: started.record, signal: allChecksTrue(), maxRounds: 2, now: NOW })
+    expect(approved.record).toMatchObject({ state: "approved", headSha: HEAD, baseSha: BASE })
+    // The receipt-carrying approved record round-trips through the strict schema.
+    expect(reviewV1RecordSchema.safeParse(approved.record).success).toBe(true)
+  })
+
+  test("a 64-character SHA-256 object ID is accepted alongside 40-character SHA-1", () => {
+    const signal = startSignal({ headSha: HEAD256, baseSha: BASE })
+    const started = transitionReviewV1({ record: undefined, signal, maxRounds: 2, now: NOW })
+    expect(started.accepted).toBe(true)
+    expect(started.record).toMatchObject({ headSha: HEAD256, baseSha: BASE })
+  })
+
+  test("malformed or partial SHAs never parse as a start signal", () => {
+    const invalid = [
+      { headSha: "a".repeat(39), baseSha: BASE },
+      { headSha: "a".repeat(41), baseSha: BASE },
+      { headSha: "A".repeat(40), baseSha: BASE },
+      { headSha: "abcdef", baseSha: BASE },
+      { headSha: `${HEAD}g`, baseSha: BASE },
+      { headSha: HEAD },
+      { baseSha: BASE },
+      { headSha: undefined, baseSha: BASE },
+      { headSha: HEAD, baseSha: undefined },
+    ]
+    for (const revision of invalid) {
+      expect(REVIEW_V1_SIGNAL_SCHEMA.safeParse(startSignal(revision)).success, JSON.stringify(revision)).toBe(false)
+    }
+  })
+
+  test("the receipt is preserved across a rework round and replaced with a new start", () => {
+    const changesRequested = pendingRecord({ state: "changes-requested", reason: "changes-requested", headSha: HEAD, baseSha: BASE })
+    expect(reviewV1RecordSchema.safeParse(changesRequested).success).toBe(true)
+    const reopened = transitionReviewV1({ record: changesRequested, signal: startSignal(), maxRounds: 2, now: NOW })
+    expect(reopened.record).toMatchObject({ state: "pending", round: 2, headSha: HEAD, baseSha: BASE })
+
+    // A terminal old receipt is replaced wholesale by the new start's receipt.
+    const newHead = "d".repeat(40)
+    const newBase = "e".repeat(40)
+    const replaced = transitionReviewV1({
+      record: pendingRecord({ state: "approved", headSha: HEAD, baseSha: BASE }),
+      signal: startSignal({ taskId: "task-2", runId: "run-2", headSha: newHead, baseSha: newBase }),
+      maxRounds: 2,
+      now: NOW,
+    })
+    expect(replaced.accepted).toBe(true)
+    expect(replaced.record).toMatchObject({ taskId: "task-2", state: "pending", headSha: newHead, baseSha: newBase })
+  })
+
+  test("the record schema refuses a partial receipt and accepts revision-less legacy records", () => {
+    expect(reviewV1RecordSchema.safeParse(pendingRecord({ headSha: HEAD })).success).toBe(false)
+    expect(reviewV1RecordSchema.safeParse(pendingRecord({ baseSha: BASE })).success).toBe(false)
+    // Legacy records without any revision fields still parse (backward compatible).
+    expect(reviewV1RecordSchema.safeParse(pendingRecord()).success).toBe(true)
+    expect(reviewV1RecordSchema.safeParse(pendingRecord({ state: "approved" })).success).toBe(true)
+  })
+
+  test("approved-state validation for an exact revision fails closed on every gap", () => {
+    const approved = pendingRecord({ state: "approved", headSha: HEAD, baseSha: BASE })
+
+    // Matching approved record: the only valid outcome.
+    expect(validateApprovedReviewRevision({ record: approved, headSha: HEAD, baseSha: BASE })).toEqual({
+      valid: true,
+      verdict: "valid",
+      message: `approved review for task task-1 run run-1 matches the requested exact revision`,
+    })
+
+    // No record at all.
+    const noRecord = validateApprovedReviewRevision({ record: undefined, headSha: HEAD, baseSha: BASE })
+    expect(noRecord).toMatchObject({ valid: false, verdict: "no-record" })
+
+    // Every non-approved state fails closed even with matching SHAs.
+    for (const state of ["pending", "changes-requested", "blocked", "tripped"] as const) {
+      const result = validateApprovedReviewRevision({
+        record: pendingRecord({ state, headSha: HEAD, baseSha: BASE }),
+        headSha: HEAD,
+        baseSha: BASE,
+      })
+      expect(result, state).toMatchObject({ valid: false, verdict: "not-approved" })
+    }
+
+    // Approved but receipt absent (legacy record or one side missing).
+    for (const record of [
+      pendingRecord({ state: "approved" }),
+      pendingRecord({ state: "approved", headSha: HEAD }),
+      pendingRecord({ state: "approved", baseSha: BASE }),
+    ]) {
+      const result = validateApprovedReviewRevision({ record, headSha: HEAD, baseSha: BASE })
+      expect(result).toMatchObject({ valid: false, verdict: "missing-revision" })
+      expect(result.message).toContain("no exact head/base revision")
+    }
+
+    // Approved but the receipt points at a different revision.
+    const mismatched = validateApprovedReviewRevision({ record: approved, headSha: `${HEAD.slice(0, 39)}d`, baseSha: BASE })
+    expect(mismatched).toMatchObject({ valid: false, verdict: "revision-mismatch" })
+    const baseMismatched = validateApprovedReviewRevision({ record: approved, headSha: HEAD, baseSha: `${"f".repeat(40)}` })
+    expect(baseMismatched).toMatchObject({ valid: false, verdict: "revision-mismatch" })
+
+    // Malformed requested SHAs are never a valid expectation.
+    for (const [headSha, baseSha] of [
+      ["a".repeat(39), BASE],
+      [HEAD, "B".repeat(40)],
+      ["", ""],
+      ["nope", "nope"],
+    ]) {
+      const result = validateApprovedReviewRevision({ record: approved, headSha, baseSha })
+      expect(result, headSha).toMatchObject({ valid: false, verdict: "invalid-expectation" })
+    }
+  })
 })

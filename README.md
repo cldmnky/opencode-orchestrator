@@ -15,7 +15,7 @@ Give the orchestrator a task in plain English — it breaks the work down, deleg
 - **Built-in review.** Every implementation is audited by a dedicated reviewer before you see the final result.
 - **Asks before it guesses.** When a request is ambiguous, the orchestrator asks you a few targeted questions — with answer options — before breaking the work down. Disable with `"clarify": { "mode": "off" }`.
 - **Goals that survive idle.** Start a long-running objective and let it continue during idle periods in the same OpenCode session.
-- **Optional power features** when you need them: GitHub and git worktree integration, plus budgets and review gates.
+- **Optional power features** when you need them: GitHub and git worktree integration, budgets and review gates, a durable `/publish` publication capability, and same-project peer-orchestrator discovery.
 
 ### The team
 
@@ -60,6 +60,7 @@ Delegation outside an agent’s own graph is off-limits even if the host would a
 | Pause automation | `/halt` | — |
 | Hand context to the next session | `/handover` | *“Focus on payments regression”* |
 | Choose models for worker agents | `/worker-models` | — |
+| Inspect or toggle the durable publication capability | `/publish` | `/publish status` |
 
 For a single-file typo or one-line edit, just prompt the model directly — you don’t need orchestration.
 
@@ -89,6 +90,7 @@ What the installer does:
 - Adds the five agents (`orchestrator`, `planner`, `explore`, `implementer`, `reviewer`) if they’re missing
 - Sets `experimental.subagent_depth: 3` (only when the key is absent) so OpenCode’s native subagent depth limit — which defaults to 1 — doesn’t block the deepest approved chain `orchestrator → implementer → planner → explore`
 - Gives new agents permission defaults that allow exactly the bounded nested-delegation graph (see [Bounded nested delegation](#bounded-nested-delegation)): a broad `subagent` deny followed by exact target-specific allows, with `webfetch`/`websearch` granted directly to `explore`
+- Writes the orchestrator-only permission actions for the feature tool families — `orchestrator_gh`, `orchestrator_worktree`, `orchestrator_validation`, `orchestrator_observability`, plus the publication policy (`orchestrator_publish`) and peer discovery (`orchestrator_peer`) — as `allow` for the orchestrator and `deny` for every worker
 - Leaves your existing config and commands untouched — re-running it is safe
 
 > **Upgrading?** The installer never rewrites agents that already exist in your config. If your workers were installed by an older version (before nested delegation), they carry a flat `subagent` deny and cannot delegate. Either delete the old agent entries and reinstall, or add the target-specific allows yourself — for example, to `implementer`:
@@ -100,6 +102,15 @@ What the installer does:
 >   { "action": "subagent", "resource": "explore", "effect": "allow" }
 > ]
 > ```
+>
+> Agents preserved from an older install also predate the shared permission actions for the newer tool families (`orchestrator_publish`, `orchestrator_peer`): the plugin’s agent transform appends the family rules automatically only when no exact rule exists, and an explicit user-authored rule is never overridden. To migrate by hand, add to the **orchestrator**:
+>
+> ```jsonc
+> { "action": "orchestrator_publish", "resource": "*", "effect": "allow" },
+> { "action": "orchestrator_peer", "resource": "*", "effect": "allow" }
+> ```
+>
+> and the same two actions with `"effect": "deny"` to each worker you want kept locked down. Anything you write explicitly stays authoritative — the installer and the agent transform never rewrite it.
 >
 > The plugin’s agent transform never overrides user-authored permission rules, so whatever you write stays authoritative. Re-running the installer also adds `experimental.subagent_depth: 3` when that key is absent; an explicit value you set is always preserved.
 
@@ -197,7 +208,7 @@ Set an objective keyed to the current OpenCode session. The orchestrator can kee
 /goal clear      # remove it
 ```
 
-Goals auto-continue when that session goes idle (up to 50 continuations by default, with a cooldown). The orchestrator checks before each continuation that the goal is still active and unchanged. Deleting the session removes its goal state.
+Goals auto-continue when that session goes idle (up to 50 continuations by default, with a cooldown). The orchestrator checks before each continuation that the goal is still active and unchanged. When a plan run is active, the continuation prompt embeds the plan ledger path and requires the orchestrator to execute the first unfinished ledger item with direct verification, update the ledger, and keep advancing in order — unless a real blocker or a configured breaker applies (halt flag, budget fail-closed, cooldown, max continuations, or an open review circuit), and it never marks the goal or plan complete without direct evidence. Deleting the session removes its goal state.
 
 ### `/restructure` — safe refactoring
 
@@ -231,12 +242,16 @@ Mark a plan done with `status: complete` in frontmatter or a `## Status / comple
 /polish            # clean up only files changed in this branch
 /polish src/core/policy.ts src/core/prompts.ts
 /stress-plan add rate limiting to the API with redis fallback
+/publish status    # inspect the durable project-scoped publication policy
+/publish enable    # opt in per project (requires publish.enabled: true in config)
+/publish disable   # revoke the durable authorization
 /worker-models            # open the TUI worker-model picker
 /worker-models explore=default
 /worker-models reset      # restore all workers to configured models
 ```
 
 `/stress-plan` drafts a plan, then critiques it from four angles (correctness, simplicity, security, feasibility) before finalizing.
+`/publish` toggles a durable, project-scoped **authorization policy** — see [Publication capability](#publication-capability-publish) for exactly what it does and does not authorize.
 `/worker-models` selects durable runtime models for `planner`, `explore`, `implementer`, and `reviewer` only. The TUI picker lists enabled, tool-capable models and their variants. Text form accepts `worker=provider/model[#variant]`, `worker=default`, `list`, and `reset`.
 
 ---
@@ -265,6 +280,7 @@ You configure baseline **models** with OpenCode’s native `agents.<id>.model`; 
       "goal": { "auto_continue": true, "max_continuations": 50, "cooldown_ms": 1000 },
       "github": { "enabled": false, "allow_mutations": false },
       "worktree": { "enabled": false, "allow_mutations": false, "root": null },
+      "publish": { "enabled": false }, // master gate for the durable publication capability (default off)
       "trace": { "mode": "off" },                  // off | memory | snapshot
       "budget": { "mode": "advisory" },            // advisory | stop-between-steps
       "review": { "mode": "prompt", "max_rounds": 2 }, // prompt | bounded
@@ -349,6 +365,8 @@ Let the orchestrator create and list issues/PRs via your local `gh` CLI.
 
 - Read-only (list/view) needs only `enabled: true`
 - Creating issues/PRs needs `allow_mutations: true` **and** `confirm: true` on each call
+- Pull requests are **always created as drafts** — `orchestrator_github_pr_create` has no draft toggle; the client sends `draft: true` and refuses a response that is not a draft. A PR is moved to ready (`orchestrator_github_pr_ready`) only when a fresh view directly proves the exact head revision, `draft: true`, `mergeable: true`, no dirty/unknown conflict state, and current remote base ancestry; unknown mergeability stays draft and is truthfully deferred — no polling
+- Verified automatic approval (`orchestrator_github_pr_approve`) requires the ready transition, an exact-revision approved internal review, a non-author authenticated viewer, and fresh conflict-free evidence. A same-author attempt or API failure is refused and reported truthfully, and the automated approval is never claimed to satisfy branch protection
 - Auth stays with `gh` — run `gh auth login` with least privilege. The plugin never reads tokens.
 - Verify: `orchestrator_github_capabilities` (inside OpenCode) or `gh auth status` locally
 
@@ -362,8 +380,53 @@ Give the current session a separate checkout and branch without changing your ma
 
 - One managed worktree per current session, under the `root` you choose
 - The orchestrator creates → enters → then delegates. Entering moves only the current session; delegated children inherit and share that context, not an atomic sandbox.
-- Create, push, and cleanup require `worktree.allow_mutations: true` and a literal `confirm: true` on each call. Enter requires neither beyond `worktree.enabled: true`.
+- Create, sync, push, and cleanup require `worktree.allow_mutations: true` and a literal `confirm: true` on each call. Enter requires neither beyond `worktree.enabled: true`.
+- `orchestrator_worktree_sync` fetches the latest remote base branch and merges it into the tracked branch when needed, recording an exact-revision sync receipt. It refuses a dirty tree and never resolves conflicts automatically: a conflicted merge is aborted and reported truthfully (safe relative unmerged paths only). After a conflict, the orchestrator autonomously delegates an implementer to perform the merge/resolution in the tracked worktree, then reruns verification and sync, commits, and restarts the exact-revision review — stopping only if the conflicts cannot safely be resolved.
 - Verify: `./node_modules/.bin/opencode-v2-agent-orchestrator doctor` checks `git worktree list`
+
+### Publication capability (`/publish`)
+
+A durable, project-scoped authorization for the publication steps. Off by default at every level.
+
+```jsonc
+"publish": { "enabled": true },   // master gate; default { "enabled": false }
+"review": { "mode": "bounded" }   // exact-revision review receipts require bounded mode
+```
+
+Three prerequisites must all be in place before the orchestrator may publish autonomously:
+
+1. **Config master gate** — `publish.enabled: true` in the plugin options (default `false`). With the gate off, `/publish enable` is refused and `/publish status` / `/publish disable` still work so a stale authorization can always be inspected and revoked.
+2. **Durable per-project capability** — `/publish enable` writes a durable record keyed to the stable project (it follows the repository across session moves; `/publish disable` revokes it). Idempotent toggling writes nothing when the record is unchanged.
+3. **Bounded review mode** — `review.mode: "bounded"` (default `"prompt"`). Every publication step requires an exact-revision approved review receipt, which comes from the bounded review record; the `review_get` / `review_transition` tools are only registered in `bounded` mode, so with the default `"prompt"` no review record can ever exist and publication **fails closed** ("no review record exists") until `review.mode: "bounded"` is enabled.
+
+What the capability means:
+
+- **Authorization policy, not authentication.** The durable record says the project capability is enabled and lists what it authorizes; nothing in it proves which human invoked `/publish`. It never mutates Git or GitHub itself, and it never weakens the static `github.enabled` / `github.allow_mutations` / `worktree.enabled` / `worktree.allow_mutations` gates.
+- **When enabled, it authorizes the orchestrator to pass `confirm: true` without re-prompting** for exactly four steps: worktree push, draft PR creation, the draft-to-ready transition, and the verified post-ready approval. It **never authorizes issue creation** (still gated on `github.allow_mutations` + `confirm: true`) and **never authorizes PR merge** — merge continues to need the static gate plus a separate explicit user request (see below).
+- Every publication step still runs the full fail-closed gate chain: static gates, the durable capability, a clean tree, an unchanged latest remote base, the exact synced head, base ancestry, a literal `confirm: true`, and an exact-revision approved internal review receipt.
+
+Mandatory sequence (prompt policy, enforced by the tools):
+
+```
+commit clean changes → worktree_sync against the latest remote base →
+verify/test → exact-revision bounded review → worktree_push → draft PR create
+```
+
+If the sync reports conflicts after aborting, the orchestrator delegates an implementer to resolve them in the tracked worktree, reruns verification/sync, commits, and restarts the exact-revision review; it stops only when conflicts cannot safely be resolved. If the base or head changes after the review, it re-syncs and re-reviews. A push without a sync receipt, with a moved base, a changed head, or a missing/mismatched approved review receipt is refused.
+
+**Merge authorization is unchanged:** merging a PR still requires a separate explicit user request, a fresh `orchestrator_github_pr_view` with the exact expected head SHA, a literal `confirm: true`, and post-merge verification. A `confirm: true` flag or the checker’s approval is never user authorization.
+
+Verify the current policy inside OpenCode with `/publish status` or `orchestrator_publish_policy_get` (read-only, orchestrator-only). Tool: `orchestrator_publish_policy_get`.
+
+### Peer-orchestrator discovery
+
+`orchestrator_peer_list` (orchestrator-only) lists bounded metadata about other orchestrator sessions **in the same stable project**: session ID, goal status, and a redacted/truncated objective hint, ordered deterministically with an opaque `after` cursor. It is durable metadata only and never live-complete:
+
+- never full objectives, transcripts, prompts, files, or credentials — known-pattern redaction runs before truncation
+- only goal records keyed under the caller’s own project are ever read
+- sessions without a readable goal record do not appear; `complete: false` is reported truthfully when `storage.scan` is unavailable or the bounded scan cap is hit
+
+This tells you concurrent orchestration exists and what its goal state is — it is not a live directory of sessions.
 
 ### Budgets, tracing & review gates (observability)
 
@@ -410,7 +473,9 @@ For teams that want cost/usage limits or a stricter review gate:
 **GitHub or worktree not working?**
 - Ensure `gh` is installed and authenticated (`gh auth status` exit code 0)
 - Ensure `git worktree list --porcelain` works and your `worktree.root` is an absolute path
-- For worktree create/push/cleanup, enable the feature and mutations, then pass literal `confirm: true`; enter needs only `worktree.enabled: true`
+- For worktree create/sync/push/cleanup, enable the feature and mutations, then pass literal `confirm: true`; enter needs only `worktree.enabled: true`
+- Push/PR-create refusals naming a missing capability mean the durable project policy is off: run `/publish status`, then `/publish enable` (needs `publish.enabled: true` in config). Refusals naming a missing sync receipt or review receipt mean the gate chain was not satisfied: set `review.mode: "bounded"` (the default `"prompt"` registers no review tools, so no exact-revision review receipt can exist), then run `orchestrator_worktree_sync`, verify/test, run the bounded review, and push
+- Ready transition refused? A fresh view must show `draft: true`, `mergeable: true`, no dirty/unknown conflict state, and the exact head revision — an unknown or conflicted mergeability keeps the PR a draft by design
 
 **Nested delegation stops after the first hop?**
 
@@ -425,6 +490,7 @@ OpenCode’s native `experimental.subagent_depth` defaults to 1, which prevents 
 - **File ownership coordinates agents.** The orchestrator assigns non-overlapping file scopes to each `implementer`, but those prompt-level scopes are not filesystem isolation. `max_parallel` (default 4) caps concurrency.
 - **Handoffs are structured.** Workers return a five-field summary (`Outcome / Files / Verification / Risks / Follow-up`) plus a version-1 JSON envelope. The orchestrator can run `orchestrator_handoff_validate` for deterministic checks before using a handoff. Inter-agent messages — parent→child prompts and child→parent handoffs alike — are expected to be explicit, self-contained, and legible on their own.
 - **Review is prompt-based by default.** `require_review: true` means the orchestrator *asks* a reviewer. There’s no hard runtime gate — `bounded` review adds an explicit `review_get` / `review_transition` flow with a circuit breaker if you need it.
+- **Publication is capability policy.** `/publish` toggles a durable, project-scoped authorization record (never caller identity). When the config master gate is on and the record is enabled, the orchestrator may pass `confirm: true` without re-prompting for push / draft PR create / ready / approve — never issue creation, never merge. Every step still requires the mandatory sync → verify → exact-revision review sequence and fails closed otherwise.
 - **State lives in OpenCode storage.** Goals and plan runs are keyed to the current session and persist through its idle periods via `ctx.storage` with per-session locks; session deletion removes that state. Conversations remain the source of truth.
 
 Want the formal contracts? `docs/phase-1/` has them (D2 handoff, D4 gate, etc.) — you don’t need them to get started.
@@ -440,6 +506,9 @@ Want the formal contracts? `docs/phase-1/` has them (D2 handoff, D4 gate, etc.) 
 - No persistence of evidence receipts beyond the tool response.
 - Token/cost tracking uses `session.usage.updated` snapshots; if the host doesn’t emit them, budgets report `unknown`.
 - S3/V1 controls are opt-in and bounded: budgets pause only *between* steps, review gates only after an explicit transition. No in-flight cancellation.
+- The publication capability is authorization bookkeeping, not caller identity: it does not prove a human invoked `/publish`, and it never bypasses the static gates, issue creation, or the separate explicit user authorization for PR merge.
+- Draft/ready/approval have hard limits by design: PRs are always created as drafts; a ready transition requires fresh conflict-free evidence at the exact revision (unknown mergeability stays draft — no polling); automated approval is never claimed or relied on to satisfy branch protection, and same-author or API failures are reported truthfully, never as successes.
+- Peer discovery covers the same stable project only, and only sessions with readable goal records — it is durable metadata with a redacted objective hint, never a live or complete directory of sessions.
 
 </details>
 

@@ -6,29 +6,44 @@ import { createRedactor } from "../../src/opencode-v2/process/redact.js"
 import type { ProcessResult, ProcessRunner } from "../../src/opencode-v2/process/runner.js"
 import {
   GhError,
+  assertFullSha,
   assertIssueNumber,
   assertIssueShape,
   assertMergeSha,
   assertPullMergeShape,
+  assertPullReviewShape,
   assertPullShape,
+  assertRefSegment,
   assertRepoSlug,
+  assertReviewEvent,
+  compareRefs,
   createIssue,
   createPull,
+  createPullReview,
+  getBranchRef,
+  getViewer,
   listIssues,
+  listPullReviews,
   listPulls,
+  markPullReady,
   mergePull,
   probeCapabilities,
   resolveRepo,
   viewIssue,
   viewPull,
+  type BranchRef,
   type CapabilitiesProbe,
+  type CompareResult,
   type IssueInfo,
   type PullInfo,
   type PullMergeResult,
+  type PullReview,
   type RepoInfo,
 } from "../../src/opencode-v2/gh/client.js"
 import { addGhTools } from "../../src/opencode-v2/gh/tools.js"
+import type { StorageLike } from "../../src/opencode-v2/goal/state.js"
 import { evidenceSchema, type EvidenceRecord } from "../../src/opencode-v2/orchestration/evidence.js"
+import type { ReviewV1Record } from "../../src/opencode-v2/observability/review.js"
 
 const location = { directory: "/workspace", project: { id: "origin" } }
 
@@ -39,6 +54,11 @@ type ToolLike = {
   options?: { namespace?: string; permission?: string }
   execute(input: unknown, tool: { sessionID: string; agent: string }): Promise<{ content: string }>
 }
+
+/** Exact full git object ids used across the lifecycle tests (40 lowercase hex). */
+const HEAD_SHA = "1a2b3c4d".repeat(5)
+const BASE_SHA = "9f8e7d6c".repeat(5)
+const OTHER_SHA = "5e6f7a8b".repeat(5)
 
 const ISSUE = {
   id: 1001,
@@ -58,8 +78,11 @@ const PULL = {
   state: "open",
   merged: false,
   user: { login: "octocat" },
-  head: { ref: "feature", sha: "abc1234" },
-  base: { ref: "main" },
+  head: { ref: "feature", sha: HEAD_SHA },
+  base: { ref: "main", sha: BASE_SHA },
+  draft: true,
+  mergeable: true,
+  mergeable_state: "clean",
 }
 
 const REPO = {
@@ -69,12 +92,73 @@ const REPO = {
   defaultBranchRef: { name: "main" },
 }
 
+/** Durable exact-revision APPROVED review receipt (review/v1 schema). */
+const APPROVED_REVIEW: ReviewV1Record = {
+  version: 1,
+  taskId: "task-1",
+  runId: "run-1",
+  maker: "implementer",
+  checker: "reviewer",
+  state: "approved",
+  round: 1,
+  maxRounds: 2,
+  reason: "approval-complete",
+  requiresHuman: false,
+  createdAt: 1,
+  updatedAt: 2,
+  headSha: HEAD_SHA,
+  baseSha: BASE_SHA,
+}
+
+/**
+ * Storage backing the durable publication capability and the internal review
+ * receipt. `capabilities` grants the publish record for the stable project
+ * "origin"; `record` (when provided) is returned for the session's review key.
+ */
+function lifecycleStorage(options: {
+  capabilities?: readonly string[]
+  record?: ReviewV1Record | undefined
+  publishRecord?: unknown
+} = {}): StorageLike {
+  const publishRecord =
+    options.publishRecord ??
+    (options.capabilities
+      ? {
+          version: 1,
+          projectID: "origin",
+          enabled: true,
+          capabilities: [...options.capabilities],
+          updatedAt: 1,
+          updatedBy: "session-1",
+        }
+      : undefined)
+  return {
+    async get(key) {
+      if (key.startsWith("review/v1/")) return options.record
+      if (key.startsWith("publish/v1/")) return publishRecord
+      return undefined
+    },
+    async set() {},
+    async remove() {},
+  }
+}
+
 function ok(stdout = "", stderr = ""): ProcessResult {
   return { exitCode: 0, stdout, stderr }
 }
 
 function fail(stderr = "gh: error"): ProcessResult {
   return { exitCode: 1, stdout: "", stderr }
+}
+
+/** A `GET /repos/{o}/{r}/branches/{branch}` response. */
+function branchJson(name: string, sha: string): string {
+  return JSON.stringify({ name, commit: { sha } })
+}
+
+/** A `GET /repos/{o}/{r}/compare/{base}...{head}` response. */
+function compareJson(status: string, aheadBy: number, behindBy: number, baseSha: string): string {
+  return JSON.stringify({ status, ahead_by: aheadBy, behind_by: behindBy, base_commit: { sha: baseSha } })
 }
 
 /**
@@ -111,6 +195,7 @@ function collectGhTools(deps: {
   options?: OrchestratorOptions
   runner?: ProcessRunner
   secrets?: readonly string[]
+  storage?: StorageLike
 } = {}): { tools: Map<string, ToolLike> } {
   const tools = new Map<string, ToolLike>()
   addGhTools(
@@ -120,7 +205,7 @@ function collectGhTools(deps: {
       },
     },
     {
-      storage: { get: async () => undefined, set: async () => {}, remove: async () => {} },
+      storage: deps.storage ?? lifecycleStorage(),
       runner: deps.runner ?? scriptedGh(() => fail()).runner,
       location,
       options: deps.options ?? ghOptions(),
@@ -297,7 +382,7 @@ describe("gh issues", () => {
 })
 
 describe("gh pulls", () => {
-  test("createPull posts head/base/draft to the fixed pulls endpoint", async () => {
+  test("createPull always posts draft:true to the fixed pulls endpoint and validates the strict pull shape", async () => {
     const { runner, calls } = scriptedGh((call, _calls, body) => {
       if (call.args.includes("repos/acme/widgets/pulls")) {
         expect(body).toEqual({ title: "Implement the fix", head: "feature", base: "main", body: "why", draft: true })
@@ -307,24 +392,81 @@ describe("gh pulls", () => {
     })
     const created = await createPull(
       { runner },
-      { owner: "acme", repo: "widgets", title: "Implement the fix", head: "feature", base: "main", body: "why", draft: true },
+      { owner: "acme", repo: "widgets", title: "Implement the fix", head: "feature", base: "main", body: "why" },
     )
     expect(created.number).toBe(7)
-    expect(created.head).toEqual({ ref: "feature", sha: "abc1234" })
-    expect(created.base).toEqual({ ref: "main" })
+    expect(created.head).toEqual({ ref: "feature", sha: HEAD_SHA })
+    expect(created.base).toEqual({ ref: "main", sha: BASE_SHA })
+    expect(created.draft).toBe(true)
+    expect(created.mergeable).toBe(true)
+    expect(created.mergeableState).toBe("clean")
     expect(created.merged).toBe(false)
     expect(calls[0]?.args).toEqual(["api", "--method", "POST", "--input", expect.any(String), "repos/acme/widgets/pulls"])
   })
 
-  test("createPull omits draft when false", async () => {
+  test("createPull refuses a response that is not a draft", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/pulls")) {
+        return ok(JSON.stringify({ ...PULL, draft: false }))
+      }
+      return undefined
+    })
+    await expect(
+      createPull({ runner }, { owner: "acme", repo: "widgets", title: "T", head: "f", base: "m" }),
+    ).rejects.toThrow(/not a draft/)
+  })
+
+  test("createPull verifies the created head/base SHAs against the expected exact revisions", async () => {
     const { runner } = scriptedGh((call, _calls, body) => {
       if (call.args.includes("repos/acme/widgets/pulls")) {
-        expect(body).toEqual({ title: "T", head: "f", base: "m" })
+        expect(body).toEqual({ title: "T", head: "f", base: "m", draft: true })
         return ok(JSON.stringify(PULL))
       }
       return undefined
     })
-    expect((await createPull({ runner }, { owner: "acme", repo: "widgets", title: "T", head: "f", base: "m" })).id).toBe(2001)
+    const created = await createPull({ runner }, {
+      owner: "acme",
+      repo: "widgets",
+      title: "T",
+      head: "f",
+      base: "m",
+      expectedHeadSha: HEAD_SHA,
+      expectedBaseSha: BASE_SHA,
+    })
+    expect(created.head?.sha).toBe(HEAD_SHA)
+    expect(created.base?.sha).toBe(BASE_SHA)
+  })
+
+  test("createPull refuses when the created head/base SHAs drift from the expected exact revisions", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/pulls")) {
+        return ok(JSON.stringify({ ...PULL, head: { ref: "feature", sha: OTHER_SHA } }))
+      }
+      return undefined
+    })
+    await expect(
+      createPull(
+        { runner },
+        { owner: "acme", repo: "widgets", title: "T", head: "f", base: "m", expectedHeadSha: HEAD_SHA },
+      ),
+    ).rejects.toThrow(/returned head/)
+  })
+
+  test("createPull rejects abbreviated or malformed expected SHAs before any runner call", async () => {
+    let calls = 0
+    const runner: ProcessRunner = {
+      async run() {
+        calls += 1
+        return ok(JSON.stringify(PULL))
+      },
+    }
+    await expect(
+      createPull({ runner }, { owner: "acme", repo: "widgets", title: "T", head: "f", base: "m", expectedHeadSha: HEAD_SHA.slice(0, 7) }),
+    ).rejects.toThrow(/full 40- or 64-character lowercase hex git SHA/)
+    await expect(
+      createPull({ runner }, { owner: "acme", repo: "widgets", title: "T", head: "f", base: "m", expectedBaseSha: "ABC" }),
+    ).rejects.toThrow(/full 40- or 64-character lowercase hex git SHA/)
+    expect(calls).toBe(0)
   })
 
   test("viewPull uses the numbered endpoint", async () => {
@@ -406,16 +548,253 @@ describe("gh pulls", () => {
     expect(() => assertPullShape({ id: 1, number: 2 })).toThrow(/"html_url"/)
     expect(() => assertPullShape([PULL])).toThrow(/not an object/)
   })
+
+  test("assertPullShape strictly validates draft, mergeable, mergeable_state, and base.sha when present", () => {
+    expect(() => assertPullShape({ ...PULL, draft: "yes" })).toThrow(/"draft"/)
+    expect(() => assertPullShape({ ...PULL, draft: null })).toThrow(/"draft"/)
+    expect(() => assertPullShape({ ...PULL, mergeable: "yes" })).toThrow(/"mergeable"/)
+    expect(assertPullShape({ ...PULL, mergeable: null, mergeable_state: undefined }).mergeable).toBeNull()
+    expect(assertPullShape({ ...PULL, mergeable: null, mergeable_state: undefined }).mergeableState).toBeUndefined()
+    expect(() => assertPullShape({ ...PULL, mergeable_state: 7 })).toThrow(/"mergeable_state"/)
+    expect(assertPullShape({ ...PULL, mergeable_state: null }).mergeableState).toBeNull()
+    expect(() => assertPullShape({ ...PULL, base: { ref: "main", sha: 42 } })).toThrow(/"base.sha"/)
+    expect(() => assertPullShape({ ...PULL, head: { ref: "feature" } })).not.toThrow()
+    expect(assertPullShape({ ...PULL, head: { ref: "feature" } }).head).toBeUndefined()
+    expect(assertPullShape({ ...PULL }).draft).toBe(true)
+  })
+
+  test("assertFullSha and assertRefSegment enforce exact-revision tokens and path-safe refs", () => {
+    expect(assertFullSha(HEAD_SHA, "head")).toBe(HEAD_SHA)
+    expect(() => assertFullSha(HEAD_SHA.toUpperCase(), "head")).toThrow(/lowercase hex git SHA/)
+    expect(() => assertFullSha("abc1234", "head")).toThrow(/lowercase hex git SHA/)
+    expect(() => assertFullSha("  ", "head")).toThrow(/lowercase hex git SHA/)
+    expect(assertRefSegment("feature", "head")).toBe("feature")
+    expect(() => assertRefSegment("feat/ure", "head")).toThrow(/path segment ref/)
+    expect(() => assertRefSegment("-x", "head")).toThrow(/must not start with '-'/)
+    expect(() => assertRefSegment("a b", "head")).toThrow(/not a valid ref/)
+  })
+})
+
+describe("gh current user, branch refs, and compare", () => {
+  test("getViewer reads the fixed user endpoint and validates login", async () => {
+    const { runner, calls } = scriptedGh((call) => {
+      if (call.args.includes("user")) return ok(JSON.stringify({ login: "octocat" }))
+      return undefined
+    })
+    const viewer = await getViewer({ runner })
+    expect(viewer).toEqual({ login: "octocat" })
+    expect(calls[0]?.args).toEqual(["api", "--method", "GET", "user"])
+  })
+
+  test("getViewer throws when login is missing or empty", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("user")) return ok(JSON.stringify({ login: "" }))
+      return undefined
+    })
+    await expect(getViewer({ runner })).rejects.toThrow(/"login"/)
+  })
+
+  test("getBranchRef reads the fixed branch endpoint and validates the full commit sha", async () => {
+    const { runner, calls } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/branches/feature")) {
+        return ok(branchJson("feature", HEAD_SHA))
+      }
+      return undefined
+    })
+    const ref: BranchRef = await getBranchRef({ runner }, { owner: "acme", repo: "widgets", branch: "feature" })
+    expect(ref).toEqual({ name: "feature", sha: HEAD_SHA })
+    expect(calls[0]?.args).toEqual(["api", "--method", "GET", "repos/acme/widgets/branches/feature"])
+  })
+
+  test("getBranchRef refuses abbreviated shas and slashed branch names", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/branches/short")) {
+        return ok(branchJson("short", "abc1234"))
+      }
+      return undefined
+    })
+    await expect(getBranchRef({ runner }, { owner: "acme", repo: "widgets", branch: "short" })).rejects.toThrow(
+      /full 40- or 64-character lowercase hex git SHA/,
+    )
+    await expect(getBranchRef({ runner }, { owner: "acme", repo: "widgets", branch: "feat/ure" })).rejects.toThrow(
+      /path segment ref/,
+    )
+  })
+
+  test("compareRefs derives ancestor from the fixed compare endpoint", async () => {
+    const { runner, calls } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+        return ok(compareJson("ahead", 2, 0, BASE_SHA))
+      }
+      return undefined
+    })
+    const cmp: CompareResult = await compareRefs({ runner }, { owner: "acme", repo: "widgets", base: "main", head: "feature" })
+    expect(cmp).toEqual({ status: "ahead", aheadBy: 2, behindBy: 0, baseSha: BASE_SHA, ancestor: true })
+    expect(calls[0]?.args).toEqual(["api", "--method", "GET", "repos/acme/widgets/compare/main...feature"])
+  })
+
+  test("compareRefs reports non-ancestry for diverged or behind compares", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+        return ok(compareJson("diverged", 1, 1, BASE_SHA))
+      }
+      return undefined
+    })
+    const cmp = await compareRefs({ runner }, { owner: "acme", repo: "widgets", base: "main", head: "feature" })
+    expect(cmp.ancestor).toBe(false)
+    expect(cmp.status).toBe("diverged")
+  })
+
+  test("compareRefs fails closed on unsupported status, negative counts, and missing base_commit", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+        return ok(compareJson("sideways", 0, 0, BASE_SHA))
+      }
+      return undefined
+    })
+    await expect(compareRefs({ runner }, { owner: "acme", repo: "widgets", base: "main", head: "feature" })).rejects.toThrow(
+      /unsupported status/,
+    )
+    const { runner: runner2 } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+        return ok(compareJson("ahead", -1, 0, BASE_SHA))
+      }
+      return undefined
+    })
+    await expect(compareRefs({ runner: runner2 }, { owner: "acme", repo: "widgets", base: "main", head: "feature" })).rejects.toThrow(
+      /non-negative integer/,
+    )
+    const { runner: runner3 } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+        return ok(JSON.stringify({ status: "ahead", ahead_by: 1, behind_by: 0 }))
+      }
+      return undefined
+    })
+    await expect(compareRefs({ runner: runner3 }, { owner: "acme", repo: "widgets", base: "main", head: "feature" })).rejects.toThrow(
+      /base_commit/,
+    )
+  })
+})
+
+describe("gh pull ready and reviews (client)", () => {
+  const READY_PULL = { ...PULL, draft: false }
+
+  test("markPullReady POSTs to the fixed ready_for_review endpoint with no body", async () => {
+    const { runner, calls } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/pulls/7/ready_for_review")) return ok(JSON.stringify(READY_PULL))
+      return undefined
+    })
+    const marked = await markPullReady({ runner }, { owner: "acme", repo: "widgets", number: 7 })
+    expect(marked.draft).toBe(false)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.args).toEqual(["api", "--method", "POST", "repos/acme/widgets/pulls/7/ready_for_review"])
+  })
+
+  test("createPullReview POSTs the exact commit_id and event and verifies the echoed commit_id", async () => {
+    const { runner, calls } = scriptedGh((call, _calls, body) => {
+      if (call.args.includes("repos/acme/widgets/pulls/7/reviews")) {
+        expect(body).toEqual({ commit_id: HEAD_SHA, event: "APPROVE" })
+        return ok(
+          JSON.stringify({
+            id: 9001,
+            state: "APPROVE",
+            commit_id: HEAD_SHA,
+            html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-9001",
+            user: { login: "reviewer-bot" },
+          }),
+        )
+      }
+      return undefined
+    })
+    const review = await createPullReview({ runner }, { owner: "acme", repo: "widgets", number: 7, commitId: HEAD_SHA, event: "APPROVE" })
+    expect(review).toEqual({
+      id: 9001,
+      state: "APPROVE",
+      commit_id: HEAD_SHA,
+      html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-9001",
+      user: { login: "reviewer-bot" },
+    })
+    expect(calls[0]?.args).toEqual(["api", "--method", "POST", "--input", expect.any(String), "repos/acme/widgets/pulls/7/reviews"])
+  })
+
+  test("createPullReview fails closed when the response does not echo the exact commit_id", async () => {
+    const { runner } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/pulls/7/reviews")) {
+        return ok(
+          JSON.stringify({
+            id: 9001,
+            state: "APPROVE",
+            commit_id: OTHER_SHA,
+            html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-9001",
+          }),
+        )
+      }
+      return undefined
+    })
+    await expect(
+      createPullReview({ runner }, { owner: "acme", repo: "widgets", number: 7, commitId: HEAD_SHA, event: "APPROVE" }),
+    ).rejects.toThrow(/returned commit_id/)
+  })
+
+  test("createPullReview rejects abbreviated commit ids and unknown events before any runner call", async () => {
+    let calls = 0
+    const runner: ProcessRunner = {
+      async run() {
+        calls += 1
+        return ok()
+      },
+    }
+    await expect(
+      createPullReview({ runner }, { owner: "acme", repo: "widgets", number: 7, commitId: "abc1234", event: "APPROVE" }),
+    ).rejects.toThrow(/full 40- or 64-character lowercase hex git SHA/)
+    await expect(
+      createPullReview({ runner }, { owner: "acme", repo: "widgets", number: 7, commitId: HEAD_SHA, event: "APROVE" as never }),
+    ).rejects.toThrow(/review event must be one of/)
+    expect(assertReviewEvent("APPROVE")).toBe("APPROVE")
+    expect(calls).toBe(0)
+  })
+
+  test("listPullReviews returns validated review items", async () => {
+    const REVIEW = {
+      id: 9001,
+      state: "APPROVE",
+      commit_id: HEAD_SHA,
+      html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-9001",
+    }
+    const { runner, calls } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/pulls/7/reviews")) return ok(JSON.stringify([REVIEW]))
+      return undefined
+    })
+    const reviews = await listPullReviews({ runner }, { owner: "acme", repo: "widgets", number: 7 })
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0]?.id).toBe(9001)
+    expect(calls[0]?.args).toEqual(["api", "--method", "GET", "repos/acme/widgets/pulls/7/reviews"])
+  })
+
+  test("assertPullReviewShape requires id, state, and html_url; commit_id is optional", () => {
+    expect(() => assertPullReviewShape({ state: "APPROVE", html_url: "u" })).toThrow(/"id"/)
+    expect(() => assertPullReviewShape({ id: 1, html_url: "u" })).toThrow(/"state"/)
+    expect(() => assertPullReviewShape({ id: 1, state: "APPROVE" })).toThrow(/"html_url"/)
+    expect(() => assertPullReviewShape({ id: 1, state: "APPROVE", html_url: "u", commit_id: 5 })).toThrow(/"commit_id"/)
+    expect(assertPullReviewShape({ id: 1, state: "APPROVE", html_url: "u" }).commit_id).toBeUndefined()
+  })
+
+  test("listPullReviews throws when the response is not an array", async () => {
+    const { runner } = scriptedGh((call) =>
+      call.args.includes("repos/acme/widgets/pulls/7/reviews") ? ok(JSON.stringify({ items: [] })) : undefined,
+    )
+    await expect(listPullReviews({ runner }, { owner: "acme", repo: "widgets", number: 7 })).rejects.toThrow(/not an array/)
+  })
 })
 
 describe("gh pull merge (client)", () => {
-  const HEAD_SHA = "abc1234def567890123456789012345678901234"
+  const HEAD_SHA_7_40 = "abc1234def567890123456789012345678901234"
   const MERGE_SHA = "9f8e7d6c5b4a39281726354b6a7c8d9e0f1a2b3c4"
 
   test("mergePull PUTs the expected head sha plus optional fields to the fixed merge endpoint and validates the response", async () => {
     const { runner, calls } = scriptedGh((call, _calls, body) => {
       if (call.args.includes("repos/acme/widgets/pulls/7/merge")) {
-        expect(body).toEqual({ sha: HEAD_SHA, merge_method: "squash", commit_title: "Ship it", commit_message: "why" })
+        expect(body).toEqual({ sha: HEAD_SHA_7_40, merge_method: "squash", commit_title: "Ship it", commit_message: "why" })
         return ok(JSON.stringify({ sha: MERGE_SHA, merged: true, message: "Pull Request successfully merged" }))
       }
       return undefined
@@ -426,7 +805,7 @@ describe("gh pull merge (client)", () => {
         owner: "acme",
         repo: "widgets",
         number: 7,
-        sha: HEAD_SHA,
+        sha: HEAD_SHA_7_40,
         mergeMethod: "squash",
         commitTitle: " Ship it ",
         commitMessage: "why",
@@ -442,12 +821,12 @@ describe("gh pull merge (client)", () => {
   test("mergePull omits absent optional fields so a bare sha body is sent", async () => {
     const { runner } = scriptedGh((call, _calls, body) => {
       if (call.args.includes("repos/acme/widgets/pulls/7/merge")) {
-        expect(body).toEqual({ sha: HEAD_SHA })
+        expect(body).toEqual({ sha: HEAD_SHA_7_40 })
         return ok(JSON.stringify({ sha: MERGE_SHA, merged: true, message: "merged" }))
       }
       return undefined
     })
-    const merged = await mergePull({ runner }, { owner: "acme", repo: "widgets", number: 7, sha: HEAD_SHA })
+    const merged = await mergePull({ runner }, { owner: "acme", repo: "widgets", number: 7, sha: HEAD_SHA_7_40 })
     expect(merged.merged).toBe(true)
   })
 
@@ -465,7 +844,7 @@ describe("gh pull merge (client)", () => {
     await expect(mergePull({ runner }, { owner: "acme", repo: "widgets", number: 7, sha: "abc;rm -rf" })).rejects.toThrow(
       /hexadecimal commit SHA/,
     )
-    expect(assertMergeSha(HEAD_SHA)).toBe(HEAD_SHA)
+    expect(assertMergeSha(HEAD_SHA_7_40)).toBe(HEAD_SHA_7_40)
     expect(calls).toBe(0)
   })
 
@@ -478,7 +857,7 @@ describe("gh pull merge (client)", () => {
       },
     }
     await expect(
-      mergePull({ runner }, { owner: "acme", repo: "widgets", number: 7, sha: HEAD_SHA, mergeMethod: "reword" as never }),
+      mergePull({ runner }, { owner: "acme", repo: "widgets", number: 7, sha: HEAD_SHA_7_40, mergeMethod: "reword" as never }),
     ).rejects.toThrow(/mergeMethod must be one of/)
     expect(calls).toBe(0)
   })
@@ -502,7 +881,7 @@ describe("gh pull merge (client)", () => {
     )
     const gh = { runner, redact: createRedactor(["supersecret-token"]) }
     try {
-      await mergePull(gh, { owner: "acme", repo: "widgets", number: 7, sha: HEAD_SHA })
+      await mergePull(gh, { owner: "acme", repo: "widgets", number: 7, sha: HEAD_SHA_7_40 })
       expect.unreachable("mergePull should have thrown")
     } catch (error) {
       expect(error).toBeInstanceOf(GhError)
@@ -611,6 +990,8 @@ describe("github tools", () => {
       "github_pr_view",
       "github_pr_list",
       "github_pr_create",
+      "github_pr_ready",
+      "github_pr_approve",
       "github_pr_merge",
     ])
     for (const tool of tools.values()) {
@@ -632,11 +1013,23 @@ describe("github tools", () => {
       /only to the orchestrator/,
     )
     await expect(
+      tools.get("github_pr_ready")!.execute(
+        { owner: "acme", repo: "widgets", number: 7, expectedHeadSha: HEAD_SHA, confirm: true },
+        worker,
+      ),
+    ).rejects.toThrow(/only to the orchestrator/)
+    await expect(
+      tools.get("github_pr_approve")!.execute(
+        { owner: "acme", repo: "widgets", number: 7, expectedHeadSha: HEAD_SHA, expectedBaseSha: BASE_SHA, confirm: true },
+        worker,
+      ),
+    ).rejects.toThrow(/only to the orchestrator/)
+    await expect(
       tools.get("github_pr_merge")!.execute({ owner: "acme", repo: "widgets", number: 7, expectedHeadSha: "abc", confirm: true }, worker),
     ).rejects.toThrow(/only to the orchestrator/)
   })
 
-  test("requires allow_mutations for create and merge but not for view or list", async () => {
+  test("requires allow_mutations for the mutating tools but not for view or list", async () => {
     const { tools } = collectGhTools({ options: ghOptions({ github: { enabled: true, allow_mutations: false } }) })
     const session = toolContext("session-1", "orchestrator")
     const viewed = await tools
@@ -645,6 +1038,24 @@ describe("github tools", () => {
     expect(viewed.content).toContain("failed")
     await expect(
       tools.get("github_issue_create")!.execute({ owner: "acme", repo: "widgets", title: "T", confirm: true }, session),
+    ).rejects.toThrow(/allow_mutations/)
+    await expect(
+      tools.get("github_pr_create")!.execute(
+        { owner: "acme", repo: "widgets", title: "T", head: "f", base: "m", expectedHeadSha: HEAD_SHA, expectedBaseSha: BASE_SHA, confirm: true },
+        session,
+      ),
+    ).rejects.toThrow(/allow_mutations/)
+    await expect(
+      tools.get("github_pr_ready")!.execute(
+        { owner: "acme", repo: "widgets", number: 7, expectedHeadSha: HEAD_SHA, confirm: true },
+        session,
+      ),
+    ).rejects.toThrow(/allow_mutations/)
+    await expect(
+      tools.get("github_pr_approve")!.execute(
+        { owner: "acme", repo: "widgets", number: 7, expectedHeadSha: HEAD_SHA, expectedBaseSha: BASE_SHA, confirm: true },
+        session,
+      ),
     ).rejects.toThrow(/allow_mutations/)
     await expect(
       tools.get("github_pr_merge")!.execute(
@@ -665,6 +1076,26 @@ describe("github tools", () => {
       .get("github_issue_create")!
       .execute({ owner: "acme", repo: "widgets", title: "T", confirm: false }, session)
     expect(falsy.content).toContain("requires confirm: true")
+  })
+
+  test("ready and approve require a literal confirm: true", async () => {
+    const { tools } = collectGhTools()
+    const session = toolContext("session-1", "orchestrator")
+    const ready = await tools
+      .get("github_pr_ready")!
+      .execute({ owner: "acme", repo: "widgets", number: 7, expectedHeadSha: HEAD_SHA }, session)
+    expect(ready.content).toContain("github_pr_ready requires confirm: true")
+    const readyFalsy = await tools
+      .get("github_pr_ready")!
+      .execute({ owner: "acme", repo: "widgets", number: 7, expectedHeadSha: HEAD_SHA, confirm: false }, session)
+    expect(readyFalsy.content).toContain("github_pr_ready requires confirm: true")
+    const approve = await tools
+      .get("github_pr_approve")!
+      .execute(
+        { owner: "acme", repo: "widgets", number: 7, expectedHeadSha: HEAD_SHA, expectedBaseSha: BASE_SHA },
+        session,
+      )
+    expect(approve.content).toContain("github_pr_approve requires confirm: true")
   })
 
   test("issue_create writes through the client and reports verified evidence", async () => {
@@ -821,37 +1252,6 @@ describe("github tools", () => {
     expect(evidenceSchema.safeParse(pulls[0]?.evidence).success).toBe(true)
   })
 
-  test("pr_create reports mutation evidence with an https proof", async () => {
-    const { runner } = scriptedGh((call, _calls, body) => {
-      if (call.args.includes("repos/acme/widgets/pulls")) {
-        expect(body).toEqual({ title: "Implement the fix", head: "feature", base: "main" })
-        return ok(JSON.stringify(PULL))
-      }
-      return undefined
-    })
-    const { tools } = collectGhTools({ runner })
-    const output = await tools
-      .get("github_pr_create")!
-      .execute(
-        { owner: "acme", repo: "widgets", title: "Implement the fix", head: "feature", base: "main", confirm: true },
-        toolContext("session-1", "orchestrator"),
-      )
-    const parsed = JSON.parse(output.content) as PullInfo & { verified: boolean; evidence: unknown }
-    expect(parsed.verified).toBe(true)
-    expect(parsed.number).toBe(7)
-    expect(parsed.evidence).toEqual({
-      marker: "EVIDENCE_MUTATION",
-      freshness: "per-invocation",
-      authority: "authoritative-for-tested-fields",
-      version: 1,
-      source: "opencode-orchestrator.gh.pr.create",
-      sessionID: "session-1",
-      capturedAt: expect.any(Number),
-      mutation: { verified: true, id: 2001, number: 7, url: PULL.html_url },
-    })
-    expect(PULL.html_url.startsWith("https://")).toBe(true)
-  })
-
   test("read results carry per-session provenance matching the tool context", async () => {
     const { runner } = scriptedGh((call) => {
       if (call.args.includes("repos/acme/widgets/issues/1")) return ok(JSON.stringify(ISSUE))
@@ -901,29 +1301,709 @@ describe("github tools", () => {
     expect(evidenceSchema.safeParse(parsed.evidence).success).toBe(true)
   })
 
-  describe("github pr merge tool", () => {
-    const HEAD_SHA = "abc1234def567890123456789012345678901234"
-    const MERGE_SHA = "9f8e7d6c5b4a39281726354b6a7c8d9e0f1a2b3c4"
-    const OPEN_PULL = { ...PULL, state: "open", merged: false, head: { ref: "feature", sha: HEAD_SHA } }
-    const MERGED_PULL = {
-      ...PULL,
-      state: "closed",
-      merged: true,
-      merged_at: "2026-08-31T00:00:00Z",
-      head: { ref: "feature", sha: HEAD_SHA },
+  describe("github pr create tool", () => {
+    const createInput = {
+      owner: "acme",
+      repo: "widgets",
+      title: "Implement the fix",
+      head: "feature",
+      base: "main",
+      expectedHeadSha: HEAD_SHA,
+      expectedBaseSha: BASE_SHA,
+      confirm: true,
     }
-    const mergeInput = {
+    const CREATE_STORAGE = lifecycleStorage({
+      capabilities: ["pr-draft-create"],
+      record: APPROVED_REVIEW,
+    })
+
+    /** Scripted gh answering the create gate pipeline: refs, compare, create. */
+    function createScripted() {
+      return scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls")) return ok(JSON.stringify(PULL))
+        return undefined
+      })
+    }
+
+    test("performs the full publication gate pipeline (capability, receipt, ancestry, exact revisions) and reports mutation evidence", async () => {
+      const { runner, calls } = createScripted()
+      const { tools } = collectGhTools({ runner, storage: CREATE_STORAGE })
+      const output = await tools
+        .get("github_pr_create")!
+        .execute(createInput, toolContext("session-1", "orchestrator"))
+      const parsed = JSON.parse(output.content) as PullInfo & { verified: boolean; evidence: unknown }
+      expect(parsed.verified).toBe(true)
+      expect(parsed.number).toBe(7)
+      expect(parsed.draft).toBe(true)
+      expect(parsed.head).toEqual({ ref: "feature", sha: HEAD_SHA })
+      expect(parsed.base).toEqual({ ref: "main", sha: BASE_SHA })
+      expect(parsed.evidence).toEqual({
+        marker: "EVIDENCE_MUTATION",
+        freshness: "per-invocation",
+        authority: "authoritative-for-tested-fields",
+        version: 1,
+        source: "opencode-orchestrator.gh.pr.create",
+        sessionID: "session-1",
+        capturedAt: expect.any(Number),
+        mutation: { verified: true, id: 2001, number: 7, url: PULL.html_url },
+      })
+      expect(PULL.html_url.startsWith("https://")).toBe(true)
+      // Exact sequence: head ref, base ref, compare, then the create POST.
+      expect(calls.map((call) => `${call.args[2]} ${call.args.at(-1)}`)).toEqual([
+        "GET repos/acme/widgets/branches/feature",
+        "GET repos/acme/widgets/branches/main",
+        "GET repos/acme/widgets/compare/main...feature",
+        "POST repos/acme/widgets/pulls",
+      ])
+    })
+
+    test("refuses when the durable publish capability pr-draft-create is not authorized", async () => {
+      const { runner } = createScripted()
+      const { tools } = collectGhTools({ runner, storage: lifecycleStorage({ record: APPROVED_REVIEW }) })
+      const output = await tools
+        .get("github_pr_create")!
+        .execute(createInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr create refused")
+      expect(output.content).toContain("pr-draft-create")
+      expect(output.content).toContain("/publish enable")
+      expect(() => JSON.parse(output.content)).toThrow()
+    })
+
+    test("refuses without an exact-revision approved internal receipt", async () => {
+      const { runner } = createScripted()
+      const { tools } = collectGhTools({
+        runner,
+        storage: lifecycleStorage({ capabilities: ["pr-draft-create"] }),
+      })
+      const output = await tools
+        .get("github_pr_create")!
+        .execute(createInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr create refused")
+      expect(output.content).toContain("no review record")
+    })
+
+    test("refuses a receipt that is not approved or bound to a different revision", async () => {
+      const pending: ReviewV1Record = { ...APPROVED_REVIEW, state: "pending", reason: "manual-start" }
+      const { runner } = createScripted()
+      const { tools } = collectGhTools({
+        runner,
+        storage: lifecycleStorage({ capabilities: ["pr-draft-create"], record: pending }),
+      })
+      const output = await tools
+        .get("github_pr_create")!
+        .execute(createInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr create refused")
+      expect(output.content).toContain("pending, not approved")
+
+      const otherRevision = { ...APPROVED_REVIEW, headSha: OTHER_SHA }
+      const { runner: runner2 } = createScripted()
+      const { tools: tools2 } = collectGhTools({
+        runner: runner2,
+        storage: lifecycleStorage({ capabilities: ["pr-draft-create"], record: otherRevision }),
+      })
+      const output2 = await tools2
+        .get("github_pr_create")!
+        .execute(createInput, toolContext("session-1", "orchestrator"))
+      expect(output2.content).toContain("github pr create refused")
+      expect(output2.content).toContain("bound to a different head/base revision")
+    })
+
+    test("refuses when the remote head or base no longer matches the exact reviewed revisions", async () => {
+      const { runner, calls } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", OTHER_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: CREATE_STORAGE })
+      const output = await tools
+        .get("github_pr_create")!
+        .execute(createInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr create refused")
+      expect(output.content).toContain("remote head ref feature")
+      expect(calls.map((call) => call.args.at(-1))).toEqual([
+        "repos/acme/widgets/branches/feature",
+        "repos/acme/widgets/branches/main",
+        "repos/acme/widgets/compare/main...feature",
+      ])
+      expect(calls.some((call) => call.args.includes("POST"))).toBe(false)
+    })
+
+    test("refuses when the current remote base is not an ancestor of the remote head", async () => {
+      const { runner, calls } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("diverged", 1, 2, BASE_SHA))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: CREATE_STORAGE })
+      const output = await tools
+        .get("github_pr_create")!
+        .execute(createInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr create refused")
+      expect(output.content).toContain("not an ancestor")
+      expect(calls).toHaveLength(3)
+    })
+
+    test("refuses when the compare base commit disagrees with the current base ref (ancestor=false)", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, OTHER_SHA))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: CREATE_STORAGE })
+      const output = await tools
+        .get("github_pr_create")!
+        .execute(createInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr create refused")
+      expect(output.content).toContain("not an ancestor")
+    })
+
+    test("never claims success when the create API fails: the error stays a redacted string", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("identicial" as never, 0, 0, BASE_SHA))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: CREATE_STORAGE })
+      const output = await tools
+        .get("github_pr_create")!
+        .execute(createInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr create failed")
+      expect(output.content).toContain("unsupported status")
+      expect(output.content).not.toContain("evidence")
+    })
+  })
+
+  describe("github pr ready tool", () => {
+    const readyInput = {
       owner: "acme",
       repo: "widgets",
       number: 7,
       expectedHeadSha: HEAD_SHA,
       confirm: true,
     }
+    const READY_STORAGE = lifecycleStorage({ capabilities: ["pr-ready-transition"] })
+    const OPEN_DRAFT = { ...PULL, state: "open", merged: false, draft: true, mergeable: true, mergeable_state: "clean" }
+    const READY_DONE = { ...PULL, state: "open", merged: false, draft: false, mergeable: true, mergeable_state: "clean" }
+
+    function readyScripted() {
+      return scriptedGh((call, calls) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls/7/ready_for_review")) return ok(JSON.stringify(READY_DONE))
+        if (call.args.includes("repos/acme/widgets/pulls/7")) {
+          const views = calls.filter((c) => c.args[0] === "api" && c.args.includes("repos/acme/widgets/pulls/7"))
+          return ok(JSON.stringify(views.length <= 1 ? OPEN_DRAFT : READY_DONE))
+        }
+        return undefined
+      })
+    }
+
+    test("marks the draft ready only after fresh exact revision, ancestry, draft/mergeable/conflict gates, and a verified post-view", async () => {
+      const { runner, calls } = readyScripted()
+      const { tools } = collectGhTools({ runner, storage: READY_STORAGE })
+      const output = await tools
+        .get("github_pr_ready")!
+        .execute(readyInput, toolContext("session-1", "orchestrator"))
+      const parsed = JSON.parse(output.content) as PullInfo & { verified: boolean; evidence: unknown }
+      expect(parsed.verified).toBe(true)
+      expect(parsed.draft).toBe(false)
+      expect(parsed.number).toBe(7)
+      expect(parsed.evidence).toEqual({
+        marker: "EVIDENCE_MUTATION",
+        freshness: "per-invocation",
+        authority: "authoritative-for-tested-fields",
+        version: 1,
+        source: "opencode-orchestrator.gh.pr.ready",
+        sessionID: "session-1",
+        capturedAt: expect.any(Number),
+        mutation: { verified: true, id: 2001, number: 7, url: PULL.html_url },
+      })
+      // Exact sequence: view, head ref, base ref, compare, ready POST, post-view.
+      expect(calls.map((call) => `${call.args[2]} ${call.args.at(-1)}`)).toEqual([
+        "GET repos/acme/widgets/pulls/7",
+        "GET repos/acme/widgets/branches/feature",
+        "GET repos/acme/widgets/branches/main",
+        "GET repos/acme/widgets/compare/main...feature",
+        "POST repos/acme/widgets/pulls/7/ready_for_review",
+        "GET repos/acme/widgets/pulls/7",
+      ])
+    })
+
+    test("refuses a pull that is not a draft", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify({ ...OPEN_DRAFT, draft: false }))
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: READY_STORAGE })
+      const output = await tools
+        .get("github_pr_ready")!
+        .execute(readyInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr ready refused")
+      expect(output.content).toContain("not a draft")
+    })
+
+    test("refuses when the fresh view head does not match the expected exact revision", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/pulls/7")) {
+          return ok(JSON.stringify({ ...OPEN_DRAFT, head: { ref: "feature", sha: OTHER_SHA } }))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: READY_STORAGE })
+      const output = await tools
+        .get("github_pr_ready")!
+        .execute(readyInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr ready refused")
+      expect(output.content).toContain("expected head SHA")
+    })
+
+    test("refuses when the pull is not mergeable", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/pulls/7")) {
+          return ok(JSON.stringify({ ...OPEN_DRAFT, mergeable: false, mergeable_state: "dirty" }))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: READY_STORAGE })
+      const output = await tools
+        .get("github_pr_ready")!
+        .execute(readyInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr ready refused")
+      expect(output.content).toContain("not mergeable")
+    })
+
+    test("refuses a dirty conflict state even when mergeable is true", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/pulls/7")) {
+          return ok(JSON.stringify({ ...OPEN_DRAFT, mergeable: true, mergeable_state: "dirty" }))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: READY_STORAGE })
+      const output = await tools
+        .get("github_pr_ready")!
+        .execute(readyInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr ready refused")
+      expect(output.content).toContain("conflict state 'dirty'")
+    })
+
+    test("refuses an unknown conflict state instead of assuming it is clean", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/pulls/7")) {
+          return ok(JSON.stringify({ ...OPEN_DRAFT, mergeable: true, mergeable_state: "unknown" }))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: READY_STORAGE })
+      const output = await tools
+        .get("github_pr_ready")!
+        .execute(readyInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr ready refused")
+      expect(output.content).toContain("conflict state 'unknown'")
+    })
+
+    test("refuses when the current remote base is not an ancestor of the pull head", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("behind", 0, 1, BASE_SHA))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(OPEN_DRAFT))
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: READY_STORAGE })
+      const output = await tools
+        .get("github_pr_ready")!
+        .execute(readyInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr ready refused")
+      expect(output.content).toContain("not an ancestor")
+    })
+
+    test("refuses when the ready_for_review response still reports draft:true", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls/7/ready_for_review")) {
+          return ok(JSON.stringify({ ...OPEN_DRAFT, draft: true }))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(OPEN_DRAFT))
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: READY_STORAGE })
+      const output = await tools
+        .get("github_pr_ready")!
+        .execute(readyInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr ready failed")
+      expect(output.content).toContain("still reports draft:true")
+    })
+
+    test("never claims success when the post-view does not confirm the draft transition", async () => {
+      const { runner, calls } = scriptedGh((call, allCalls) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls/7/ready_for_review")) return ok(JSON.stringify(READY_DONE))
+        if (call.args.includes("repos/acme/widgets/pulls/7")) {
+          const views = allCalls.filter((c) => c.args[0] === "api" && c.args.includes("repos/acme/widgets/pulls/7"))
+          return ok(JSON.stringify(views.length <= 1 ? OPEN_DRAFT : { ...OPEN_DRAFT, draft: true }))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: READY_STORAGE })
+      const output = await tools
+        .get("github_pr_ready")!
+        .execute(readyInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr ready failed")
+      expect(output.content).toContain("post-view does not confirm the draft transition")
+      expect(output.content).not.toContain("evidence")
+      expect(calls).toHaveLength(6)
+    })
+
+    test("refuses without the durable publish capability pr-ready-transition", async () => {
+      const { runner } = readyScripted()
+      const { tools } = collectGhTools({ runner, storage: lifecycleStorage() })
+      const output = await tools
+        .get("github_pr_ready")!
+        .execute(readyInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr ready refused")
+      expect(output.content).toContain("pr-ready-transition")
+    })
+  })
+
+  describe("github pr approve tool", () => {
+    const approveInput = {
+      owner: "acme",
+      repo: "widgets",
+      number: 7,
+      expectedHeadSha: HEAD_SHA,
+      expectedBaseSha: BASE_SHA,
+      confirm: true,
+    }
+    const APPROVE_STORAGE = lifecycleStorage({
+      capabilities: ["approve-after-review"],
+      record: APPROVED_REVIEW,
+    })
+    const APPROVABLE = {
+      ...PULL,
+      state: "open",
+      merged: false,
+      draft: false,
+      mergeable: true,
+      mergeable_state: "clean",
+      user: { login: "octocat" },
+    }
+    const CREATED_REVIEW: PullReview = {
+      id: 9001,
+      state: "APPROVE",
+      commit_id: HEAD_SHA,
+      html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-9001",
+      user: { login: "reviewer-bot" },
+    }
+
+    function approveScripted() {
+      return scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        if (call.args.includes("user")) return ok(JSON.stringify({ login: "reviewer-bot" }))
+        if (call.args.includes("repos/acme/widgets/pulls/7/reviews") && call.args.includes("--method")) {
+          if (call.args.includes("POST")) return ok(JSON.stringify(CREATED_REVIEW))
+          return ok(JSON.stringify([CREATED_REVIEW]))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(APPROVABLE))
+        return undefined
+      })
+    }
+
+    test("approves with an exact-commit APPROVE after every gate and verifies the durable listing matches", async () => {
+      const { runner, calls } = approveScripted()
+      const { tools } = collectGhTools({ runner, storage: APPROVE_STORAGE })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      const parsed = JSON.parse(output.content) as PullReview & { number: number; verified: boolean; evidence: unknown }
+      expect(parsed.verified).toBe(true)
+      expect(parsed.id).toBe(9001)
+      expect(parsed.number).toBe(7)
+      expect(parsed.state).toBe("APPROVE")
+      expect(parsed.commit_id).toBe(HEAD_SHA)
+      expect(parsed.user).toEqual({ login: "reviewer-bot" })
+      expect(parsed.html_url.startsWith("https://")).toBe(true)
+      expect(parsed.evidence).toEqual({
+        marker: "EVIDENCE_MUTATION",
+        freshness: "per-invocation",
+        authority: "authoritative-for-tested-fields",
+        version: 1,
+        source: "opencode-orchestrator.gh.pr.approve",
+        sessionID: "session-1",
+        capturedAt: expect.any(Number),
+        mutation: { verified: true, id: 9001, number: 7, url: CREATED_REVIEW.html_url },
+      })
+      // Exact sequence: view, viewer, head ref, base ref, compare, review POST,
+      // review list verification.
+      expect(calls.map((call) => `${call.args[2]} ${call.args.at(-1)}`)).toEqual([
+        "GET repos/acme/widgets/pulls/7",
+        "GET user",
+        "GET repos/acme/widgets/branches/feature",
+        "GET repos/acme/widgets/branches/main",
+        "GET repos/acme/widgets/compare/main...feature",
+        "POST repos/acme/widgets/pulls/7/reviews",
+        "GET repos/acme/widgets/pulls/7/reviews",
+      ])
+    })
+
+    test("refuses when the authenticated viewer is the pull author (self-approve)", async () => {
+      const { runner, calls } = scriptedGh((call) => {
+        if (call.args.includes("user")) return ok(JSON.stringify({ login: "octocat" }))
+        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(APPROVABLE))
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: APPROVE_STORAGE })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr approve refused")
+      expect(output.content).toContain("self-approval")
+      expect(output.content).toContain("octocat")
+      expect(calls.some((call) => call.args.includes("reviews"))).toBe(false)
+    })
+
+    test("refuses a pull with an unknown author", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("user")) return ok(JSON.stringify({ login: "reviewer-bot" }))
+        if (call.args.includes("repos/acme/widgets/pulls/7")) {
+          return ok(JSON.stringify({ ...APPROVABLE, user: undefined }))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: APPROVE_STORAGE })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr approve refused")
+      expect(output.content).toContain("unknown author")
+    })
+
+    test("refuses a pull that is still a draft", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/pulls/7")) {
+          return ok(JSON.stringify({ ...APPROVABLE, draft: true }))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: APPROVE_STORAGE })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr approve refused")
+      expect(output.content).toContain("still a draft")
+    })
+
+    test("refuses a conflict state and never counts branch-protection states as clean", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/pulls/7")) {
+          return ok(JSON.stringify({ ...APPROVABLE, mergeable: true, mergeable_state: "dirty" }))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: APPROVE_STORAGE })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr approve refused")
+      expect(output.content).toContain("conflict state 'dirty'")
+      expect(output.content).not.toContain("verified")
+    })
+
+    test("refuses without an exact-revision approved internal receipt", async () => {
+      const { runner } = approveScripted()
+      const { tools } = collectGhTools({
+        runner,
+        storage: lifecycleStorage({ capabilities: ["approve-after-review"] }),
+      })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr approve refused")
+      expect(output.content).toContain("no review record")
+    })
+
+    test("refuses without the durable publish capability approve-after-review", async () => {
+      const { runner } = approveScripted()
+      const { tools } = collectGhTools({ runner, storage: lifecycleStorage({ record: APPROVED_REVIEW }) })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr approve refused")
+      expect(output.content).toContain("approve-after-review")
+    })
+
+    test("refuses when the remote head moved past the exact reviewed revision", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", OTHER_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        if (call.args.includes("user")) return ok(JSON.stringify({ login: "reviewer-bot" }))
+        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(APPROVABLE))
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: APPROVE_STORAGE })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr approve refused")
+      expect(output.content).toContain("remote head ref feature")
+    })
+
+    test("never claims success when the review create does not echo APPROVE", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        if (call.args.includes("user")) return ok(JSON.stringify({ login: "reviewer-bot" }))
+        if (call.args.includes("repos/acme/widgets/pulls/7/reviews") && call.args.includes("--method")) {
+          if (call.args.includes("POST")) {
+            return ok(JSON.stringify({ ...CREATED_REVIEW, state: "COMMENT" }))
+          }
+          return ok(JSON.stringify([{ ...CREATED_REVIEW, state: "COMMENT" }]))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(APPROVABLE))
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: APPROVE_STORAGE })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr approve failed")
+      expect(output.content).toContain("not APPROVE")
+      expect(output.content).not.toContain("evidence")
+    })
+
+    test("never claims success when the durable review listing does not match the created approval", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        if (call.args.includes("user")) return ok(JSON.stringify({ login: "reviewer-bot" }))
+        if (call.args.includes("repos/acme/widgets/pulls/7/reviews") && call.args.includes("--method")) {
+          if (call.args.includes("POST")) return ok(JSON.stringify(CREATED_REVIEW))
+          // The listing disagrees: unknown author on the durable record.
+          return ok(JSON.stringify([{ ...CREATED_REVIEW, user: { login: "someone-else" } }]))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(APPROVABLE))
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: APPROVE_STORAGE })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr approve failed")
+      expect(output.content).toContain("does not match the created approval")
+      expect(output.content).not.toContain("evidence")
+    })
+
+    test("never claims success when the created review cannot be found in the listing", async () => {
+      const { runner } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        if (call.args.includes("user")) return ok(JSON.stringify({ login: "reviewer-bot" }))
+        if (call.args.includes("repos/acme/widgets/pulls/7/reviews") && call.args.includes("--method")) {
+          if (call.args.includes("POST")) return ok(JSON.stringify(CREATED_REVIEW))
+          return ok(JSON.stringify([]))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(APPROVABLE))
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: APPROVE_STORAGE })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr approve failed")
+      expect(output.content).toContain("does not match the created approval")
+      expect(output.content).not.toContain("evidence")
+    })
+
+    test("refuses when the remote base no longer matches the exact reviewed base", async () => {
+      const { runner, calls } = scriptedGh((call) => {
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", OTHER_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, OTHER_SHA))
+        }
+        if (call.args.includes("user")) return ok(JSON.stringify({ login: "reviewer-bot" }))
+        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(APPROVABLE))
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: APPROVE_STORAGE })
+      const output = await tools
+        .get("github_pr_approve")!
+        .execute(approveInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr approve refused")
+      expect(output.content).toContain("remote base ref main")
+      expect(calls.some((call) => call.args.includes("reviews"))).toBe(false)
+    })
+  })
+
+  describe("github pr merge tool", () => {
+    const HEAD_SHA_7_40 = "abc1234def567890123456789012345678901234"
+    const MERGE_SHA = "9f8e7d6c5b4a39281726354b6a7c8d9e0f1a2b3c4"
+    const OPEN_PULL = { ...PULL, state: "open", merged: false, head: { ref: "feature", sha: HEAD_SHA_7_40 } }
+    const MERGED_PULL = {
+      ...PULL,
+      state: "closed",
+      merged: true,
+      merged_at: "2026-08-31T00:00:00Z",
+      head: { ref: "feature", sha: HEAD_SHA_7_40 },
+    }
+    const mergeInput = {
+      owner: "acme",
+      repo: "widgets",
+      number: 7,
+      expectedHeadSha: HEAD_SHA_7_40,
+      confirm: true,
+    }
 
     test("requires a literal confirm: true", async () => {
       const { tools } = collectGhTools()
       const session = toolContext("session-1", "orchestrator")
-      const missing = await tools.get("github_pr_merge")!.execute({ owner: "acme", repo: "widgets", number: 7, expectedHeadSha: HEAD_SHA }, session)
+      const missing = await tools.get("github_pr_merge")!.execute({ owner: "acme", repo: "widgets", number: 7, expectedHeadSha: HEAD_SHA_7_40 }, session)
       expect(missing.content).toContain("requires confirm: true")
       const falsy = await tools
         .get("github_pr_merge")!
@@ -942,7 +2022,7 @@ describe("github tools", () => {
     test("runs pre-view -> merge with the expected head SHA -> verified post-view and reports mutation evidence", async () => {
       const { runner, calls } = scriptedGh((call, calls, body) => {
         if (call.args[0] === "api" && call.args.includes("--method") && call.args.includes("PUT")) {
-          expect(body).toEqual({ sha: HEAD_SHA, merge_method: "squash", commit_title: "Ship it", commit_message: "why" })
+          expect(body).toEqual({ sha: HEAD_SHA_7_40, merge_method: "squash", commit_title: "Ship it", commit_message: "why" })
           return ok(JSON.stringify({ sha: MERGE_SHA, merged: true, message: "Pull Request successfully merged" }))
         }
         if (call.args.includes("repos/acme/widgets/pulls/7")) {
@@ -970,7 +2050,7 @@ describe("github tools", () => {
       expect(parsed.number).toBe(7)
       expect(parsed.merged).toBe(true)
       expect(parsed.mergeSha).toBe(MERGE_SHA)
-      expect(parsed.expectedHeadSha).toBe(HEAD_SHA)
+      expect(parsed.expectedHeadSha).toBe(HEAD_SHA_7_40)
       expect(parsed.html_url.startsWith("https://")).toBe(true)
       expect(parsed.evidence).toEqual({
         marker: "EVIDENCE_MUTATION",
@@ -1021,7 +2101,7 @@ describe("github tools", () => {
       const output = await tools
         .get("github_pr_merge")!
         .execute(
-          { ...mergeInput, expectedHeadSha: HEAD_SHA },
+          { ...mergeInput, expectedHeadSha: HEAD_SHA_7_40 },
           toolContext("session-1", "orchestrator"),
         )
       expect(output.content).toContain("github pr merge refused")
@@ -1033,7 +2113,7 @@ describe("github tools", () => {
     test("never claims success when the merge API reports merged:false", async () => {
       const { runner } = scriptedGh((call) => {
         if (call.args[0] === "api" && call.args.includes("--method") && call.args.includes("PUT")) {
-          return ok(JSON.stringify({ sha: HEAD_SHA, merged: false, message: "Pull Request is not mergeable" }))
+          return ok(JSON.stringify({ sha: HEAD_SHA_7_40, merged: false, message: "Pull Request is not mergeable" }))
         }
         if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(OPEN_PULL))
         return undefined

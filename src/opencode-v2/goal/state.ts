@@ -90,6 +90,44 @@ export function goalStorageKey(location: LocationLike, sessionID: string): strin
 }
 
 /**
+ * Storage prefix under which every goal record for one project lives.
+ * Peer discovery scans exactly this prefix so it can never read records
+ * keyed under another project.
+ */
+export function goalProjectPrefix(projectID: string): string {
+  return `goal/v1/${segment(projectID)}/`
+}
+
+/**
+ * Inverse of `goalStorageKey` for scan entries: extracts the session ID
+ * suffix from a goal record key for `projectID`. Returns undefined for keys
+ * that do not match the exact `goal/v1/<project>/<session>` shape (extra or
+ * missing segments), so malformed or foreign keys are never attributed to a
+ * session.
+ */
+export function goalSessionIDFromKey(key: string, projectID: string): string | undefined {
+  const prefix = goalProjectPrefix(projectID)
+  if (!key.startsWith(prefix)) return undefined
+  const session = key.slice(prefix.length)
+  if (!session || session.length === 0 || session.includes("/") || session.length > 512) return undefined
+  try {
+    return decodeURIComponent(session)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Parses one candidate goal record value without touching storage.
+ * Safe read helper for scan paths (peer discovery): a malformed value
+ * returns undefined instead of throwing and is counted by the caller.
+ */
+export function parseGoalRecord(value: unknown): GoalRecord | undefined {
+  const parsed = goalSchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
+}
+
+/**
  * Resolves the project ID durable goal/run/halt state is keyed under for a
  * session: the session anchor's stable `originProjectID` when an anchor is
  * present at the given location, otherwise the location's own project ID.

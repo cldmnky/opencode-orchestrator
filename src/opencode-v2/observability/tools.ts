@@ -104,7 +104,7 @@ export function addObservabilityTools(draft: ToolDraftLike, deps: ObservabilityT
     draft.add({
       name: "review_transition",
       description:
-        "Compute and persist the deterministic V1 review transition for one record. start requires exactly taskId, runId, maker, checker, and the review-pending admission signal; approve requires exactly the fixed boolean checks diff, scope, and verification (all must be true); request-changes and block take exactly the action. Orchestrator-only; callable/advisory, not an automatic completion gate.",
+        "Compute and persist the deterministic V1 review transition for one record. start requires exactly taskId, runId, maker, checker, and the review-pending admission signal, and may optionally pin an exact-revision receipt (headSha and baseSha together, each a full 40- or 64-character lowercase hex git SHA); approve requires exactly the fixed boolean checks diff, scope, and verification (all must be true); request-changes and block take exactly the action. Orchestrator-only; callable/advisory, not an automatic completion gate.",
       input: reviewTransitionInput,
       options: { namespace: "orchestrator", permission: OBSERVABILITY_TOOL_PERMISSION },
       execute: async (input, tool) => {
@@ -131,7 +131,7 @@ export function addObservabilityTools(draft: ToolDraftLike, deps: ObservabilityT
               accepted: false,
               reason: "invalid-signal",
               message:
-                "review_transition rejected the signal; start requires exactly taskId, runId, maker, checker, and admissionState review-pending with no extra fields; approve requires exactly the fixed boolean checks diff, scope, and verification; request-changes and block take exactly the action with no extra fields",
+                "review_transition rejected the signal; start requires exactly taskId, runId, maker, checker, and admissionState review-pending with no extra fields (headSha and baseSha are optional but must both be present together, each a full 40- or 64-character lowercase hex git SHA); approve requires exactly the fixed boolean checks diff, scope, and verification; request-changes and block take exactly the action with no extra fields",
               requiresHuman: false,
               terminal: false,
               limitations: LIMITATIONS,
@@ -230,12 +230,13 @@ const reviewGetInput = {
 
 // Strict per-action input variants: the model-facing JSON schema mirrors the
 // runtime REVIEW_V1_SIGNAL_SCHEMA exactly. start requires exactly action,
-// taskId, runId, maker, checker, admissionState; approve requires exactly
-// action plus the fixed checks (diff, scope, verification); request-changes
-// and block allow exactly action. Any extra per-action field matches no
-// variant and is rejected. The checks property set and required list are
-// derived from REVIEW_V1_CHECK_KEYS so the model-facing and runtime schemas
-// can never drift apart.
+// taskId, runId, maker, checker, admissionState and may optionally pin an
+// exact-revision receipt (headSha and baseSha together, full git object IDs);
+// approve requires exactly action plus the fixed checks (diff, scope,
+// verification); request-changes and block allow exactly action. Any extra
+// per-action field matches no variant and is rejected. The checks property
+// set and required list are derived from REVIEW_V1_CHECK_KEYS so the
+// model-facing and runtime schemas can never drift apart.
 export const reviewTransitionInput = {
   type: "object",
   properties: {
@@ -251,6 +252,8 @@ export const reviewTransitionInput = {
             maker: { type: "string", minLength: 1, maxLength: 128 },
             checker: { type: "string", minLength: 1, maxLength: 128 },
             admissionState: { type: "string", enum: ["review-pending"] },
+            headSha: { type: "string", pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+            baseSha: { type: "string", pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
           },
           required: ["action", "taskId", "runId", "maker", "checker", "admissionState"],
           additionalProperties: false,

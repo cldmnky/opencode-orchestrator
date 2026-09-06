@@ -6,15 +6,22 @@ import { parseOptions, type OrchestratorOptions } from "../../src/core/config.js
 import { WORKTREE_TOOL_PERMISSION } from "../../src/core/permissions.js"
 import type { ProcessResult, ProcessRunner } from "../../src/opencode-v2/process/runner.js"
 import {
+  gitFetch,
   gitLsRemote,
+  gitMerge,
+  gitMergeAbort,
+  gitMergeBaseIsAncestor,
   gitPush,
   gitRevParse,
   gitStatus,
+  gitUnmergedPaths,
   gitWorktreeAdd,
   gitWorktreeList,
   gitWorktreeRemove,
   isPathInside,
   isValidBranchName,
+  isValidRemoteName,
+  parseLsRemoteRefSha,
   parseWorktreeList,
   resolveRealpath,
   validateWorktreeCreate,
@@ -31,6 +38,7 @@ import {
   type SessionIndexRecord,
   type StorageLike,
   type WorktreeRecord,
+  type WorktreeSyncReceipt,
 } from "../../src/opencode-v2/worktree/state.js"
 import { addWorktreeTools } from "../../src/opencode-v2/worktree/tools.js"
 import { startWorktreeEventSync } from "../../src/opencode-v2/worktree/events.js"
@@ -38,6 +46,8 @@ import { moveSessionToDirectory } from "../../src/opencode-v2/session/move.js"
 import { createSessionMoveCoordinator } from "../../src/opencode-v2/session/move-coordinator.js"
 import { sessionAnchorStorageKey, type SessionAnchor } from "../../src/opencode-v2/session/state.js"
 import { evidenceSchema, type EvidenceRecord } from "../../src/opencode-v2/orchestration/evidence.js"
+import { reviewStorageKey, type ReviewV1Record } from "../../src/opencode-v2/observability/review.js"
+import { publishStorageKey } from "../../src/opencode-v2/publish/state.js"
 
 const location = { directory: "/workspace", project: { id: "origin" } }
 
@@ -169,6 +179,152 @@ function seedRecord(values: Map<string, unknown>, overrides: Partial<WorktreeRec
   const finalized: WorktreeRecord = { ...record, status: "ready", ...overrides }
   values.set(worktreeStorageKey("origin", "session-1"), finalized)
   return finalized
+}
+
+// Exact full-SHA fixtures used across the sync/push gate tests. The base is
+// the remote base pinned at sync time; HEAD is the feature head after sync.
+const BASE_SHA = "aaa1111111111111111111111111111111111111"
+const HEAD_SHA = "bbb2222222222222222222222222222222222222"
+const MERGED_HEAD_SHA = "ccc3333333333333333333333333333333333333"
+
+function syncReceipt(overrides: Partial<WorktreeSyncReceipt> = {}): WorktreeSyncReceipt {
+  return {
+    remote: "origin",
+    baseBranch: "main",
+    baseRef: "refs/heads/main",
+    baseSha: BASE_SHA,
+    headSha: HEAD_SHA,
+    merged: true,
+    syncedAt: 1000,
+    ...overrides,
+  }
+}
+
+/** Seed a tracked record that carries an exact-revision sync receipt. */
+function seedSyncedRecord(values: Map<string, unknown>, overrides: Partial<WorktreeRecord> = {}): WorktreeRecord {
+  const finalized = { ...syncReceipt(), ...(overrides.sync ?? {}) }
+  return seedRecord(values, { ...overrides, sync: finalized })
+}
+
+/** Seed the durable project-scoped publication grant for capability `push`. */
+function seedPublishGrant(values: Map<string, unknown>): void {
+  values.set(publishStorageKey("origin"), {
+    version: 1,
+    projectID: "origin",
+    enabled: true,
+    capabilities: ["push"],
+    updatedAt: 1,
+    updatedBy: "session-1",
+  })
+}
+
+/** Seed an approved review record pinned to the exact synced base/head. */
+function seedApprovedReview(
+  values: Map<string, unknown>,
+  overrides: {
+    headSha?: string
+    baseSha?: string
+    state?: ReviewV1Record["state"]
+  } = {},
+): void {
+  const review: ReviewV1Record = {
+    version: 1,
+    taskId: "impl-worktree-sync",
+    runId: "run-1",
+    maker: "implementer",
+    checker: "reviewer",
+    state: overrides.state ?? "approved",
+    round: 1,
+    maxRounds: 3,
+    reason: overrides.state === "approved" ? "approval-complete" : "manual-start",
+    requiresHuman: false,
+    createdAt: 1,
+    updatedAt: 2,
+    headSha: overrides.headSha ?? HEAD_SHA,
+    baseSha: overrides.baseSha ?? BASE_SHA,
+  }
+  values.set(reviewStorageKey({ project: { id: "origin" } }, "session-1"), review)
+}
+
+/**
+ * Scripts a full successful sync: clean tree, fetch, tracking-ref resolve,
+ * HEAD resolve, not-ancestor merge-base, clean merge, ancestor verification,
+ * clean status, and post-merge HEAD resolve.
+ */
+function syncSuccessScript(options: {
+  dirtyBefore?: string
+  remoteBase?: string
+  headAfter?: string
+  ancestorBefore?: boolean
+  mergeOutcome?: ProcessResult
+  dirtyAfter?: string
+} = {}): (call: Call, calls: Call[]) => ProcessResult | undefined {
+  let statusCalls = 0
+  let mergeBaseCalls = 0
+  return (call) => {
+    switch (call.args[0]) {
+      case "status": {
+        statusCalls += 1
+        return ok(statusCalls === 1 ? options.dirtyBefore ?? "" : options.dirtyAfter ?? "")
+      }
+      case "fetch":
+        return ok("")
+      case "rev-parse":
+        if (call.args[1] === "refs/remotes/origin/main") return ok(options.remoteBase ?? BASE_SHA)
+        if (call.args[1] === "HEAD") return ok(options.headAfter ?? MERGED_HEAD_SHA)
+        return undefined
+      case "merge-base": {
+        mergeBaseCalls += 1
+        if (mergeBaseCalls === 1) return options.ancestorBefore === true ? ok("") : fail("")
+        return ok("")
+      }
+      case "merge":
+        if (call.args[1] === "--abort") return ok("")
+        return options.mergeOutcome ?? ok("")
+      case "diff":
+        // No unmerged paths: the merge failed for a reason other than conflict.
+        return ok("")
+      default:
+        return undefined
+    }
+  }
+}
+
+/**
+ * Scripts the standard push gate sequence: clean status, re-fetch, tracking
+ * base resolve, HEAD resolve, ancestry, push, and ls-remote verification.
+ * Each stage is overridable so one failure at a time can be injected.
+ */
+function pushGateScript(options: {
+  dirty?: string
+  fetchOutcome?: ProcessResult
+  remoteBase?: string
+  head?: string
+  ancestor?: boolean
+  pushOutcome?: ProcessResult
+  lsRemote?: string
+} = {}): (call: Call, calls: Call[]) => ProcessResult | undefined {
+  const head = options.head ?? HEAD_SHA
+  return (call) => {
+    switch (call.args[0]) {
+      case "status":
+        return ok(options.dirty ?? "")
+      case "fetch":
+        return options.fetchOutcome ?? ok("")
+      case "rev-parse":
+        if (call.args[1] === "refs/remotes/origin/main") return ok(options.remoteBase ?? BASE_SHA)
+        if (call.args[1] === "HEAD") return ok(head)
+        return undefined
+      case "merge-base":
+        return options.ancestor === false ? fail("") : ok("")
+      case "push":
+        return options.pushOutcome ?? ok("")
+      case "ls-remote":
+        return ok(options.lsRemote ?? `${head}\trefs/heads/feature`)
+      default:
+        return undefined
+    }
+  }
 }
 
 function memStorage(initial: Map<string, unknown> = new Map()): StorageLike & { values: Map<string, unknown> } {
@@ -719,6 +875,75 @@ describe("git helpers", () => {
     expect(refs).toContain("refs/heads/feature")
   })
 
+  test("parseLsRemoteRefSha requires an exact full SHA for the exact ref", () => {
+    const line = `${HEAD_SHA}\trefs/heads/feature`
+    expect(parseLsRemoteRefSha(`${line}\n`, "refs/heads/feature")).toBe(HEAD_SHA)
+    // Substring of the SHA, a different ref, a short SHA, or garbage never match.
+    expect(parseLsRemoteRefSha(`refs/heads/feature ${HEAD_SHA}\n`, "refs/heads/feature")).toBeUndefined()
+    expect(parseLsRemoteRefSha(`${HEAD_SHA}\trefs/heads/feature-old\n`, "refs/heads/feature")).toBeUndefined()
+    expect(parseLsRemoteRefSha(`${HEAD_SHA}\trefs/heads/feature\n${HEAD_SHA.slice(0, 12)}\trefs/heads/other\n`, "refs/heads/other")).toBeUndefined()
+    expect(parseLsRemoteRefSha("", "refs/heads/feature")).toBeUndefined()
+    expect(parseLsRemoteRefSha(`* ${HEAD_SHA}\trefs/heads/feature\n`, "refs/heads/feature")).toBeUndefined()
+  })
+
+  test("gitFetch builds positional remote + ref args and never options", async () => {
+    const { runner, calls } = scriptedGit((call) => (call.args[0] === "fetch" ? ok("") : undefined))
+    const result = await gitFetch({ runner }, { repoRoot: "/repo", remote: "origin", ref: "refs/heads/main" })
+    expect(result.exitCode).toBe(0)
+    expect(calls[0]?.args).toEqual(["fetch", "origin", "refs/heads/main"])
+    expect(calls[0]?.cwd).toBe("/repo")
+  })
+
+  test("gitMerge builds --no-edit into the current branch", async () => {
+    const { runner, calls } = scriptedGit((call) => (call.args[0] === "merge" ? ok("") : undefined))
+    const result = await gitMerge({ runner }, { repoRoot: "/srv/worktrees/feature", into: "refs/remotes/origin/main" })
+    expect(result.exitCode).toBe(0)
+    expect(calls[0]?.args).toEqual(["merge", "--no-edit", "refs/remotes/origin/main"])
+    expect(calls[0]?.cwd).toBe("/srv/worktrees/feature")
+  })
+
+  test("gitMergeAbort and gitMergeBaseIsAncestor map exits to booleans", async () => {
+    const { runner, calls } = scriptedGit((call) => {
+      if (call.args[0] === "merge" && call.args[1] === "--abort") return ok("")
+      if (call.args[0] === "merge-base") return fail("")
+      return undefined
+    })
+    expect((await gitMergeAbort({ runner }, "/srv/worktrees/feature")).exitCode).toBe(0)
+    expect(calls[0]?.args).toEqual(["merge", "--abort"])
+    expect(await gitMergeBaseIsAncestor({ runner }, "/srv/worktrees/feature", BASE_SHA, "HEAD")).toBe(false)
+    expect(calls[1]?.args).toEqual(["merge-base", "--is-ancestor", BASE_SHA, "HEAD"])
+  })
+
+  test("gitMergeBaseIsAncestor raises on exits other than 0/1", async () => {
+    const { runner } = scriptedGit((call) =>
+      call.args[0] === "merge-base" ? { exitCode: 128, stdout: "", stderr: "fatal: not a valid commit name" } : undefined,
+    )
+    await expect(
+      gitMergeBaseIsAncestor({ runner }, "/srv/worktrees/feature", BASE_SHA, "HEAD"),
+    ).rejects.toThrow(/merge-base --is-ancestor failed/)
+  })
+
+  test("gitUnmergedPaths returns only safe relative unmerged paths", async () => {
+    const { runner } = scriptedGit((call) =>
+      call.args[0] === "diff"
+        ? ok("src/a.ts\n  src/with space.ts\n\"/quoted weird\"\n/absolute/path\n")
+        : undefined,
+    )
+    const paths = await gitUnmergedPaths({ runner }, "/srv/worktrees/feature")
+    expect(paths).toEqual(["src/a.ts", "src/with space.ts"])
+    expect(paths.some((entry) => entry.startsWith("/"))).toBe(false)
+    expect(paths.some((entry) => entry.startsWith('"'))).toBe(false)
+  })
+
+  test("isValidRemoteName rejects option-shaped and malformed remotes", () => {
+    for (const remote of ["origin", "upstream", "origin/upstream", "gh-remote_1"]) {
+      expect(isValidRemoteName(remote), `remote=${remote}`).toBe(true)
+    }
+    for (const remote of ["", "-evil", "-u", ".hidden", "has space", "a..b", "a@{b", "a~b", "a:b", "a?b", "a*b", "a[b", "x".repeat(256)]) {
+      expect(isValidRemoteName(remote), `remote=${remote}`).toBe(false)
+    }
+  })
+
   test("gitWorktreeRemove builds plain and force args", async () => {
     const { runner, calls } = scriptedGit((call) => (call.args[0] === "worktree" && call.args[1] === "remove" ? ok("") : undefined))
     await gitWorktreeRemove({ runner }, { repoRoot: "/repo", directory: "/srv/worktrees/feature" })
@@ -744,6 +969,34 @@ describe("worktree durable state", () => {
     expect(read?.dir).toBe("/srv/worktrees/feature")
     expect(read?.branch).toBe("feature")
     expect(read?.status).toBe("ready")
+  })
+
+  test("writes and reads back a worktree record with an exact-revision sync receipt", async () => {
+    const storage = memStorage()
+    const record = seedRecord(storage.values)
+    await writeWorktree(storage, { ...record, sync: syncReceipt({ syncedAt: 1500 }) }, 2000)
+    const read = await readWorktree(storage, "origin", "session-1")
+    expect(read?.sync).toEqual(syncReceipt({ syncedAt: 1500 }))
+    expect(read?.sync?.baseSha).toBe(BASE_SHA)
+    expect(read?.sync?.headSha).toBe(HEAD_SHA)
+    expect(read?.sync?.merged).toBe(true)
+  })
+
+  test("legacy records without a sync receipt still parse with sync undefined", async () => {
+    const storage = memStorage()
+    seedRecord(storage.values)
+    const read = await readWorktree(storage, "origin", "session-1")
+    expect(read?.sync).toBeUndefined()
+  })
+
+  test("ignores a worktree record whose sync receipt is malformed", async () => {
+    const storage = memStorage()
+    const record = seedRecord(storage.values)
+    storage.values.set(worktreeStorageKey("origin", "session-1"), {
+      ...record,
+      sync: { ...syncReceipt(), baseSha: "not-a-full-sha" },
+    })
+    expect(await readWorktree(storage, "origin", "session-1")).toBeUndefined()
   })
 
   test("ignores malformed worktree records and session indexes", async () => {
@@ -785,12 +1038,13 @@ describe("worktree durable state", () => {
 })
 
 describe("worktree tools", () => {
-  test("registers the six orchestrator_worktree tools with the shared permission", () => {
+  test("registers the seven orchestrator_worktree tools with the shared permission", () => {
     const { tools } = collectWorktreeTools()
     expect([...tools.keys()]).toEqual([
       "worktree_list",
       "worktree_create",
       "worktree_status",
+      "worktree_sync",
       "worktree_push",
       "worktree_cleanup",
       "worktree_enter",
@@ -1069,15 +1323,256 @@ describe("worktree tools", () => {
     expect((JSON.parse(orphanOut.content) as { status: string }).status).toBe("orphaned")
   })
 
-  test("push verifies the branch on the remote and updates status", async () => {
+  test("sync merges the latest remote base into the tracked branch and persists an exact-revision receipt", async () => {
+    const { runner, calls } = scriptedGit(syncSuccessScript())
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedRecord(values)
+    // No publish/v1 record at all: sync must NOT require the publish capability.
+    const output = await tools
+      .get("worktree_sync")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    const parsed = JSON.parse(output.content) as {
+      synced: boolean
+      merged: boolean
+      alreadyCurrent: boolean
+      baseBranch: string
+      baseRef: string
+      remote: string
+      baseSha: string
+      headSha: string
+      syncedAt: number
+      record: WorktreeRecord
+      evidence: EvidenceRecord
+    }
+    expect(parsed.synced).toBe(true)
+    expect(parsed.merged).toBe(true)
+    expect(parsed.alreadyCurrent).toBe(false)
+    expect(parsed.baseBranch).toBe("main")
+    expect(parsed.baseRef).toBe("refs/heads/main")
+    expect(parsed.remote).toBe("origin")
+    expect(parsed.baseSha).toBe(BASE_SHA)
+    expect(parsed.headSha).toBe(MERGED_HEAD_SHA)
+    expect(parsed.evidence.source).toBe("opencode-orchestrator.worktree.sync")
+    expect(parsed.evidence.sessionID).toBe("session-1")
+    expect(evidenceSchema.safeParse(parsed.evidence).success).toBe(true)
+    // The merge runs inside the tracked worktree; the fetch in the repo.
+    const mergeCall = calls.find((call) => call.args[0] === "merge" && call.args[1] !== "--abort")
+    expect(mergeCall?.args).toEqual(["merge", "--no-edit", "refs/remotes/origin/main"])
+    expect(mergeCall?.cwd).toBe("/srv/worktrees/feature")
+    const fetchCall = calls.find((call) => call.args[0] === "fetch")
+    expect(fetchCall?.args).toEqual(["fetch", "origin", "refs/heads/main"])
+    expect(fetchCall?.cwd).toBe("/repo")
+    // Post-merge verification ran: ancestry checked, tree clean, head resolved.
+    expect(calls.filter((call) => call.args[0] === "merge-base")).toHaveLength(2)
+    expect(calls.filter((call) => call.args[0] === "status")).toHaveLength(2)
+    // The durable record carries the exact-revision receipt.
+    const persisted = values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord
+    expect(persisted.sync).toEqual({
+      remote: "origin",
+      baseBranch: "main",
+      baseRef: "refs/heads/main",
+      baseSha: BASE_SHA,
+      headSha: MERGED_HEAD_SHA,
+      merged: true,
+      syncedAt: parsed.syncedAt,
+    })
+  })
+
+  test("sync records an exact receipt without creating a commit when the branch already contains the latest base", async () => {
+    const { runner, calls } = scriptedGit(
+      syncSuccessScript({ ancestorBefore: true, headAfter: HEAD_SHA }),
+    )
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedRecord(values)
+    const output = await tools
+      .get("worktree_sync")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    const parsed = JSON.parse(output.content) as {
+      synced: boolean
+      merged: boolean
+      alreadyCurrent: boolean
+      headSha: string
+      record: WorktreeRecord
+    }
+    expect(parsed.synced).toBe(true)
+    expect(parsed.merged).toBe(false)
+    expect(parsed.alreadyCurrent).toBe(true)
+    expect(parsed.headSha).toBe(HEAD_SHA)
+    // No merge commit: git merge was never invoked.
+    expect(calls.some((call) => call.args[0] === "merge" && call.args[1] !== "--abort")).toBe(false)
+    const persisted = values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord
+    expect(persisted.sync).toEqual(
+      expect.objectContaining({ baseSha: BASE_SHA, headSha: HEAD_SHA, merged: false, baseBranch: "main" }),
+    )
+  })
+
+  test("sync surfaces conflicts truthfully, aborts the merge, and never pushes", async () => {
+    let statusCalls = 0
+    let headCalls = 0
+    let mergeBaseCalls = 0
     const { runner, calls } = scriptedGit((call) => {
-      if (call.args[0] === "push") return ok("")
-      if (call.args[0] === "ls-remote") return ok("f1c2dc0\trefs/heads/feature")
-      return undefined
+      switch (call.args[0]) {
+        case "status": {
+          statusCalls += 1
+          return ok(statusCalls === 1 ? "" : "")
+        }
+        case "fetch":
+          return ok("")
+        case "rev-parse": {
+          if (call.args[1] === "refs/remotes/origin/main") return ok(BASE_SHA)
+          if (call.args[1] === "HEAD") {
+            headCalls += 1
+            return ok(HEAD_SHA)
+          }
+          return undefined
+        }
+        case "merge-base": {
+          mergeBaseCalls += 1
+          return mergeBaseCalls === 1 ? fail("") : ok("")
+        }
+        case "merge": {
+          if (call.args[1] === "--abort") return ok("")
+          return fail("CONFLICT (content): Merge conflict in src/lib.ts")
+        }
+        case "diff":
+          return ok("src/lib.ts\nsrc/other.ts")
+        default:
+          return undefined
+      }
     })
     const { tools, values } = collectWorktreeTools({ runner })
-    const moved = { ...seedRecord(values), status: "moved" as const }
+    seedRecord(values)
+    const output = await tools
+      .get("worktree_sync")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    const parsed = JSON.parse(output.content) as {
+      synced: boolean
+      conflicted: boolean
+      merged: boolean
+      aborted: boolean
+      treeRestored: boolean
+      unmergedPaths: string[]
+      message: string
+    }
+    expect(parsed.synced).toBe(false)
+    expect(parsed.conflicted).toBe(true)
+    expect(parsed.merged).toBe(false)
+    expect(parsed.aborted).toBe(true)
+    expect(parsed.treeRestored).toBe(true)
+    expect(parsed.unmergedPaths).toEqual(["src/lib.ts", "src/other.ts"])
+    expect(parsed.message).toContain("nothing was pushed")
+    // The abort ran and the merge was never left half-merged; no receipt and
+    // no push ever happened.
+    expect(calls.some((call) => call.args[1] === "--abort")).toBe(true)
+    expect(calls.filter((call) => call.args[0] === "diff" && call.args[1] === "--name-only")).toHaveLength(1)
+    expect(calls.some((call) => call.args[0] === "push")).toBe(false)
+    expect((values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord).sync).toBeUndefined()
+    expect(output.content).not.toContain("evidence")
+  })
+
+  test("sync reports a bare merge failure (no unmerged paths) without a receipt", async () => {
+    const { runner, calls } = scriptedGit(
+      syncSuccessScript({
+        mergeOutcome: { exitCode: 2, stdout: "", stderr: "fatal: refusing to merge unrelated histories" },
+      }),
+    )
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedRecord(values)
+    const output = await tools
+      .get("worktree_sync")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    expect(output.content).toContain("worktree sync failed")
+    expect(output.content).toContain("exited with code 2")
+    expect(calls.some((call) => call.args[0] === "push")).toBe(false)
+    expect((values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord).sync).toBeUndefined()
+    expect(output.content).not.toContain("evidence")
+  })
+
+  test("sync refuses a dirty tracked worktree before fetching", async () => {
+    const { runner, calls } = scriptedGit(syncSuccessScript({ dirtyBefore: " M file.txt" }))
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedRecord(values)
+    const output = await tools
+      .get("worktree_sync")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    expect(output.content).toContain("refused")
+    expect(output.content).toContain("uncommitted changes")
+    expect(calls.some((call) => call.args[0] === "fetch")).toBe(false)
+    expect((values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord).sync).toBeUndefined()
+    expect(output.content).not.toContain("evidence")
+  })
+
+  test("sync requires a literal confirm: true and never requires the publish capability", async () => {
+    const { runner } = scriptedGit(syncSuccessScript())
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedRecord(values)
+    const context = toolContext("session-1", "orchestrator")
+    const missing = await tools.get("worktree_sync")!.execute({}, context)
+    expect(missing.content).toContain("requires confirm: true")
+    const falsy = await tools.get("worktree_sync")!.execute({ confirm: false }, context)
+    expect(falsy.content).toContain("requires confirm: true")
+    // Even with no publish record, sync proceeds once confirmed.
+    expect(values.has(publishStorageKey("origin"))).toBe(false)
+  })
+
+  test("sync requires allow_mutations but not for list", async () => {
+    const { tools } = collectWorktreeTools({
+      options: wTreeOptions({ worktree: { enabled: true, allow_mutations: false, root: "/srv/worktrees" } }),
+    })
+    const output = await tools.get("worktree_list")!.execute({}, toolContext("session-1", "orchestrator"))
+    expect(output.content).toBeTruthy()
+    await expect(
+      tools.get("worktree_sync")!.execute({ confirm: true }, toolContext("session-1", "orchestrator")),
+    ).rejects.toThrow(/allow_mutations/)
+  })
+
+  test("sync rejects unsafe branch, remote, and base tokens before any git call", async () => {
+    let calls = 0
+    const runner: ProcessRunner = {
+      async run() {
+        calls += 1
+        return ok()
+      },
+    }
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedRecord(values)
+    const context = toolContext("session-1", "orchestrator")
+    const cases: Array<Record<string, unknown>> = [
+      { confirm: true, remote: "-evil" },
+      { confirm: true, remote: "a..b" },
+      { confirm: true, branch: "bad..branch" },
+      { confirm: true, base: "a..b" },
+      { confirm: true, base: "-main" },
+      { confirm: true, base: BASE_SHA },
+    ]
+    for (const input of cases) {
+      const output = await tools.get("worktree_sync")!.execute(input, context)
+      expect(output.content).toContain("refused")
+      expect(output.content).not.toContain("evidence")
+    }
+    expect(calls).toBe(0)
+  })
+
+  test("sync resolves an explicit full-ref base to its branch name", async () => {
+    const { runner, calls } = scriptedGit(syncSuccessScript({ ancestorBefore: true, headAfter: HEAD_SHA }))
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedRecord(values)
+    const output = await tools
+      .get("worktree_sync")!
+      .execute({ confirm: true, base: "refs/heads/main" }, toolContext("session-1", "orchestrator"))
+    const parsed = JSON.parse(output.content) as { synced: boolean; baseBranch: string }
+    expect(parsed.synced).toBe(true)
+    expect(parsed.baseBranch).toBe("main")
+    expect(calls.some((call) => call.args[0] === "fetch" && call.args[2] === "refs/heads/main")).toBe(true)
+  })
+
+  test("push passes every publication gate and verifies the exact remote head", async () => {
+    const { runner, calls } = scriptedGit(pushGateScript())
+    const { tools, values } = collectWorktreeTools({ runner })
+    const moved = { ...seedSyncedRecord(values), status: "moved" as const }
     values.set(worktreeStorageKey("origin", "session-1"), moved)
+    seedPublishGrant(values)
+    seedApprovedReview(values)
 
     const output = await tools
       .get("worktree_push")!
@@ -1087,32 +1582,242 @@ describe("worktree tools", () => {
       verified: boolean
       remote: string
       branch: string
+      headSha: string
+      baseSha: string
+      receipt: WorktreeSyncReceipt
       evidence: EvidenceRecord
     }
     expect(parsed.pushed).toBe(true)
     expect(parsed.verified).toBe(true)
     expect(parsed.remote).toBe("origin")
     expect(parsed.branch).toBe("feature")
+    expect(parsed.headSha).toBe(HEAD_SHA)
+    expect(parsed.baseSha).toBe(BASE_SHA)
+    expect(parsed.receipt.baseRef).toBe("refs/heads/main")
     expect(parsed.evidence.source).toBe("opencode-orchestrator.worktree.push")
     expect(parsed.evidence.sessionID).toBe("session-1")
-    expect(calls.some((call) => call.args.join(" ").includes("--set-upstream"))).toBe(true)
+    expect(evidenceSchema.safeParse(parsed.evidence).success).toBe(true)
+    // Gate sequence: clean status, base re-fetch, tracking resolve, HEAD
+    // resolve, ancestry, push, then exact ls-remote verification.
+    const pushCall = calls.find((call) => call.args[0] === "push")
+    expect(pushCall?.args).toEqual(["push", "--set-upstream", "origin", "feature"])
+    const lsRemoteCall = calls.find((call) => call.args[0] === "ls-remote")
+    expect(lsRemoteCall?.args).toEqual(["ls-remote", "origin", "refs/heads/feature"])
+    expect(calls.some((call) => call.args[0] === "fetch" && call.args[2] === "refs/heads/main")).toBe(true)
+    expect(calls.filter((call) => call.args[0] === "merge-base")).toHaveLength(1)
     const persisted = values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord
     expect(persisted.status).toBe("ready")
+    expect(persisted.sync?.headSha).toBe(HEAD_SHA)
   })
 
   test("push reports verification failure on a failed push", async () => {
     const { tools, values } = collectWorktreeTools({
-      runner: scriptedGit((call) => {
-        if (call.args[0] === "push") return fail("error: failed to push some refs")
-        return undefined
-      }).runner,
+      runner: scriptedGit(
+        pushGateScript({
+          pushOutcome: fail("error: failed to push some refs"),
+        }),
+      ).runner,
     })
-    seedRecord(values)
+    seedSyncedRecord(values)
+    seedPublishGrant(values)
+    seedApprovedReview(values)
     const output = await tools
       .get("worktree_push")!
       .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
     expect(output.content).toContain("push failed")
     expect(output.content).not.toContain("evidence")
+  })
+
+  test("push reports unverified truthfully when the remote SHA differs from the pushed head", async () => {
+    const wrongRemoteSha = "fff9999999999999999999999999999999999999"
+    const { runner, calls } = scriptedGit(
+      pushGateScript({ lsRemote: `${wrongRemoteSha}\trefs/heads/feature\n` }),
+    )
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedSyncedRecord(values)
+    seedPublishGrant(values)
+    seedApprovedReview(values)
+    const output = await tools
+      .get("worktree_push")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    const parsed = JSON.parse(output.content) as {
+      pushed: boolean
+      verified: boolean
+      expected: string
+      remoteSha: string
+    }
+    // The push happened, but the exact remote-head check failed: the result
+    // must never claim verification and carries no evidence.
+    expect(parsed.pushed).toBe(true)
+    expect(parsed.verified).toBe(false)
+    expect(parsed.expected).toBe(HEAD_SHA)
+    expect(parsed.remoteSha).toBe(wrongRemoteSha)
+    expect(output.content).not.toContain("evidence")
+    expect(calls.some((call) => call.args[0] === "push")).toBe(true)
+  })
+
+  test("push refuses before any git call when the durable publish grant is missing", async () => {
+    let calls = 0
+    const runner: ProcessRunner = {
+      async run() {
+        calls += 1
+        return ok()
+      },
+    }
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedSyncedRecord(values)
+    // No publish/v1/origin record: capability 'push' is not authorized.
+    const output = await tools
+      .get("worktree_push")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    expect(output.content).toContain("refused")
+    expect(output.content).toContain("publication capability 'push' is not authorized for project origin")
+    expect(output.content).not.toContain("evidence")
+    expect(calls).toBe(0)
+  })
+
+  test("push refuses a legacy record without a sync receipt, before any git call", async () => {
+    let calls = 0
+    const runner: ProcessRunner = {
+      async run() {
+        calls += 1
+        return ok()
+      },
+    }
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedRecord(values)
+    seedPublishGrant(values)
+    seedApprovedReview(values)
+    const output = await tools
+      .get("worktree_push")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    expect(output.content).toContain("refused")
+    expect(output.content).toContain("no sync receipt")
+    expect(output.content).not.toContain("evidence")
+    expect(calls).toBe(0)
+  })
+
+  test("push refuses without an exact-revision approved review record", async () => {
+    let calls = 0
+    const runner: ProcessRunner = {
+      async run() {
+        calls += 1
+        return ok()
+      },
+    }
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedSyncedRecord(values)
+    seedPublishGrant(values)
+    // No review record at all.
+    const missing = await tools
+      .get("worktree_push")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    expect(missing.content).toContain("refused")
+    expect(missing.content).toContain("no review record exists")
+    expect(calls).toBe(0)
+
+    // A review record bound to a different revision never authenticates.
+    const mismatched = collectWorktreeTools({
+      runner,
+      values: new Map(values),
+    })
+    seedApprovedReview(mismatched.values, { headSha: "ddd4444444444444444444444444444444444444" })
+    const output = await mismatched.tools
+      .get("worktree_push")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    expect(output.content).toContain("refused")
+    expect(output.content).toContain("bound to a different head/base revision")
+    expect(calls).toBe(0)
+  })
+
+  test("push refuses when the re-fetched remote base moved since sync", async () => {
+    const { runner, calls } = scriptedGit(
+      pushGateScript({ remoteBase: "ddd4444444444444444444444444444444444444" }),
+    )
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedSyncedRecord(values)
+    seedPublishGrant(values)
+    seedApprovedReview(values)
+    const output = await tools
+      .get("worktree_push")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    expect(output.content).toContain("refused")
+    expect(output.content).toContain("moved since sync")
+    expect(output.content).toContain(BASE_SHA)
+    expect(output.content).not.toContain("evidence")
+    expect(calls.some((call) => call.args[0] === "push")).toBe(false)
+  })
+
+  test("push refuses when the local head changed since sync", async () => {
+    const { runner, calls } = scriptedGit(
+      pushGateScript({ head: "ddd4444444444444444444444444444444444444" }),
+    )
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedSyncedRecord(values)
+    seedPublishGrant(values)
+    seedApprovedReview(values)
+    const output = await tools
+      .get("worktree_push")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    expect(output.content).toContain("refused")
+    expect(output.content).toContain("local head changed since sync")
+    expect(output.content).not.toContain("evidence")
+    expect(calls.some((call) => call.args[0] === "push")).toBe(false)
+  })
+
+  test("push refuses when the synced base is not an ancestor of the head", async () => {
+    const { runner, calls } = scriptedGit(pushGateScript({ ancestor: false }))
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedSyncedRecord(values)
+    seedPublishGrant(values)
+    seedApprovedReview(values)
+    const output = await tools
+      .get("worktree_push")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    expect(output.content).toContain("refused")
+    expect(output.content).toContain("not an ancestor")
+    expect(output.content).not.toContain("evidence")
+    expect(calls.some((call) => call.args[0] === "push")).toBe(false)
+  })
+
+  test("push refuses a dirty tracked worktree without pushing", async () => {
+    const { runner, calls } = scriptedGit(pushGateScript({ dirty: " M file.txt" }))
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedSyncedRecord(values)
+    seedPublishGrant(values)
+    seedApprovedReview(values)
+    const output = await tools
+      .get("worktree_push")!
+      .execute({ confirm: true }, toolContext("session-1", "orchestrator"))
+    expect(output.content).toContain("refused")
+    expect(output.content).toContain("uncommitted changes")
+    expect(output.content).not.toContain("evidence")
+    expect(calls.some((call) => call.args[0] === "push")).toBe(false)
+  })
+
+  test("push rejects option-shaped tokens before any gate or git call", async () => {
+    let calls = 0
+    const runner: ProcessRunner = {
+      async run() {
+        calls += 1
+        return ok()
+      },
+    }
+    const { tools, values } = collectWorktreeTools({ runner })
+    seedSyncedRecord(values)
+    seedPublishGrant(values)
+    seedApprovedReview(values)
+    for (const input of [
+      { confirm: true, remote: "-evil" },
+      { confirm: true, branch: "bad..branch" },
+    ]) {
+      const output = await tools
+        .get("worktree_push")!
+        .execute(input, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("refused")
+      expect(output.content).not.toContain("evidence")
+    }
+    expect(calls).toBe(0)
   })
 
   test("cleanup refuses a dirty worktree without removing", async () => {

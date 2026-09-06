@@ -18,11 +18,16 @@
  * `verification`) all true; arbitrary check names are rejected by the schema.
  *
  * Terminal states (approved / blocked / tripped) are terminal for the current
- * task/run. Storage ownership lives in the runtime/tools layer: exactly ONE
- * bounded current record per session under a versioned stable project/session
- * key, serialized through withSessionLock, with no CAS/cross-process
- * guarantee. Caller identity and child-session ownership cannot be proven by
- * the plugin.
+ * task/run. A start may optionally pin an EXACT revision receipt (head/base
+ * full git object IDs); revision fields are optional for backward
+ * compatibility in the general record/tool, but the exact-revision validation
+ * helper fails closed unless an approved record carries both valid SHAs for
+ * the requested revision.
+ *
+ * Storage ownership lives in the runtime/tools layer: exactly ONE bounded
+ * current record per session under a versioned stable project/session key,
+ * serialized through withSessionLock, with no CAS/cross-process guarantee.
+ * Caller identity and child-session ownership cannot be proven by the plugin.
  */
 import { z } from "zod"
 
@@ -70,6 +75,26 @@ export const reviewV1ChecksSchema = z
   .strict()
 export type ReviewV1Checks = z.infer<typeof reviewV1ChecksSchema>
 
+/**
+ * Strict git object ID token for exact-revision review receipts. Only FULL
+ * lowercase hex object IDs are accepted: 40 hex chars (SHA-1) or 64 hex chars
+ * (SHA-256). Abbreviated or upper-case forms are never treated as an exact
+ * revision, because publication safety needs an unambiguous, verifiable pin.
+ */
+export const REVIEW_V1_SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+export const reviewV1ShaSchema = z
+  .string()
+  .regex(REVIEW_V1_SHA_PATTERN, "must be a full 40- or 64-character lowercase hex git SHA")
+
+/** Optional exact-revision receipt carried by a review record. */
+export type ReviewV1Revision = {
+  headSha: string
+  baseSha: string
+}
+
+/** Both-or-neither pair check shared by the start signal and record schemas. */
+const REVISION_PAIR_MESSAGE = "headSha and baseSha must be provided together as a full exact-revision pair"
+
 export const reviewV1RecordSchema = z
   .object({
     version: z.literal(1),
@@ -84,8 +109,19 @@ export const reviewV1RecordSchema = z
     requiresHuman: z.boolean(),
     createdAt: z.number().finite(),
     updatedAt: z.number().finite(),
+    headSha: reviewV1ShaSchema.optional(),
+    baseSha: reviewV1ShaSchema.optional(),
   })
   .strict()
+  .superRefine((value, ctx) => {
+    if ((value.headSha === undefined) !== (value.baseSha === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["headSha"],
+        message: REVISION_PAIR_MESSAGE,
+      })
+    }
+  })
 export type ReviewV1Record = z.infer<typeof reviewV1RecordSchema>
 
 export const REVIEW_V1_START_SIGNAL_SCHEMA = z
@@ -97,8 +133,20 @@ export const REVIEW_V1_START_SIGNAL_SCHEMA = z
     checker: z.string().min(1).max(128),
     /** The caller-provided admission signal: the task must already be review-pending. */
     admissionState: z.literal("review-pending"),
+    /** Optional exact-revision receipt: both fields together, full git object IDs. */
+    headSha: reviewV1ShaSchema.optional(),
+    baseSha: reviewV1ShaSchema.optional(),
   })
   .strict()
+  .superRefine((value, ctx) => {
+    if ((value.headSha === undefined) !== (value.baseSha === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["headSha"],
+        message: REVISION_PAIR_MESSAGE,
+      })
+    }
+  })
 
 export const REVIEW_V1_APPROVE_SIGNAL_SCHEMA = z
   .object({
@@ -275,6 +323,73 @@ export function parseReviewRecord(value: unknown): ReviewV1Record | undefined {
   return parsed.success ? parsed.data : undefined
 }
 
+export type ReviewV1RevisionVerdict =
+  | "valid"
+  | "no-record"
+  | "not-approved"
+  | "missing-revision"
+  | "revision-mismatch"
+  | "invalid-expectation"
+
+export type ReviewV1RevisionCheck = {
+  /** True only for an approved record carrying both valid SHAs equal to the requested revision. */
+  valid: boolean
+  verdict: ReviewV1RevisionVerdict
+  /** Deterministic human-readable message (never free-form caller text). */
+  message: string
+}
+
+/**
+ * Exact-revision approval validation for publication safety. Fails closed
+ * unless an APPROVED review record exists AND carries both valid head/base
+ * SHAs AND both match the requested exact revision. Absent records, non-
+ * approved states, records without a revision receipt, mismatched SHAs, and
+ * malformed requested SHAs are all invalid. Callers must decide what to do
+ * with the verdict; this helper itself never authorizes anything.
+ */
+export function validateApprovedReviewRevision(input: {
+  record: ReviewV1Record | undefined
+  headSha: string
+  baseSha: string
+}): ReviewV1RevisionCheck {
+  if (!REVIEW_V1_SHA_PATTERN.test(input.headSha) || !REVIEW_V1_SHA_PATTERN.test(input.baseSha)) {
+    return revisionCheck(
+      "invalid-expectation",
+      "expected headSha and baseSha must each be a full 40- or 64-character lowercase hex git SHA",
+    )
+  }
+  const record = input.record
+  if (!record) {
+    return revisionCheck("no-record", "no review record exists for this session; an exact-revision approval cannot be validated")
+  }
+  if (record.state !== "approved") {
+    return revisionCheck(
+      "not-approved",
+      `review for task ${record.taskId} run ${record.runId} is ${record.state}, not approved`,
+    )
+  }
+  if (!REVIEW_V1_SHA_PATTERN.test(record.headSha ?? "") || !REVIEW_V1_SHA_PATTERN.test(record.baseSha ?? "")) {
+    return revisionCheck(
+      "missing-revision",
+      `approved review for task ${record.taskId} run ${record.runId} carries no exact head/base revision and cannot authenticate the requested revision`,
+    )
+  }
+  if (record.headSha !== input.headSha || record.baseSha !== input.baseSha) {
+    return revisionCheck(
+      "revision-mismatch",
+      `approved review for task ${record.taskId} run ${record.runId} is bound to a different head/base revision and cannot authenticate the requested revision`,
+    )
+  }
+  return revisionCheck(
+    "valid",
+    `approved review for task ${record.taskId} run ${record.runId} matches the requested exact revision`,
+  )
+}
+
+function revisionCheck(verdict: ReviewV1RevisionVerdict, message: string): ReviewV1RevisionCheck {
+  return { valid: verdict === "valid", verdict, message }
+}
+
 function newRecord(signal: z.infer<typeof REVIEW_V1_START_SIGNAL_SCHEMA>, maxRounds: number, now: number): ReviewV1Record {
   return {
     version: REVIEW_V1_VERSION,
@@ -289,6 +404,7 @@ function newRecord(signal: z.infer<typeof REVIEW_V1_START_SIGNAL_SCHEMA>, maxRou
     requiresHuman: false,
     createdAt: now,
     updatedAt: now,
+    ...(signal.headSha !== undefined && signal.baseSha !== undefined ? { headSha: signal.headSha, baseSha: signal.baseSha } : {}),
   }
 }
 

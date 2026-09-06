@@ -200,3 +200,38 @@ export type {
   ReviewV1Transition,
 } from "./opencode-v2/observability/review.js"
 export type { DispatchGate, DispatchDecision, DispatchCheck } from "./opencode-v2/observability/runtime.js"
+
+// Durable project-scoped publication authorization policy. State helpers are
+// storage-only (never git/process) and the status view is what `/publish`
+// and orchestrator_publish_policy_get expose; the tools themselves stay wired
+// behind the plugin. The capability is policy, not caller authentication:
+// enabling it never weakens the static github/worktree gates, and issue
+// creation and PR merge are never part of the authorized capability set.
+export {
+  PUBLISH_CAPABILITIES,
+  PUBLISH_NEVER_AUTHORIZED,
+  publishStorageKey,
+  readPublishRecord,
+  setPublicationEnabled,
+  isPublishCapabilityAuthorized,
+  publicationStatus,
+} from "./opencode-v2/publish/state.js"
+export type {
+  PublishCapability,
+  PublishRecord,
+  PublishToggleResult,
+  PublicationStatusView,
+  LocationLike,
+  StorageLike,
+} from "./opencode-v2/publish/state.js"
+
+// Same-project peer-orchestrator discovery. The query is orchestrator-only
+// durable metadata: bounded, redacted, deterministically ordered goal
+// summaries of the same stable project, explicitly never live-complete.
+export {
+  PEER_RESULT_LIMIT_DEFAULT,
+  PEER_RESULT_LIMIT_MAX,
+  PEER_QUERY_LIMITATIONS,
+  queryPeerGoals,
+} from "./opencode-v2/peers/tools.js"
+export type { PeerSummary, PeerQueryInput, PeerQueryResult } from "./opencode-v2/peers/tools.js"

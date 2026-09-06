@@ -5,6 +5,8 @@ import {
   GOAL_TOOL_PERMISSION,
   OBSERVABILITY_TOOL_PERMISSION,
   ORCHESTRATION_TOOL_PERMISSION,
+  PEER_TOOL_PERMISSION,
+  PUBLISH_TOOL_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
 } from "../../src/core/permissions.js"
 import { orchestratorPlugin } from "../../src/index.js"
@@ -125,13 +127,15 @@ describe("server plugin contract", () => {
       "handover",
       "polish",
       "stress-plan",
+      "publish",
     ])
     const commandNames = new Set(commands.map((command) => command.name))
     expect(commandNames.has("cd")).toBe(false)
 
     // The tool transform registers the goal family plus the orchestrator-only
-    // github, worktree, and orchestration validation families with their shared
-    // permission actions: 3 goal + 9 github + 6 worktree + 3 validation = 21.
+    // github, worktree, orchestration validation, publish policy, and peer
+    // discovery families with their shared permission actions:
+    // 3 goal + 11 github + 7 worktree + 3 validation + 1 publish + 1 peer = 26.
     const allToolNames = tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)
     expect(allToolNames).toEqual([
       "orchestrator_goal_get",
@@ -145,20 +149,27 @@ describe("server plugin contract", () => {
       "orchestrator_github_pr_view",
       "orchestrator_github_pr_list",
       "orchestrator_github_pr_create",
+      "orchestrator_github_pr_ready",
+      "orchestrator_github_pr_approve",
       "orchestrator_github_pr_merge",
       "orchestrator_worktree_list",
       "orchestrator_worktree_create",
       "orchestrator_worktree_status",
+      "orchestrator_worktree_sync",
       "orchestrator_worktree_push",
       "orchestrator_worktree_cleanup",
       "orchestrator_worktree_enter",
       "orchestrator_task_complexity_classify",
       "orchestrator_handoff_validate",
       "orchestrator_admission_transition",
+      "orchestrator_publish_policy_get",
+      "orchestrator_peer_list",
     ])
-    expect(allToolNames).toHaveLength(21)
-    expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBe(9)
-    expect(tools.filter((tool) => tool.options?.permission === WORKTREE_TOOL_PERMISSION).length).toBe(6)
+    expect(allToolNames).toHaveLength(26)
+    expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBe(11)
+    expect(tools.filter((tool) => tool.options?.permission === WORKTREE_TOOL_PERMISSION).length).toBe(7)
+    expect(tools.filter((tool) => tool.options?.permission === PUBLISH_TOOL_PERMISSION).length).toBe(1)
+    expect(tools.filter((tool) => tool.options?.permission === PEER_TOOL_PERMISSION).length).toBe(1)
     const goalTools = tools.filter((tool) => tool.options?.permission === GOAL_TOOL_PERMISSION)
     expect(goalTools).toHaveLength(3)
     // Every registered goal tool must declare the shared permission action so
@@ -207,6 +218,14 @@ describe("server plugin contract", () => {
     expect(contextText.join("\n")).toContain("not an automatic gate")
     expect(contextText.join("\n")).toContain("exact disjoint write scope")
     expect(contextText.join("\n")).not.toMatch(/\bgoal_(get|set|update)\b/)
+    // Publication and peer surfaces are part of the runtime context: the
+    // capability toggle note and the peer-discovery disclosure are universal,
+    // while the full publication policy appears only when publish.enabled.
+    expect(contextText.join("\n")).toContain("/publish (status|enable|disable)")
+    expect(contextText.join("\n")).toContain("capability toggle, not caller authentication")
+    expect(contextText.join("\n")).toContain("same stable project only")
+    expect(contextText.join("\n")).toContain("never live-complete")
+    expect(contextText.join("\n")).not.toContain("Durable publication authorization is capability policy")
 
     await commands[0]?.execute({ sessionID: "session", prompt: { text: "fix the bug" }, delivery: "queue" })
     expect(switches).toEqual(["agent:orchestrator", "model:orchestrator-model"])

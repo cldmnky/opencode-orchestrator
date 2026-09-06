@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test"
 import { parseOptions } from "../../src/core/config.js"
-import { GOAL_TOOL_PERMISSION } from "../../src/core/permissions.js"
+import { GOAL_TOOL_PERMISSION, PEER_TOOL_PERMISSION, PUBLISH_TOOL_PERMISSION } from "../../src/core/permissions.js"
 import { addGoalTools } from "../../src/opencode-v2/goal/tools.js"
+import { addPeerTools } from "../../src/opencode-v2/peers/tools.js"
+import { addPublishTools } from "../../src/opencode-v2/publish/tools.js"
 import {
   goalStorageKey,
   newGoal,
   stopStorageKey,
   type GoalRecord,
+  type StorageLike,
 } from "../../src/opencode-v2/goal/state.js"
 
 const location = { directory: "/workspace", project: { id: "project" } }
@@ -188,6 +191,106 @@ describe("goal tools", () => {
     expect((JSON.parse(updated.content) as GoalRecord).completionEvidence).toBe("verified by tests")
   })
 })
+
+describe("publish and peer tools", () => {
+  test("registers publish_policy_get and peer_list with their exact permission actions", () => {
+    const publishTools = collectPublishTools().tools
+    expect([...publishTools.keys()]).toEqual(["publish_policy_get"])
+    for (const tool of publishTools.values()) {
+      expect(tool.options?.namespace).toBe("orchestrator")
+      expect(tool.options?.permission).toBe(PUBLISH_TOOL_PERMISSION)
+    }
+
+    const peerTools = collectPeerTools().tools
+    expect([...peerTools.keys()]).toEqual(["peer_list"])
+    for (const tool of peerTools.values()) {
+      expect(tool.options?.namespace).toBe("orchestrator")
+      expect(tool.options?.permission).toBe(PEER_TOOL_PERMISSION)
+    }
+  })
+
+  test("both families are gated to the orchestrator agent at runtime", async () => {
+    const publishTools = collectPublishTools().tools
+    const peerTools = collectPeerTools().tools
+    const worker = toolContext("session-1", "explore")
+    await expect(publishTools.get("publish_policy_get")!.execute({}, worker)).rejects.toThrow(/only to the orchestrator/)
+    await expect(peerTools.get("peer_list")!.execute({}, worker)).rejects.toThrow(/only to the orchestrator/)
+  })
+
+  test("peer_list returns bounded same-project metadata through the tool", async () => {
+    const values = new Map<string, unknown>([
+      [goalStorageKey(location, "peer-a"), newGoal("peer-a", "first objective", 1)],
+      [goalStorageKey(location, "peer-b"), newGoal("peer-b", `secret token=ghp_ABCDEFGHIJKLMNOPQRST1234567890 here`, 2)],
+      [goalStorageKey(location, "session-1"), newGoal("session-1", "my own objective", 3)],
+    ])
+    const { tools } = collectPeerTools(values, scanable(values))
+
+    const output = await tools.get("peer_list")!.execute({ limit: 10 }, toolContext("session-1", "orchestrator"))
+    const parsed = JSON.parse(output.content) as { peers: Array<{ sessionID: string; objectiveHint: string }>; complete: boolean }
+    expect(parsed.peers.map((peer) => peer.sessionID)).toEqual(["peer-a", "peer-b"])
+    expect(parsed.complete).toBe(true)
+    expect(parsed.peers.find((peer) => peer.sessionID === "peer-b")?.objectiveHint).toContain("[redacted]")
+    expect(output.content).not.toContain("ghp_ABCDEFGHIJKLMNOPQRST1234567890")
+  })
+})
+
+function collectPublishTools(values = new Map<string, unknown>()): { tools: Map<string, ToolLike> } {
+  const tools = new Map<string, ToolLike>()
+  addPublishTools(
+    {
+      add(tool) {
+        tools.set(tool.name, tool as ToolLike)
+      },
+    },
+    {
+      storage: storageLike(values),
+      location,
+      options: parseOptions({ publish: { enabled: true } }),
+    },
+  )
+  return { tools }
+}
+
+function collectPeerTools(
+  values = new Map<string, unknown>(),
+  scan?: NonNullable<StorageLike["scan"]>,
+): { tools: Map<string, ToolLike> } {
+  const tools = new Map<string, ToolLike>()
+  addPeerTools(
+    {
+      add(tool) {
+        tools.set(tool.name, tool as ToolLike)
+      },
+    },
+    {
+      storage: storageLike(values, scan),
+      location,
+      options: parseOptions({}),
+    },
+  )
+  return { tools }
+}
+
+function storageLike(
+  values: Map<string, unknown>,
+  scan?: NonNullable<StorageLike["scan"]>,
+): StorageLike {
+  return {
+    get: async (key) => values.get(key),
+    set: async (key, value) => void values.set(key, value),
+    remove: async (key) => void values.delete(key),
+    ...(scan !== undefined ? { scan } : {}),
+  }
+}
+
+function scanable(values: Map<string, unknown>): NonNullable<StorageLike["scan"]> {
+  return async ({ prefix, after, limit }) => {
+    const matches = [...values.keys()].sort().filter((key) => key.startsWith(prefix) && (after === undefined || key > after))
+    const page = matches.slice(0, limit)
+    const next = matches.length > page.length ? page[page.length - 1] : undefined
+    return { entries: page.map((key) => ({ key, value: values.get(key) })), ...(next !== undefined ? { next } : {}) }
+  }
+}
 
 function toolContext(sessionID: string, agent: string): { sessionID: string; agent: string } {
   return { sessionID, agent }

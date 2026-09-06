@@ -8,6 +8,7 @@ import type { CommandInvocationLike } from "../../src/opencode-v2/commands/index
 import { runCommand } from "../../src/opencode-v2/commands/runtime.js"
 import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
 import { goalStorageKey, runStorageKey, stopStorageKey } from "../../src/opencode-v2/goal/state.js"
+import { publishStorageKey, type PublishRecord } from "../../src/opencode-v2/publish/state.js"
 import type { WorkerModelRuntime } from "../../src/opencode-v2/worker-models/runtime.js"
 
 describe("runtime commands", () => {
@@ -417,6 +418,119 @@ describe("runtime commands", () => {
     expect(seenLocations.length).toBeGreaterThan(0)
     expect(seenLocations[0]).toEqual({ directory: moved, workspace: "ws-9" })
     expect(fixture.statuses[0]).toContain("Working copy is clean.")
+  })
+
+  test("/publish status reports the durable policy and static gates without prompting a model", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+
+    await runCommand(fixture.context, parseOptions({}), "publish", invocation(""), undefined)
+
+    expect(fixture.prompts).toHaveLength(0)
+    const output = fixture.statuses[0]
+    expect(output).toContain("Publication capability — project \"project\"")
+    expect(output).toContain("Durable policy: disabled")
+    expect(output).toContain("Authorized capabilities (when enabled): push, pr-draft-create, pr-ready-transition, approve-after-review")
+    expect(output).toContain("Never authorized: issue creation or PR merge")
+    expect(output).toContain("publish.enabled=false; github.enabled=false; github.allow_mutations=false; worktree.enabled=false; worktree.allow_mutations=false")
+    expect(output).toContain("not caller authentication")
+    expect(output).toContain("never mutates Git or GitHub")
+  })
+
+  test("/publish enable writes a durable project-scoped authorization record", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    const options = parseOptions({ publish: { enabled: true } })
+
+    await runCommand(fixture.context, options, "publish", invocation("enable"), undefined)
+
+    expect(fixture.prompts).toHaveLength(0)
+    const output = fixture.statuses[0]
+    expect(output).toContain("Publication enabled for project \"project\"")
+    expect(output).toContain("authorized capabilities: push, pr-draft-create, pr-ready-transition, approve-after-review")
+    expect(output).toContain("This is a capability toggle, not caller authentication")
+    expect(output).toContain("never issue creation and never PR merge")
+    expect(output).toContain("No Git or GitHub mutation happened")
+
+    const record = fixture.values.get(publishStorageKey("project")) as PublishRecord
+    expect(record?.version).toBe(1)
+    expect(record?.enabled).toBe(true)
+    expect(record?.capabilities).toEqual(["push", "pr-draft-create", "pr-ready-transition", "approve-after-review"])
+    expect(record?.updatedBy).toBe("session")
+    expect(record?.updatedAt).toBeTypeOf("number")
+  })
+
+  test("/publish disable revokes the capabilities and keeps the durable record", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    const options = parseOptions({ publish: { enabled: true } })
+    fixture.values.set(publishStorageKey("project"), {
+      version: 1,
+      projectID: "project",
+      enabled: true,
+      capabilities: ["push", "pr-draft-create", "pr-ready-transition", "approve-after-review"],
+      updatedAt: 1,
+      updatedBy: "session",
+    })
+
+    await runCommand(fixture.context, options, "publish", invocation("disable"), undefined)
+
+    const record = fixture.values.get(publishStorageKey("project")) as PublishRecord
+    expect(record?.enabled).toBe(false)
+    expect(record?.capabilities).toEqual([])
+    expect(fixture.statuses[0]).toContain("Publication disabled for project \"project\"")
+    expect(fixture.statuses[0]).toContain("no longer authorized")
+  })
+
+  test("/publish enable is refused while publish.enabled is false, but status and disable still work", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    const options = parseOptions({}) // publish.enabled defaults to false
+    // A stale durable authorization can still exist after a config change.
+    fixture.values.set(publishStorageKey("project"), {
+      version: 1,
+      projectID: "project",
+      enabled: true,
+      capabilities: ["push"],
+      updatedAt: 1,
+      updatedBy: "session",
+    })
+
+    await runCommand(fixture.context, options, "publish", invocation("enable"), undefined)
+    expect(fixture.statuses[0]).toContain("/publish enable refused")
+    expect(fixture.statuses[0]).toContain("publish.enabled: false")
+    expect((fixture.values.get(publishStorageKey("project")) as PublishRecord).enabled).toBe(true)
+
+    // Status reports the stale durable authorization even while the config
+    // master switch is off.
+    await runCommand(fixture.context, options, "publish", invocation("status"), undefined)
+    expect(fixture.statuses[1]).toContain("Durable policy: enabled")
+    expect(fixture.statuses[1]).toContain("publish.enabled=false")
+
+    // Disabling a stale durable authorization is always allowed.
+    await runCommand(fixture.context, options, "publish", invocation("disable"), undefined)
+    expect((fixture.values.get(publishStorageKey("project")) as PublishRecord).enabled).toBe(false)
+  })
+
+  test("/publish enable and disable are idempotent with no rewrite on an unchanged record", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    const options = parseOptions({ publish: { enabled: true } })
+    await runCommand(fixture.context, options, "publish", invocation("enable"), undefined)
+    const first = fixture.values.get(publishStorageKey("project")) as PublishRecord
+    const firstUpdatedAt = first.updatedAt
+
+    await runCommand(fixture.context, options, "publish", invocation("enable"), undefined)
+    expect(fixture.statuses[1]).toContain("already enabled")
+    expect(fixture.statuses[1]).toContain("no change written")
+    expect((fixture.values.get(publishStorageKey("project")) as PublishRecord).updatedAt).toBe(firstUpdatedAt)
+
+    await runCommand(fixture.context, options, "publish", invocation("disable"), undefined)
+    await runCommand(fixture.context, options, "publish", invocation("disable"), undefined)
+    expect(fixture.statuses[3]).toContain("already disabled")
+    expect((fixture.values.get(publishStorageKey("project")) as PublishRecord).enabled).toBe(false)
+  })
+
+  test("/publish rejects unknown verbs with usage text", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    await runCommand(fixture.context, parseOptions({}), "publish", invocation("frobnicate"), undefined)
+    expect(fixture.prompts).toHaveLength(0)
+    expect(fixture.statuses[0]).toBe("Usage: /publish [status|enable|disable]")
   })
 })
 

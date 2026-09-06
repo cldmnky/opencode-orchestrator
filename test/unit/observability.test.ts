@@ -728,17 +728,21 @@ describe("conditional orchestrator-only tool registration", () => {
       signalSchema.oneOf.map((variant) => [(variant.properties.action as { enum: string[] }).enum[0], variant]),
     )
 
-    // start: exactly the six fields, all required, nothing else.
+    // start: the six required fields plus the optional exact-revision pair.
     const startVariant = byAction.get("start")!
     expect(Object.keys(startVariant.properties).sort()).toEqual([
       "action",
       "admissionState",
+      "baseSha",
       "checker",
+      "headSha",
       "maker",
       "runId",
       "taskId",
     ])
     expect(startVariant.required).toEqual(["action", "taskId", "runId", "maker", "checker", "admissionState"])
+    const startHead = startVariant.properties.headSha as { pattern?: string }
+    expect(startHead.pattern).toBe("^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
     // approve: exactly the fixed checks, all required, nothing else.
     const approveVariant = byAction.get("approve")!
@@ -801,6 +805,65 @@ describe("conditional orchestrator-only tool registration", () => {
     )
     expect(JSON.parse(approved.content)).toMatchObject({ accepted: true, reason: "approval-complete" })
     expect(JSON.parse(approved.content).record.state).toBe("approved")
+  })
+
+  test("review start may pin an exact head/base revision and rejects malformed or partial SHAs", async () => {
+    const options = parseOptions({ review: { mode: "bounded", max_rounds: 2 } })
+    const storage = memStorage()
+    const tools = new Map<string, ToolEntry>()
+    addObservabilityTools(
+      { add: (tool) => tools.set(tool.name, tool as unknown as ToolEntry) },
+      { options, storage, location },
+    )
+    const transition = tools.get("review_transition")!
+    const agent = { sessionID: "s1", agent: "orchestrator" }
+    const headSha = "a".repeat(40)
+    const baseSha = "b".repeat(40)
+    const startWithRevision = {
+      action: "start",
+      taskId: "t1",
+      runId: "r1",
+      maker: "implementer",
+      checker: "reviewer",
+      admissionState: "review-pending",
+      headSha,
+      baseSha,
+    }
+
+    // Malformed and partial revision fields never write a record.
+    const invalidSignals: Array<Record<string, unknown>> = [
+      { ...startWithRevision, headSha: "a".repeat(39) }, // too short
+      { ...startWithRevision, headSha: "A".repeat(40) }, // uppercase hex is not accepted
+      { ...startWithRevision, headSha: "abcdef0123456789" }, // not a full object ID
+      { ...startWithRevision, headSha: undefined }, // partial pair (baseSha present)
+      { ...startWithRevision, baseSha: undefined }, // partial pair (headSha present)
+    ]
+    for (const signal of invalidSignals) {
+      const result = await transition.execute({ sessionID: "s1", signal }, agent)
+      expect(JSON.parse(result.content), JSON.stringify(signal)).toMatchObject({ accepted: false, reason: "invalid-signal" })
+      expect(storage.values.has("review/v1/project/s1")).toBe(false)
+    }
+
+    // A valid pair persists the receipt and survives approval.
+    const started = await transition.execute({ sessionID: "s1", signal: startWithRevision }, agent)
+    expect(JSON.parse(started.content).accepted).toBe(true)
+    expect(JSON.parse(started.content).record).toMatchObject({ headSha, baseSha })
+    const approved = await transition.execute(
+      { sessionID: "s1", signal: { action: "approve", checks: { diff: true, scope: true, verification: true } } },
+      agent,
+    )
+    expect(JSON.parse(approved.content).record).toMatchObject({ state: "approved", headSha, baseSha })
+    expect(storage.values.get("review/v1/project/s1")).toMatchObject({ headSha, baseSha })
+
+    // The default (revision-less) start remains fully supported: a terminal
+    // old record may be replaced by a plain start with no receipt fields.
+    const plain = await transition.execute(
+      { sessionID: "s1", signal: { action: "start", taskId: "t2", runId: "r2", maker: "implementer", checker: "reviewer", admissionState: "review-pending" } },
+      agent,
+    )
+    expect(JSON.parse(plain.content).accepted).toBe(true)
+    expect(JSON.parse(plain.content).record.headSha).toBeUndefined()
+    expect(JSON.parse(plain.content).record.baseSha).toBeUndefined()
   })
 })
 

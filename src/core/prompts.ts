@@ -6,7 +6,9 @@ import {
   DELEGATION_GRAPH_GUIDANCE,
   GITHUB_LIFECYCLE_GUIDANCE,
   HANDOFF_FORMAT,
+  PEER_DISCOVERY_GUIDANCE,
   PROMPTING_POLICY_GUIDANCE,
+  PUBLICATION_POLICY_GUIDANCE,
   REMOTE_ORCHESTRATION_GUIDANCE,
   STRUCTURED_HANDOFF_GUIDANCE,
   WORKTREE_LIFECYCLE_GUIDANCE,
@@ -88,10 +90,16 @@ export function buildCommandPrompt(name: string, argumentsText: string, options?
   return `${prompts[name] ?? `Execute ${name}: ${args}`}\n\n${common}`
 }
 
-export function buildContinuationPrompt(objective: string, continuationCount: number, options?: OrchestratorOptions): string {
+export function buildContinuationPrompt(
+  objective: string,
+  continuationCount: number,
+  options?: OrchestratorOptions,
+  plan?: string,
+): string {
   return [
     "Continue the active orchestration goal.",
     `Objective: ${objective}`,
+    ...(plan ? [planContinuationGuidance(plan)] : []),
     `This is continuation ${continuationCount}. Inspect the current repository and session state before acting.`,
     "Make concrete progress, delegate safely when useful, and stop only after the objective is complete or a blocker requires the user.",
     "Read and update the goal with the namespaced tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update.",
@@ -108,17 +116,43 @@ export function buildContinuationPrompt(objective: string, continuationCount: nu
 }
 
 /**
- * Feature-specific lifecycle guidance, embedded only for enabled features:
- * the worktree lifecycle text appears only when `worktree.enabled` and the
- * GitHub lifecycle text only when `github.enabled`. The universal guidance
- * (catalog preflight, secrets, the no-atomic-child-isolation boundary) is
- * already embedded separately in every prompt kind.
+ * Plan-aware ledger guidance for continuations of an ACTIVE plan run. Only
+ * the plan's safe relative path is embedded — never plan file contents or
+ * transcripts — and the ledger behavior is explicit: reopen the plan, execute
+ * the first unfinished item with direct verification, update the ledger, then
+ * keep advancing autonomously until a real blocker or a configured breaker
+ * applies. Line breaks in the stored path are neutralized so a malformed
+ * durable record cannot inject prompt sections.
+ */
+function planContinuationGuidance(plan: string): string {
+  const safePlan = plan.replace(/[\r\n]+/g, " ")
+  return [
+    `Plan ledger: ${safePlan}`,
+    "Reopen the active plan ledger, execute the first unfinished item with direct verification, and update the ledger to record the change before moving to the next unfinished item in order.",
+    "Continue autonomously through the ledger unless a real blocker or a configured breaker applies (halt flag, budget fail-closed, cooldown, max continuations, or an open review circuit); stop and report to the user otherwise, and never mark the goal or plan complete without direct evidence.",
+  ].join("\n")
+}
+
+/**
+ * Feature-specific lifecycle guidance plus the universal peer-discovery
+ * disclosure, composed into every prompt kind that takes options:
+ * - the peer disclosure is always present (it states the durable
+ *   metadata-only/incomplete semantics and the same-project redaction
+ *   boundary of orchestrator_peer_list);
+ * - the worktree lifecycle text appears only when `worktree.enabled`;
+ * - the GitHub lifecycle text only when `github.enabled`;
+ * - the publication capability policy only when `publish.enabled` (the
+ *   config master gate).
+ * The remaining universal guidance (catalog preflight, secrets, the
+ * no-atomic-child-isolation boundary) is embedded separately in every prompt
+ * kind.
  */
 function featureGuidance(options: OrchestratorOptions | undefined): string {
   if (!options) return ""
-  const sections: string[] = []
+  const sections: string[] = [PEER_DISCOVERY_GUIDANCE]
   if (options.worktree.enabled) sections.push(WORKTREE_LIFECYCLE_GUIDANCE)
   if (options.github.enabled) sections.push(GITHUB_LIFECYCLE_GUIDANCE)
+  if (options.publish.enabled) sections.push(PUBLICATION_POLICY_GUIDANCE)
   return sections.join("\n")
 }
 

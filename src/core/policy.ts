@@ -118,6 +118,37 @@ export const GITHUB_LIFECYCLE_GUIDANCE = [
 ].join("\n")
 
 /**
+ * Peer-orchestrator discovery guidance, embedded in every orchestrator-facing
+ * prompt kind. Discloses the durable metadata-only/incomplete semantics and
+ * the same-project redaction boundary of `orchestrator_peer_list` up front so
+ * peer findings are never mistaken for live, complete knowledge of other
+ * sessions.
+ */
+export const PEER_DISCOVERY_GUIDANCE = [
+  "Same-project peer orchestration sessions are discoverable with orchestrator_peer_list (orchestrator-only): bounded, deterministically ordered metadata (sessionID, goal status, and a redacted/truncated objective hint) for the same stable project only.",
+  "The query is durable metadata only and never live-complete: sessions without a readable goal record do not appear, only known-pattern-redacted hints are returned, records of other projects are never read, and complete:false is reported truthfully when storage.scan is unavailable or the bounded scan cap is hit.",
+].join("\n")
+
+/**
+ * Publication capability policy, embedded only when `publish.enabled` is on
+ * (the config master gate). States the capability-not-authentication
+ * semantics, the exact authorized steps, the never-authorized steps, the
+ * mandatory commit -> sync -> verify -> exact-revision review -> push
+ * sequence with the conflict-delegation recovery flow, the draft-first PR
+ * lifecycle with its ready/approval limitations, and the unchanged
+ * separate-explicit-user-authorization merge policy.
+ */
+export const PUBLICATION_POLICY_GUIDANCE = [
+  "Durable publication authorization is capability policy, never caller authentication: /publish toggles a project-scoped durable authorization record; nothing in it proves which human invoked it, it never weakens the static github/worktree gates, and it never mutates Git or GitHub itself.",
+  "When the durable capability is enabled it authorizes the orchestrator to pass confirm:true without re-prompting for exactly: worktree push, draft PR creation, the draft-to-ready transition, and the verified post-ready approval. It never authorizes issue creation and never authorizes PR merge — merge still requires the static github.allow_mutations gate, a separate explicit user request, a fresh view, the exact head SHA, a literal confirm:true, and post-merge verification.",
+  "Mandatory publication sequence: commit clean changes first, then synchronize against the latest remote base (orchestrator_worktree_sync, which records an exact-revision receipt), verify/test the synced result, run the exact-revision bounded review, and only then push (orchestrator_worktree_push) and create the always-draft pull request (orchestrator_github_pr_create) and mark it ready (orchestrator_github_pr_ready).",
+  "When a sync reports conflicts after aborting, autonomously delegate an implementer to perform the merge/resolution inside the tracked worktree, rerun verification and sync, commit, and restart the exact-revision review; stop only when conflicts cannot safely be resolved, and never push from an unresolved or unsynced state.",
+  "If the base or head changes after the exact-revision review, re-sync and re-review before any push; stale base/head, dirty trees, missing sync receipts, and missing or mismatched approved review receipts all fail closed.",
+  "Pull requests are always created as drafts; fresh views must directly show the conflict-free exact revision (draft:true, mergeable:true, no dirty/unknown conflict state, remote base ancestry) before a ready transition, an unknown mergeability stays draft and is truthfully deferred without polling, and a draft that reports conflict state is never forced ready.",
+  "Auto-approve happens only after the ready transition and the exact internal review, with an authenticated non-author viewer and fresh conflict-free evidence; same-author attempts and API failures are refused and reported truthfully, and an automated approval is never claimed to satisfy branch protection.",
+].join("\n")
+
+/**
  * Capability flags that decide which feature-specific lifecycle guidance a
  * prompt embeds. Universal guidance (catalog preflight, secrets, the truthful
  * no-atomic-child-isolation boundary) is always present; feature lifecycle
@@ -126,6 +157,7 @@ export const GITHUB_LIFECYCLE_GUIDANCE = [
 export type OrchestrationCapabilities = {
   worktree?: boolean
   github?: boolean
+  publish?: boolean
 }
 
 export const REMOTE_ORCHESTRATION_GUIDANCE = [
@@ -203,8 +235,10 @@ export function orchestrationRules(
     TOOL_AVAILABILITY_GUIDANCE,
     SECRET_HANDLING_GUIDANCE,
     WORKTREE_BOUNDARY_GUIDANCE,
+    PEER_DISCOVERY_GUIDANCE,
     ...(capabilities.worktree ? [WORKTREE_LIFECYCLE_GUIDANCE] : []),
     ...(capabilities.github ? [GITHUB_LIFECYCLE_GUIDANCE] : []),
+    ...(capabilities.publish ? [PUBLICATION_POLICY_GUIDANCE] : []),
     "Start independent read-only work in parallel/background mode.",
     "Record the original branch, HEAD, changed files, commits, and verification in the task ledger when those facts are available.",
     "Do not claim automated GitHub issue or pull request coordination unless the user explicitly performs and verifies those steps.",
@@ -228,8 +262,9 @@ export function orchestrationRules(
 export function orchestrationCapabilities(options: {
   worktree: { enabled: boolean }
   github: { enabled: boolean }
+  publish: { enabled: boolean }
 }): OrchestrationCapabilities {
-  return { worktree: options.worktree.enabled, github: options.github.enabled }
+  return { worktree: options.worktree.enabled, github: options.github.enabled, publish: options.publish.enabled }
 }
 
 /**

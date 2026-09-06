@@ -6,10 +6,16 @@ import {
   newGoal,
   runStorageKey,
   stopStorageKey,
+  type PlanRunRecord,
   type StorageLike,
 } from "../../src/opencode-v2/goal/state.js"
 import { startGoalContinuation } from "../../src/opencode-v2/goal/continuation.js"
 import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
+
+// The runtime passes the parsed plugin options to the continuation prompt
+// (the universal peer-discovery guidance and any feature guidance are
+// composed from them), so reference prompts must use the same options.
+const CONTINUATION_OPTIONS = parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } })
 
 describe("goal continuation", () => {
   test("deduplicates idle events, applies the ceiling, and closes the iterator", async () => {
@@ -37,7 +43,7 @@ describe("goal continuation", () => {
 
     stream.push({ id: "idle-1", type: "session.idle", data: { sessionID: "session" } })
     await waitFor(() => prompts.length === 1)
-    expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 1))
+    expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 1, CONTINUATION_OPTIONS))
 
     stream.push({ id: "idle-1", type: "session.idle", data: { sessionID: "session" } })
     await new Promise((resolve) => setTimeout(resolve, 20))
@@ -72,6 +78,178 @@ describe("goal continuation", () => {
       expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(0)
       stop()
     }
+  })
+
+  test("does not continue a paused or completed plan run and does not burn a reservation", async () => {
+    // An existing run that is not active has no unfinished ledger item: both a
+    // paused run and a completed run stop auto-continuation under the lock.
+    for (const status of ["paused", "complete"] as const) {
+      const location = { directory: "/workspace", project: { id: `project-run-${status}` } }
+      const key = goalStorageKey(location, "session")
+      const runKey = runStorageKey(location, "session")
+      const values = new Map<string, unknown>([
+        [key, newGoal("session", "ship the change", 1)],
+        [runKey, runRecord(status)],
+      ])
+      const prompts: Array<{ text: string }> = []
+      const stream = createStream()
+      const stop = startGoalContinuation(
+        fixture(location, values, prompts, stream),
+        parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+      )
+
+      stream.push({ id: `idle-run-${status}`, type: "session.idle", data: { sessionID: "session" } })
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      expect(prompts, status).toHaveLength(0)
+      expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(0)
+      stop()
+    }
+  })
+
+  test("continues with an active plan run and embeds the plan path and ledger behavior in the prompt", async () => {
+    const location = { directory: "/workspace", project: { id: "project-run-active" } }
+    const key = goalStorageKey(location, "session")
+    const runKey = runStorageKey(location, "session")
+    const values = new Map<string, unknown>([
+      [key, newGoal("session", "ship the change", 1)],
+      [runKey, runRecord("active")],
+    ])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-run-active", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 1)
+    const text = prompts[0]!.text
+    expect(text).toContain(buildContinuationPrompt("ship the change", 1, CONTINUATION_OPTIONS, ".orchestrator/plans/ship.md"))
+    // The safe plan path is embedded; the plan file contents are not (the
+    // continuation never reads the ledger file).
+    expect(text).toContain("Plan ledger: .orchestrator/plans/ship.md")
+    expect(text.split("Plan ledger:").length - 1).toBe(1)
+    expect(text).toContain("first unfinished item")
+    expect(text).toContain("update the ledger")
+    expect(text).toContain("next unfinished item in order")
+    expect(text).toContain("Continue autonomously through the ledger")
+    expect(text).toContain("configured breaker")
+    expect(text).toContain("never mark the goal or plan complete without direct evidence")
+    expect(text).not.toContain("Validated plan:")
+    stop()
+  })
+
+  test("skips admission when a run pause races the reservation", async () => {
+    const location = { directory: "/workspace", project: { id: "project-run-race" } }
+    const key = goalStorageKey(location, "session")
+    const runKey = runStorageKey(location, "session")
+    const values = new Map<string, unknown>([
+      [key, newGoal("session", "ship the change", 1)],
+      [runKey, runRecord("active")],
+    ])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    // When the reservation is written (count goes 0 -> 1), a concurrent
+    // /halt run pauses the plan run before delivery re-reads it.
+    const racyStorage: StorageLike = {
+      get: async (item) => values.get(item),
+      set: async (item, value) => {
+        values.set(item, value)
+        const goal = value as { continuationCount: number }
+        if (item === key && goal.continuationCount === 1) {
+          const run = values.get(runKey) as PlanRunRecord
+          values.set(runKey, { ...run, status: "paused", updatedAt: run.updatedAt + 1 })
+        }
+      },
+      remove: async (item) => void values.delete(item),
+    }
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream, racyStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-run-race", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // The turn was reserved, but the paused run is never admitted.
+    expect(prompts).toHaveLength(0)
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(1)
+    expect((values.get(runKey) as PlanRunRecord).status).toBe("paused")
+    stop()
+  })
+
+  test("skips admission when the plan run is replaced between reservation and delivery", async () => {
+    const location = { directory: "/workspace", project: { id: "project-run-replace" } }
+    const key = goalStorageKey(location, "session")
+    const runKey = runStorageKey(location, "session")
+    const values = new Map<string, unknown>([
+      [key, newGoal("session", "ship the change", 1)],
+      [runKey, runRecord("active")],
+    ])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    // A concurrent /run-plan replaces the run with a different active plan:
+    // status and count still look reservable, but the run identity changed.
+    const racyStorage: StorageLike = {
+      get: async (item) => values.get(item),
+      set: async (item, value) => {
+        values.set(item, value)
+        const goal = value as { continuationCount: number }
+        if (item === key && goal.continuationCount === 1) {
+          const run = values.get(runKey) as PlanRunRecord
+          values.set(runKey, { ...run, plan: ".orchestrator/plans/other.md", updatedAt: run.updatedAt + 1 })
+        }
+      },
+      remove: async (item) => void values.delete(item),
+    }
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream, racyStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-run-replace", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // A replaced run is never mistaken for the reserved snapshot.
+    expect(prompts).toHaveLength(0)
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(1)
+    stop()
+  })
+
+  test("skips admission when a new plan run appears between reservation and delivery", async () => {
+    const location = { directory: "/workspace", project: { id: "project-run-appear" } }
+    const key = goalStorageKey(location, "session")
+    const runKey = runStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    // No run exists at reservation time; a concurrent /run-plan activates one
+    // before delivery re-reads the run key.
+    const racyStorage: StorageLike = {
+      get: async (item) => values.get(item),
+      set: async (item, value) => {
+        values.set(item, value)
+        const goal = value as { continuationCount: number }
+        if (item === key && goal.continuationCount === 1) {
+          values.set(runKey, runRecord("active"))
+        }
+      },
+      remove: async (item) => void values.delete(item),
+    }
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream, racyStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-run-appear", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // Absent and present are different identities: the reservation is stale.
+    expect(prompts).toHaveLength(0)
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(1)
+    expect(values.get(runKey)).toBeDefined()
+    stop()
   })
 
   test("does not continue a halted goal and does not burn a reservation", async () => {
@@ -470,7 +648,7 @@ describe("goal continuation", () => {
     // A later idle edge still works: the failure did not wedge in-flight state.
     stream.push({ id: "idle-err-2", type: "session.idle", data: { sessionID: "session" } })
     await waitFor(() => prompts.length === 1)
-    expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 2))
+    expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 2, CONTINUATION_OPTIONS))
     stop()
   })
 
@@ -502,7 +680,7 @@ describe("goal continuation", () => {
 
     stream.push({ id: "idle-origin", type: "session.idle", data: { sessionID: "session" } })
     await waitFor(() => prompts.length === 1)
-    expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 1))
+    expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 1, CONTINUATION_OPTIONS))
     // The reservation advanced the origin-keyed record, not a project-keyed one.
     expect((values.get(originKey) as { continuationCount: number }).continuationCount).toBe(1)
     expect(values.has(goalStorageKey(location, "session"))).toBe(false)
@@ -529,7 +707,7 @@ describe("goal continuation", () => {
       location: { directory: "/moved/elsewhere", workspaceID: "ws-1" },
     })
     await waitFor(() => prompts.length === 1)
-    expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 1))
+    expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 1, CONTINUATION_OPTIONS))
     stop()
   })
 })
@@ -563,6 +741,17 @@ function fixture(
       get: async () => undefined,
       prompt: async (input: { text: string }) => void prompts.push(input),
     },
+  }
+}
+
+function runRecord(status: PlanRunRecord["status"], plan = ".orchestrator/plans/ship.md"): PlanRunRecord {
+  return {
+    version: 1,
+    sessionID: "session",
+    plan,
+    status,
+    createdAt: 1,
+    updatedAt: 1,
   }
 }
 

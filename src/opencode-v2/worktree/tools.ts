@@ -6,13 +6,23 @@ import { createRedactor } from "../process/redact.js"
 import type { ProcessRunner } from "../process/runner.js"
 import {
   canonicalPath,
+  FULL_SHA_PATTERN,
+  gitFetch,
   gitLsRemote,
+  gitMerge,
+  gitMergeAbort,
+  gitMergeBaseIsAncestor,
   gitPush,
+  gitRevParse,
   gitStatus,
+  gitUnmergedPaths,
   gitWorktreeAdd,
   gitWorktreeList,
   gitWorktreeRemove,
   isPathInside,
+  isValidBranchName,
+  isValidRemoteName,
+  parseLsRemoteRefSha,
   type GitContext,
   type WorktreeEntry,
 } from "./git.js"
@@ -25,18 +35,30 @@ import {
   writeWorktree,
   type StorageLike,
   type WorktreeRecord,
+  type WorktreeSyncReceipt,
 } from "./state.js"
+import { isPublishCapabilityAuthorized } from "../publish/state.js"
+import { readReviewRecord } from "../observability/runtime.js"
+import { validateApprovedReviewRevision } from "../observability/review.js"
 import { moveSessionToDirectory } from "../session/move.js"
 import type { SessionMoveCoordinator } from "../session/move-coordinator.js"
 
 /**
- * `orchestrator_worktree_*` tools (stage 2), registered via the tool
- * transform. Gating: the whole family requires `worktree.enabled`, mutating
- * git tools (create/push/cleanup) additionally require
+ * `orchestrator_worktree_*` tools (stage 2/3), registered via the tool
+ * transform. Gating: the whole family requires `worktree.enabled`;
+ * mutating git tools (create/sync/push/cleanup) additionally require
  * `worktree.allow_mutations` and a literal `confirm: true` input field, and
  * every tool is orchestrator-only via the shared `orchestrator_worktree`
- * permission action plus the runtime agent check. `worktree_enter` requires
- * neither `allow_mutations` nor a confirm field: it moves the current session
+ * permission action plus the runtime agent check. `worktree_sync` fetches
+ * the latest remote base branch, merges it into the tracked feature branch
+ * when needed, and persists an exact-revision sync receipt (it never pushes
+ * and does not require the publish capability). `worktree_push` is the
+ * exact publication gate: it refuses unless the static mutation gates, the
+ * durable publish authorization, a clean tree, an unchanged latest remote
+ * base, the exact synced local head, base ancestry, an exact-revision
+ * approved review receipt, a literal `confirm: true`, and exact remote-head
+ * verification all pass. `worktree_enter` requires neither
+ * `allow_mutations` nor a confirm field: it moves the current session
  * (native `session.move` plus durable anchor/index/worktree bookkeeping via
  * `moveSessionToDirectory`) instead of running git, and `worktree.enabled`
  * is the operator opt-in for the whole family. Durable records are written
@@ -47,8 +69,9 @@ import type { SessionMoveCoordinator } from "../session/move-coordinator.js"
  * (marker EVIDENCE_LIVE, authoritative-for-tested-fields, sourced from
  * `tool.sessionID` + `Date.now()`). These are live local operation results
  * with durable worktree bookkeeping; they are NOT proof of native child
- * isolation, and the evidence/tests never claim it. Errors stay redacted
- * strings and carry no evidence.
+ * isolation, and the evidence/tests never claim it. Errors and refusals
+ * stay redacted strings and carry no evidence; a conflicted sync is a
+ * truthful structured non-success result (no evidence, never a push).
  */
 
 type ToolDraftLike = {
@@ -243,8 +266,142 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
   })
 
   draft.add({
+    name: "worktree_sync",
+    description:
+      "Fetch the latest remote base branch, merge it into the tracked worktree branch when needed, and record an exact-revision sync receipt. Refuses a dirty tree, surfaces conflicts truthfully (listing only safe relative unmerged paths) without pushing, and never resolves conflicts automatically. Requires worktree.allow_mutations and confirm: true; does not require the publish capability.",
+    input: syncInput,
+    options: { namespace: "orchestrator", permission: WORKTREE_TOOL_PERMISSION },
+    execute: async (input, tool) => {
+      requireOrchestrator(tool.agent, deps.options)
+      requireMutations(deps.options)
+      if (inputConfirm(input) !== true) return result("worktree_sync requires confirm: true")
+
+      const record = await readWorktree(deps.storage, deps.location.project.id, tool.sessionID)
+      if (!record) return result("no worktree record to sync")
+      const repoRoot = stringField(input, "repoRoot") || record.repoRoot
+      const branch = stringField(input, "branch") || record.branch
+      const remote = stringField(input, "remote") || "origin"
+      if (!isValidBranchName(branch)) return result("worktree_sync refused: invalid branch name")
+      if (!isValidRemoteName(remote)) return result("worktree_sync refused: invalid remote name")
+      const baseBranch = resolveBaseBranch(stringField(input, "base"), record.base)
+      if (!baseBranch) {
+        return result(
+          "worktree_sync refused: a valid base branch is required (the record base is a commit id or no base was provided); pass base with the branch name",
+        )
+      }
+      const baseRef = `refs/heads/${baseBranch}`
+      const trackingRef = `refs/remotes/${remote}/${baseBranch}`
+      // Worktree-local git operations run inside the tracked checkout so a
+      // clean-tree check, merge, and HEAD resolution always observe the
+      // tracked worktree itself.
+      const cwd = record.dir
+
+      try {
+        const dirty = await gitStatus(git, cwd)
+        if (dirty.length > 0) {
+          return result("worktree_sync refused: tracked worktree has uncommitted changes; commit or stash them before syncing")
+        }
+        const fetched = await gitFetch(git, { repoRoot, remote, ref: baseRef })
+        if (fetched.exitCode !== 0) {
+          return result(
+            `worktree sync failed: git fetch exited with code ${fetched.exitCode}: ${fetched.stderr || fetched.stdout || "unknown error"}`,
+          )
+        }
+        const remoteBase = await gitRevParse(git, repoRoot, trackingRef)
+        if (remoteBase === undefined) {
+          return result(`worktree sync failed: could not resolve the fetched remote base ${trackingRef}`)
+        }
+        // Already current: the branch contains the latest base, so no commit
+        // is created — only the exact-revision receipt is recorded.
+        let merged = false
+        if (!(await gitMergeBaseIsAncestor(git, cwd, remoteBase, "HEAD"))) {
+          const outcome = await gitMerge(git, { repoRoot: cwd, into: trackingRef })
+          if (outcome.exitCode !== 0) {
+            // The merge failed; report what actually happened. Conflicts are
+            // never resolved automatically and never pushed: only safe
+            // relative unmerged paths are listed, then the merge is aborted
+            // so the sync never leaves the tracked worktree half-merged.
+            const unmerged = await listUnmergedPaths(git, cwd)
+            if (!unmerged.ok) {
+              return result(`worktree sync failed: ${unmerged.error}; no receipt was recorded`)
+            }
+            const abort = await abortFailedMerge(git, cwd)
+            if (!abort.ok) {
+              return result(`worktree sync failed after the merge exited with code ${outcome.exitCode}: ${abort.error}`)
+            }
+            if (unmerged.paths.length === 0) {
+              return result(
+                `worktree sync failed: git merge exited with code ${outcome.exitCode}: ${outcome.stderr || outcome.stdout || "unknown error"}; the merge was aborted and no receipt was recorded`,
+              )
+            }
+            return result(
+              JSON.stringify({
+                synced: false,
+                conflicted: true,
+                merged: false,
+                aborted: true,
+                treeRestored: abort.treeRestored,
+                unmergedPaths: unmerged.paths,
+                baseBranch,
+                baseRef,
+                remote,
+                baseSha: remoteBase,
+                message:
+                  "worktree sync conflicted: the merge failed on unmerged paths; the merge was aborted, no receipt was recorded, and nothing was pushed",
+              }),
+            )
+          }
+          merged = true
+        }
+        // Success verification: the synced base must be an ancestor of the
+        // (possibly merged) head and the tree must be clean before any
+        // receipt is persisted.
+        if (!(await gitMergeBaseIsAncestor(git, cwd, remoteBase, "HEAD"))) {
+          return result("worktree sync failed verification: synced base is not an ancestor of the worktree HEAD; no receipt was recorded")
+        }
+        const after = await gitStatus(git, cwd)
+        if (after.length > 0) {
+          return result("worktree sync failed verification: tracked worktree is dirty after the merge; no receipt was recorded")
+        }
+        const headAfter = await gitRevParse(git, cwd, "HEAD")
+        if (headAfter === undefined) {
+          return result("worktree sync failed verification: could not resolve the synced HEAD; no receipt was recorded")
+        }
+        const receipt: WorktreeSyncReceipt = {
+          remote,
+          baseBranch,
+          baseRef,
+          baseSha: remoteBase,
+          headSha: headAfter,
+          merged,
+          syncedAt: Date.now(),
+        }
+        const written = await writeWorktree(deps.storage, { ...record, sync: receipt })
+        return result(
+          JSON.stringify({
+            synced: true,
+            merged,
+            alreadyCurrent: !merged,
+            baseBranch,
+            baseRef,
+            remote,
+            baseSha: remoteBase,
+            headSha: headAfter,
+            syncedAt: receipt.syncedAt,
+            record: written,
+            evidence: liveEvidence({ source: "opencode-orchestrator.worktree.sync", sessionID: tool.sessionID }),
+          }),
+        )
+      } catch (error) {
+        return result(`worktree sync failed: ${message(error)}`)
+      }
+    },
+  })
+
+  draft.add({
     name: "worktree_push",
-    description: "Push the tracked worktree branch and verify it on the remote. Requires confirm: true.",
+    description:
+      "Push the tracked worktree branch only when every publication gate passes: static mutation gates, durable publish authorization (capability 'push'), a clean tree, an unchanged latest remote base, the exact synced local head, base ancestry, an exact-revision approved review receipt, a literal confirm: true, and exact ls-remote SHA verification after the push. Requires confirm: true.",
     input: pushInput,
     options: { namespace: "orchestrator", permission: WORKTREE_TOOL_PERMISSION },
     execute: async (input, tool) => {
@@ -256,23 +413,109 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
       if (!record) return result("no worktree record to push")
       const repoRoot = stringField(input, "repoRoot") || record.repoRoot
       const branch = stringField(input, "branch") || record.branch
-      const remote = stringField(input, "remote") || "origin"
+      const remote = stringField(input, "remote") || record.sync?.remote || "origin"
+      if (!isValidBranchName(branch)) return result("worktree_push refused: invalid branch name")
+      if (!isValidRemoteName(remote)) return result("worktree_push refused: invalid remote name")
+      // Fail closed: a legacy record without an exact-revision sync receipt
+      // can never be pushed, even when every other gate looks fine.
+      if (!record.sync) {
+        return result(
+          "worktree_push refused: tracked worktree has no sync receipt; run orchestrator_worktree_sync (with confirm: true) against the latest remote base first",
+        )
+      }
+      const receipt = record.sync
+      const cwd = record.dir
 
       try {
+        // Durable publication authorization: policy only (never caller
+        // identity proof) and never a substitute for the static gates above.
+        const grant = await isPublishCapabilityAuthorized(deps.storage, deps.location, tool.sessionID, "push")
+        if (!grant.authorized) {
+          return result(
+            `worktree_push refused: publication capability 'push' is not authorized for project ${grant.projectID}; enable it with /publish enable`,
+          )
+        }
+        // Exact-revision approved review receipt: the current bounded review
+        // record must be APPROVED and carry the exact synced base/head pair.
+        const reviewRecord = await readReviewRecord(deps.storage, deps.location, tool.sessionID)
+        const review = validateApprovedReviewRevision({
+          record: reviewRecord,
+          headSha: receipt.headSha,
+          baseSha: receipt.baseSha,
+        })
+        if (!review.valid) {
+          return result(`worktree_push refused: ${review.message}`)
+        }
+        const dirty = await gitStatus(git, cwd)
+        if (dirty.length > 0) {
+          return result("worktree_push refused: tracked worktree has uncommitted changes")
+        }
+        // Re-fetch the stored base branch: the remote base must be exactly
+        // unchanged since the sync receipt, or the gate fails closed.
+        const fetched = await gitFetch(git, { repoRoot, remote, ref: receipt.baseRef })
+        if (fetched.exitCode !== 0) {
+          return result(
+            `worktree_push refused: could not re-fetch the stored base branch (git fetch exited with code ${fetched.exitCode}: ${fetched.stderr || fetched.stdout || "unknown error"})`,
+          )
+        }
+        const remoteBase = await gitRevParse(git, repoRoot, `refs/remotes/${remote}/${receipt.baseBranch}`)
+        if (remoteBase === undefined) {
+          return result("worktree_push refused: could not resolve the remote base after re-fetch")
+        }
+        if (remoteBase !== receipt.baseSha) {
+          return result(
+            `worktree_push refused: the remote base ${receipt.baseRef} moved since sync (synced ${receipt.baseSha}, remote now ${remoteBase}); run orchestrator_worktree_sync again`,
+          )
+        }
+        const head = await gitRevParse(git, cwd, "HEAD")
+        if (head === undefined) {
+          return result("worktree_push refused: could not resolve the tracked worktree HEAD")
+        }
+        if (head !== receipt.headSha) {
+          return result(
+            `worktree_push refused: the local head changed since sync (synced ${receipt.headSha}, local now ${head}); run orchestrator_worktree_sync again`,
+          )
+        }
+        if (!(await gitMergeBaseIsAncestor(git, cwd, receipt.baseSha, "HEAD"))) {
+          return result(
+            "worktree_push refused: the synced base is not an ancestor of the local head; run orchestrator_worktree_sync again",
+          )
+        }
+
         const pushed = await gitPush(git, { repoRoot, branch, remote })
         if (pushed.exitCode !== 0) return result(`worktree push failed: ${pushed.stderr || "unknown error"}`)
+
+        // Exact remote-head verification: the remote ref must equal the
+        // pushed head EXACTLY (full-SHA equality, never substring or another
+        // ref); anything else is reported truthfully as unverified.
         const refs = await gitLsRemote(git, { repoRoot, remote, ref: `refs/heads/${branch}` })
-        const verified = refs.includes(`refs/heads/${branch}`)
+        const remoteSha = parseLsRemoteRefSha(refs, `refs/heads/${branch}`)
+        if (remoteSha !== head) {
+          return result(
+            JSON.stringify({
+              pushed: true,
+              verified: false,
+              remote,
+              branch,
+              expected: head,
+              remoteSha: remoteSha ?? "(remote ref absent)",
+              refs,
+              message: "worktree push verification failed: the remote ref does not equal the pushed head exactly",
+            }),
+          )
+        }
         if (record.status === "moved") {
           await writeWorktree(deps.storage, { ...record, status: "ready" })
         }
         return result(
           JSON.stringify({
             pushed: true,
-            verified,
+            verified: true,
             remote,
             branch,
-            refs,
+            headSha: head,
+            baseSha: receipt.baseSha,
+            receipt,
             evidence: liveEvidence({ source: "opencode-orchestrator.worktree.push", sessionID: tool.sessionID }),
           }),
         )
@@ -426,6 +669,65 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * Resolve the base branch token for sync: an explicit input wins; otherwise
+ * the record's base is used when it is a branch name. Full commit ids are
+ * never treated as branch names (a sync must fetch a *branch*), full-ref
+ * forms like `refs/heads/main` are normalized to the branch name, and any
+ * option-shaped/malformed token resolves to `undefined` (callers refuse).
+ */
+function resolveBaseBranch(inputBase: string, recordBase: string): string | undefined {
+  const raw = inputBase.length > 0 ? inputBase : recordBase
+  if (raw.length === 0) return undefined
+  if (FULL_SHA_PATTERN.test(raw)) return undefined
+  if (raw.startsWith("refs/heads/")) {
+    return isValidBranchName(raw.slice("refs/heads/".length)) ? raw.slice("refs/heads/".length) : undefined
+  }
+  return isValidBranchName(raw) ? raw : undefined
+}
+
+/**
+ * List unmerged paths after a failed merge. A failure to read git output
+ * returns the error instead of throwing, so the caller can still report the
+ * merge failure truthfully. Only safe relative unmerged paths are returned.
+ */
+async function listUnmergedPaths(
+  git: GitContext,
+  cwd: string,
+): Promise<{ ok: true; paths: string[] } | { ok: false; error: string }> {
+  try {
+    return { ok: true, paths: await gitUnmergedPaths(git, cwd) }
+  } catch (error) {
+    return { ok: false, error: message(error) }
+  }
+}
+
+/**
+ * Abort a failed merge and verify the tree was restored. Conflicts are
+ * never resolved automatically and never left half-merged: when the abort
+ * fails, the failure is reported truthfully (no receipt is ever recorded).
+ */
+async function abortFailedMerge(
+  git: GitContext,
+  cwd: string,
+): Promise<{ ok: boolean; treeRestored: boolean; error?: string }> {
+  let aborted = false
+  try {
+    const outcome = await gitMergeAbort(git, cwd)
+    aborted = outcome.exitCode === 0
+  } catch (error) {
+    return { ok: false, treeRestored: false, error: message(error) }
+  }
+  if (!aborted) return { ok: false, treeRestored: false, error: "git merge --abort failed; the tracked worktree may still be mid-merge" }
+  let treeRestored = false
+  try {
+    treeRestored = (await gitStatus(git, cwd)).length === 0
+  } catch {
+    treeRestored = false
+  }
+  return { ok: true, treeRestored }
+}
+
 function result(content: string): ToolResult {
   return { content }
 }
@@ -456,6 +758,19 @@ const statusInput = {
   properties: {
     repoRoot: { type: "string" },
   },
+  additionalProperties: false,
+} as const
+
+const syncInput = {
+  type: "object",
+  properties: {
+    repoRoot: { type: "string" },
+    branch: { type: "string" },
+    remote: { type: "string" },
+    base: { type: "string" },
+    confirm: { type: "boolean" },
+  },
+  required: ["confirm"],
   additionalProperties: false,
 } as const
 

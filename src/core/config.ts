@@ -12,6 +12,7 @@ export const COMMAND_NAMES = [
   "handover",
   "polish",
   "stress-plan",
+  "publish",
 ] as const
 
 /**
@@ -90,6 +91,20 @@ const reviewOptions = z
   .default({ mode: "prompt", max_rounds: 2 })
 
 /**
+ * Publication capability master switch. `enabled` defaults to `false`: the
+ * capability family is off until an operator opts in. Enabling this config
+ * flag only *permits* the durable project-scoped authorization record
+ * (toggled through `/publish enable`) to be written; it never weakens the
+ * static `github`/`worktree` gates.
+ */
+const publishOptions = z
+  .object({
+    enabled: z.boolean().default(false),
+  })
+  .strict()
+  .default({ enabled: false })
+
+/**
  * Validates a worktree root as an absolute POSIX path (or, when nullable,
  * an explicit `null` meaning "no whitelisted roots"). Rejects relative
  * paths, drive letters, and embedded NUL bytes.
@@ -151,6 +166,7 @@ export const OrchestratorOptionsSchema = z
         root: absolutePosixPath.nullable().default(null),
       })
       .default({ enabled: false, allow_mutations: false, root: null }),
+    publish: publishOptions,
     trace: traceOptions,
     budget: budgetOptions,
     review: reviewOptions,
@@ -191,6 +207,7 @@ export type BudgetLimits = Pick<
 >
 export type ReviewOptions = z.infer<typeof reviewOptions>
 export type ClarifyOptions = z.infer<typeof clarifyOptions>
+export type PublishOptions = z.infer<typeof publishOptions>
 
 export function parseOptions(value: unknown): OrchestratorOptions {
   const parsed = OrchestratorOptionsSchema.safeParse(value ?? {})

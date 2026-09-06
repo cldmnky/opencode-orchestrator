@@ -4,6 +4,8 @@ import {
   GH_TOOL_PERMISSION,
   OBSERVABILITY_TOOL_PERMISSION,
   ORCHESTRATION_TOOL_PERMISSION,
+  PEER_TOOL_PERMISSION,
+  PUBLISH_TOOL_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
   orchestratorOnlyPermissionRule,
   orchestratorOnlyPermissionRules,
@@ -86,14 +88,16 @@ describe("configuration feature policy", () => {
 })
 
 describe("permission constants", () => {
-  test("exports goal-style orchestrator-only actions for gh/worktree/validation without dead cd actions", () => {
+  test("exports goal-style orchestrator-only actions for gh/worktree/validation/publish/peer without dead cd actions", () => {
     expect(GH_TOOL_PERMISSION).toBe("orchestrator_gh")
     expect(WORKTREE_TOOL_PERMISSION).toBe("orchestrator_worktree")
     expect(ORCHESTRATION_TOOL_PERMISSION).toBe("orchestrator_validation")
     expect(OBSERVABILITY_TOOL_PERMISSION).toBe("orchestrator_observability")
+    expect(PUBLISH_TOOL_PERMISSION).toBe("orchestrator_publish")
+    expect(PEER_TOOL_PERMISSION).toBe("orchestrator_peer")
   })
 
-  test("builds an orchestrator-only deny rule over the whole feature family incl. orchestration validation and observability", () => {
+  test("builds an orchestrator-only deny rule over the whole feature family incl. orchestration validation, observability, publish, and peer", () => {
     const rule = orchestratorOnlyPermissionRule("deny")
     expect(rule.resource).toBe("*")
     expect(rule.effect).toBe("deny")
@@ -102,6 +106,8 @@ describe("permission constants", () => {
       WORKTREE_TOOL_PERMISSION,
       ORCHESTRATION_TOOL_PERMISSION,
       OBSERVABILITY_TOOL_PERMISSION,
+      PUBLISH_TOOL_PERMISSION,
+      PEER_TOOL_PERMISSION,
     ]) {
       expect(rule.action).toContain(action)
     }
@@ -117,6 +123,8 @@ describe("permission constants", () => {
       WORKTREE_TOOL_PERMISSION,
       ORCHESTRATION_TOOL_PERMISSION,
       OBSERVABILITY_TOOL_PERMISSION,
+      PUBLISH_TOOL_PERMISSION,
+      PEER_TOOL_PERMISSION,
     ])
   })
 })

@@ -4,6 +4,7 @@ import type { Context } from "@opencode-ai/plugin/promise/plugin"
 import type { Model } from "@opencode-ai/schema/model"
 import type { CommandName, CommandInvocationLike } from "./index.js"
 import { commandDefinitions } from "./index.js"
+import type { OrchestratorOptions } from "../../core/config.js"
 import { buildCommandPrompt } from "../../core/prompts.js"
 import type { DispatchGate } from "../observability/runtime.js"
 import { redact } from "../process/redact.js"
@@ -20,6 +21,7 @@ import {
   type GoalRecord,
   type PlanRunRecord,
 } from "../goal/state.js"
+import { publicationStatus, setPublicationEnabled, type PublicationStatusView } from "../publish/state.js"
 
 type ModelRefLike = {
   id: string
@@ -56,6 +58,10 @@ export async function runCommand(
   }
   if (name === "halt") {
     await runHaltCommand(context, input.sessionID, args)
+    return
+  }
+  if (name === "publish") {
+    await runPublishCommand(context, input.sessionID, args, options)
     return
   }
   if (name === "handover") {
@@ -419,6 +425,106 @@ async function mutateHaltCommand(
     messages.push("automatic continuation stopped")
   }
   await emitStatus(context, sessionID, `Automation halted (${messages.join(", ")}).`)
+}
+
+/**
+ * `/publish [status|enable|disable]` — inspects or toggles the durable
+ * project-scoped publication authorization policy.
+ *
+ * This is a capability toggle, not caller authentication: enabling writes a
+ * durable record that authorizes future autonomous push, draft PR creation,
+ * ready transition, and verified approval after internal review — never
+ * issue creation and never PR merge. It does not prove a human invoked it,
+ * it never mutates Git or GitHub, and it never weakens the static
+ * `github.enabled` / `github.allow_mutations` / `worktree.enabled` /
+ * `worktree.allow_mutations` gates.
+ *
+ * `enable` additionally requires the `publish.enabled` config master switch
+ * (default off); `disable` and `status` always work so a stale durable
+ * authorization can always be inspected and revoked.
+ */
+async function runPublishCommand(context: Context, sessionID: string, args: string, options: OrchestratorOptions): Promise<void> {
+  await withSessionLock(context.location, sessionID, () => mutatePublishCommand(context, sessionID, args, options))
+}
+
+async function mutatePublishCommand(
+  context: Context,
+  sessionID: string,
+  args: string,
+  options: OrchestratorOptions,
+): Promise<void> {
+  const verb = args.trim().split(/\s+/).filter(Boolean)[0] ?? "status"
+  if (verb !== "status" && verb !== "enable" && verb !== "disable") {
+    await emitStatus(context, sessionID, "Usage: /publish [status|enable|disable]")
+    return
+  }
+
+  if (verb === "status") {
+    const status = await publicationStatus(context.storage, context.location, sessionID, options)
+    await emitStatus(context, sessionID, formatPublicationStatus(status))
+    return
+  }
+
+  const enabling = verb === "enable"
+  if (enabling && !options.publish.enabled) {
+    await emitStatus(
+      context,
+      sessionID,
+      "/publish enable refused: the publication capability is disabled by plugin configuration (publish.enabled: false). " +
+        "An operator must set publish.enabled: true in the plugin options first; the durable project policy cannot be enabled while the capability is off.",
+    )
+    return
+  }
+
+  const toggle = await setPublicationEnabled(context.storage, context.location, sessionID, enabling)
+  if (!toggle.changed && !enabling && !toggle.record.enabled) {
+    // Disabling an already-disabled record: still report the policy truth.
+    await emitStatus(context, sessionID, `Publication is already disabled for project "${toggle.record.projectID}"; no change written.`)
+    return
+  }
+  if (!toggle.changed) {
+    await emitStatus(context, sessionID, `Publication is already enabled for project "${toggle.record.projectID}"; no change written.`)
+    return
+  }
+  if (enabling) {
+    await emitStatus(
+      context,
+      sessionID,
+      `Publication enabled for project "${toggle.record.projectID}" (durable policy updated; authorized capabilities: ${toggle.record.capabilities.join(", ")}). ` +
+        "This is a capability toggle, not caller authentication: it authorizes autonomous push, draft PR creation, ready transition, and verified " +
+        "approval after internal review — never issue creation and never PR merge, which still require the static github gates and a fresh " +
+        "user-requested merge flow. No Git or GitHub mutation happened, and the static github/worktree gates are unchanged.",
+    )
+    return
+  }
+  await emitStatus(
+    context,
+    sessionID,
+    `Publication disabled for project "${toggle.record.projectID}" (durable policy updated; authorized capabilities: none). ` +
+      "Future autonomous push, draft PR creation, ready transition, and approval steps are no longer authorized by this capability. " +
+      "No Git or GitHub mutation happened.",
+  )
+}
+
+function formatPublicationStatus(status: PublicationStatusView): string {
+  const durable = status.durable
+  const state = durable.enabled ? "enabled" : "disabled"
+  const changed = durable.updatedAt !== undefined
+    ? ` (last changed by session ${durable.updatedBy ?? "unknown"} at ${new Date(durable.updatedAt).toISOString()})`
+    : " (never changed; absent records count as disabled)"
+  const capabilities = durable.enabled && durable.capabilities.length > 0
+    ? `Authorized capabilities (when enabled): ${durable.capabilities.join(", ")}.`
+    : "Authorized capabilities (when enabled): push, pr-draft-create, pr-ready-transition, approve-after-review."
+  return [
+    `Publication capability — project "${status.projectID}"`,
+    `Durable policy: ${state}${changed}`,
+    capabilities,
+    "Never authorized: issue creation or PR merge (both still require the static github gates; merge additionally needs a fresh user-requested merge flow).",
+    `Static gates: publish.enabled=${status.config.enabled}; github.enabled=${status.staticGates.githubEnabled}; ` +
+      `github.allow_mutations=${status.staticGates.githubAllowMutations}; worktree.enabled=${status.staticGates.worktreeEnabled}; ` +
+      `worktree.allow_mutations=${status.staticGates.worktreeAllowMutations}.`,
+    "Note: /publish toggles authorization policy only. It is not caller authentication, it does not prove a human invoked it, and it never mutates Git or GitHub.",
+  ].join("\n")
 }
 
 type PlanSelection = {

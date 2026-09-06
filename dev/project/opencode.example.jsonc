@@ -13,6 +13,9 @@
         },
         "max_parallel": 4,
         "strict_agents": true,
+        // GitHub lifecycle: off by default; the publication capability below
+        // never weakens these static gates (issue creation and PR merge stay
+        // gated on github.enabled + github.allow_mutations).
         "github": {
           "enabled": false,
           "allow_mutations": false
@@ -21,6 +24,15 @@
           "enabled": false,
           "allow_mutations": false,
           "root": null
+        },
+        // Durable project-scoped publication capability master gate. Default
+        // off. Setting publish.enabled: true only *permits* the durable
+        // /publish enable record to be written per project; it authorizes
+        // autonomous push / draft PR create / ready transition / verified
+        // approval (never issue creation, never PR merge) and never weakens
+        // the static gates above. Demonstrating explicit opt-in here:
+        "publish": {
+          "enabled": true
         },
         // S3/V1 controls — all opt-in, defaults preserve the previous behavior.
         // trace: off | memory | snapshot (bounded metadata summaries only)
@@ -69,6 +81,8 @@
         { "action": "orchestrator_worktree", "resource": "*", "effect": "allow" },
         { "action": "orchestrator_validation", "resource": "*", "effect": "allow" },
         { "action": "orchestrator_observability", "resource": "*", "effect": "allow" },
+        { "action": "orchestrator_publish", "resource": "*", "effect": "allow" },
+        { "action": "orchestrator_peer", "resource": "*", "effect": "allow" },
         { "action": "read", "resource": "*", "effect": "allow" },
         { "action": "glob", "resource": "*", "effect": "allow" },
         { "action": "grep", "resource": "*", "effect": "allow" },
@@ -95,6 +109,8 @@
         { "action": "orchestrator_worktree", "resource": "*", "effect": "deny" },
         { "action": "orchestrator_validation", "resource": "*", "effect": "deny" },
         { "action": "orchestrator_observability", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_publish", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_peer", "resource": "*", "effect": "deny" },
         { "action": "read", "resource": "*", "effect": "allow" },
         { "action": "glob", "resource": "*", "effect": "allow" },
         { "action": "grep", "resource": "*", "effect": "allow" },
@@ -117,6 +133,8 @@
         { "action": "orchestrator_worktree", "resource": "*", "effect": "deny" },
         { "action": "orchestrator_validation", "resource": "*", "effect": "deny" },
         { "action": "orchestrator_observability", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_publish", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_peer", "resource": "*", "effect": "deny" },
         { "action": "read", "resource": "*", "effect": "allow" },
         { "action": "glob", "resource": "*", "effect": "allow" },
         { "action": "grep", "resource": "*", "effect": "allow" },
@@ -138,6 +156,8 @@
         { "action": "orchestrator_worktree", "resource": "*", "effect": "deny" },
         { "action": "orchestrator_validation", "resource": "*", "effect": "deny" },
         { "action": "orchestrator_observability", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_publish", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_peer", "resource": "*", "effect": "deny" },
         { "action": "read", "resource": "*", "effect": "allow" },
         { "action": "glob", "resource": "*", "effect": "allow" },
         { "action": "grep", "resource": "*", "effect": "allow" },
@@ -163,6 +183,8 @@
         { "action": "orchestrator_worktree", "resource": "*", "effect": "deny" },
         { "action": "orchestrator_validation", "resource": "*", "effect": "deny" },
         { "action": "orchestrator_observability", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_publish", "resource": "*", "effect": "deny" },
+        { "action": "orchestrator_peer", "resource": "*", "effect": "deny" },
         { "action": "read", "resource": "*", "effect": "allow" },
         { "action": "glob", "resource": "*", "effect": "allow" },
         { "action": "grep", "resource": "*", "effect": "allow" },

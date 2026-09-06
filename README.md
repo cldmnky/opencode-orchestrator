@@ -532,8 +532,8 @@ bun run build            # emits dist/index.js, dist/tui.js, dist/commands.js, d
 
 Tested against:
 
-- `@opencode-ai/plugin` `0.0.0-beta-19151`
-- `@opencode-ai/sdk` `0.0.0-dev-19152` (integration tests)
+- `@opencode-ai/plugin` `0.0.0-beta-19192`
+- `@opencode-ai/sdk` `0.0.0-beta-19192` (integration tests)
 
 Main plugin sets `tui: true` and publishes `./tui`. CLI-only config belongs in `cli.json`.
 

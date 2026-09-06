@@ -284,15 +284,13 @@ export function assertFullSha(value: string, label: string): string {
 }
 
 /**
- * Ref used inside a URL path segment (`repos/{o}/{r}/branches/{branch}` and
- * `.../compare/{base}...{head}`): no '/', no whitespace, no leading dash.
- * Branch names containing '/' (and therefore fork `owner:branch` heads) are
- * refused (fail closed) rather than risked in the endpoint path.
+ * Validate a ref before it is encoded into a URL path segment. GitHub branch
+ * names commonly contain '/', so the raw ref is preserved and encoded by the
+ * endpoint builder rather than rejected as though the slash were a route
+ * separator.
  */
 export function assertRefSegment(value: string, label: string): string {
-  const ref = assertRef(value, label)
-  if (ref.includes("/")) throw new Error(`${label} must not contain '/' (path segment ref)`)
-  return ref
+  return assertRef(value, label)
 }
 
 export function assertReviewEvent(value: string): PullReviewEvent {
@@ -907,10 +905,15 @@ export function pullReviewsEndpoint(owner: string, repo: string, number: number)
 
 /** Fixed endpoint template: `repos/{owner}/{repo}/branches/{branch}`. */
 export function branchEndpoint(owner: string, repo: string, branch: string): string {
-  return `repos/${owner}/${repo}/branches/${assertRefSegment(branch, "branch")}`
+  return `repos/${owner}/${repo}/branches/${encodeRefSegment(branch, "branch")}`
 }
 
 /** Fixed endpoint template: `repos/{owner}/{repo}/compare/{base}...{head}`. */
 export function compareEndpoint(owner: string, repo: string, base: string, head: string): string {
-  return `repos/${owner}/${repo}/compare/${assertRefSegment(base, "base")}...${assertRefSegment(head, "head")}`
+  return `repos/${owner}/${repo}/compare/${encodeRefSegment(base, "base")}...${encodeRefSegment(head, "head")}`
+}
+
+/** Encode one validated ref without allowing it to add URL path segments. */
+function encodeRefSegment(value: string, label: string): string {
+  return encodeURIComponent(assertRefSegment(value, label))
 }

@@ -16,7 +16,9 @@ import {
   assertRefSegment,
   assertRepoSlug,
   assertReviewEvent,
+  branchEndpoint,
   compareRefs,
+  compareEndpoint,
   createIssue,
   createPull,
   createPullReview,
@@ -563,15 +565,22 @@ describe("gh pulls", () => {
     expect(assertPullShape({ ...PULL }).draft).toBe(true)
   })
 
-  test("assertFullSha and assertRefSegment enforce exact-revision tokens and path-safe refs", () => {
+  test("assertFullSha and assertRefSegment enforce exact-revision tokens and preserve valid refs", () => {
     expect(assertFullSha(HEAD_SHA, "head")).toBe(HEAD_SHA)
     expect(() => assertFullSha(HEAD_SHA.toUpperCase(), "head")).toThrow(/lowercase hex git SHA/)
     expect(() => assertFullSha("abc1234", "head")).toThrow(/lowercase hex git SHA/)
     expect(() => assertFullSha("  ", "head")).toThrow(/lowercase hex git SHA/)
     expect(assertRefSegment("feature", "head")).toBe("feature")
-    expect(() => assertRefSegment("feat/ure", "head")).toThrow(/path segment ref/)
+    expect(assertRefSegment("feat/ure", "head")).toBe("feat/ure")
     expect(() => assertRefSegment("-x", "head")).toThrow(/must not start with '-'/)
     expect(() => assertRefSegment("a b", "head")).toThrow(/not a valid ref/)
+  })
+
+  test("encodes slashed refs as single URL path segments", () => {
+    expect(branchEndpoint("acme", "widgets", "feat/ure")).toBe("repos/acme/widgets/branches/feat%2Fure")
+    expect(compareEndpoint("acme", "widgets", "main", "feat/ure")).toBe(
+      "repos/acme/widgets/compare/main...feat%2Fure",
+    )
   })
 })
 
@@ -606,19 +615,23 @@ describe("gh current user, branch refs, and compare", () => {
     expect(calls[0]?.args).toEqual(["api", "--method", "GET", "repos/acme/widgets/branches/feature"])
   })
 
-  test("getBranchRef refuses abbreviated shas and slashed branch names", async () => {
+  test("getBranchRef refuses abbreviated shas and accepts slashed branch names", async () => {
     const { runner } = scriptedGh((call) => {
       if (call.args.includes("repos/acme/widgets/branches/short")) {
         return ok(branchJson("short", "abc1234"))
+      }
+      if (call.args.includes("repos/acme/widgets/branches/feat%2Fure")) {
+        return ok(branchJson("feat/ure", HEAD_SHA))
       }
       return undefined
     })
     await expect(getBranchRef({ runner }, { owner: "acme", repo: "widgets", branch: "short" })).rejects.toThrow(
       /full 40- or 64-character lowercase hex git SHA/,
     )
-    await expect(getBranchRef({ runner }, { owner: "acme", repo: "widgets", branch: "feat/ure" })).rejects.toThrow(
-      /path segment ref/,
-    )
+    await expect(getBranchRef({ runner }, { owner: "acme", repo: "widgets", branch: "feat/ure" })).resolves.toEqual({
+      name: "feat/ure",
+      sha: HEAD_SHA,
+    })
   })
 
   test("compareRefs derives ancestor from the fixed compare endpoint", async () => {
@@ -643,6 +656,18 @@ describe("gh current user, branch refs, and compare", () => {
     const cmp = await compareRefs({ runner }, { owner: "acme", repo: "widgets", base: "main", head: "feature" })
     expect(cmp.ancestor).toBe(false)
     expect(cmp.status).toBe("diverged")
+  })
+
+  test("compareRefs accepts slashed branch names and encodes them in the endpoint", async () => {
+    const { runner, calls } = scriptedGh((call) => {
+      if (call.args.includes("repos/acme/widgets/compare/main...feat%2Fure")) {
+        return ok(compareJson("ahead", 2, 0, BASE_SHA))
+      }
+      return undefined
+    })
+    const cmp = await compareRefs({ runner }, { owner: "acme", repo: "widgets", base: "main", head: "feat/ure" })
+    expect(cmp).toEqual({ status: "ahead", aheadBy: 2, behindBy: 0, baseSha: BASE_SHA, ancestor: true })
+    expect(calls[0]?.args).toEqual(["api", "--method", "GET", "repos/acme/widgets/compare/main...feat%2Fure"])
   })
 
   test("compareRefs fails closed on unsupported status, negative counts, and missing base_commit", async () => {
@@ -1358,6 +1383,35 @@ describe("github tools", () => {
         "GET repos/acme/widgets/branches/feature",
         "GET repos/acme/widgets/branches/main",
         "GET repos/acme/widgets/compare/main...feature",
+        "POST repos/acme/widgets/pulls",
+      ])
+    })
+
+    test("accepts established feat/... branch names without changing the exact publication gates", async () => {
+      const head = "feat/ure"
+      const { runner, calls } = scriptedGh((call, _calls, body) => {
+        if (call.args.includes("repos/acme/widgets/branches/feat%2Fure")) return ok(branchJson(head, HEAD_SHA))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feat%2Fure")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls")) {
+          expect(body).toMatchObject({ head, base: "main", draft: true })
+          return ok(JSON.stringify({ ...PULL, head: { ref: head, sha: HEAD_SHA } }))
+        }
+        return undefined
+      })
+      const { tools } = collectGhTools({ runner, storage: CREATE_STORAGE })
+      const output = await tools
+        .get("github_pr_create")!
+        .execute({ ...createInput, head }, toolContext("session-1", "orchestrator"))
+      const parsed = JSON.parse(output.content) as PullInfo & { verified: boolean }
+      expect(parsed.verified).toBe(true)
+      expect(parsed.head).toEqual({ ref: head, sha: HEAD_SHA })
+      expect(calls.map((call) => `${call.args[2]} ${call.args.at(-1)}`)).toEqual([
+        "GET repos/acme/widgets/branches/feat%2Fure",
+        "GET repos/acme/widgets/branches/main",
+        "GET repos/acme/widgets/compare/main...feat%2Fure",
         "POST repos/acme/widgets/pulls",
       ])
     })

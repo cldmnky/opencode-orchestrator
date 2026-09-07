@@ -22,7 +22,7 @@
   "scripts": {
     "build": "bun run build:plugin && bun run build:tui && bun run build:commands && bun run build:installer && bun run build:cli",
     "build:plugin": "bun build src/index.ts --outdir dist --target bun --format esm",
-    "build:tui": "bun build src/tui.ts --outfile dist/tui.js --target bun --format esm",
+    "build:tui": "bun build src/tui.ts --outfile dist/tui.js --target bun --format esm --external solid-js --external @opentui/solid --external @opentui/core",
     "build:commands": "bun build src/opencode-v2/commands/index.ts --outfile dist/commands.js --target bun --format esm",
     "build:installer": "bun build src/cli/install.ts --outfile dist/installer.js --target bun --format esm",
     "build:cli": "bun build src/cli/index.ts --outfile dist/cli/index.js --target bun --format esm",
@@ -37,6 +37,11 @@
     "@opencode-ai/plugin": "0.0.0-beta-19192",
     "jsonc-parser": "3.3.1",
     "zod": "4.1.8"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.10",
+    "@opentui/solid": ">=0.5.10",
+    "solid-js": ">=1.9.0"
   },
   "devDependencies": {
     "@opencode-ai/sdk": "0.0.0-beta-19192",

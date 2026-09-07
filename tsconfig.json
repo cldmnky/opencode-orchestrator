@@ -7,7 +7,9 @@
     "noEmit": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
-    "types": ["bun"]
+    "types": ["bun"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/solid"
   },
   "include": ["src", "test", "scripts"]
 }

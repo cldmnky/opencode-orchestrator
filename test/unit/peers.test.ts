@@ -180,12 +180,14 @@ describe("peer query", () => {
 })
 
 describe("peer tools", () => {
-  test("registers peer_list with the shared peer permission action", () => {
+  test("registers peer_list and session_status with the shared peer permission action", () => {
     const { tools } = collectPeerTools()
-    expect([...tools.keys()]).toEqual(["peer_list"])
-    const tool = tools.get("peer_list")!
-    expect(tool.options?.namespace).toBe("orchestrator")
-    expect(tool.options?.permission).toBe(PEER_TOOL_PERMISSION)
+    expect([...tools.keys()]).toEqual(["peer_list", "session_status"])
+    for (const name of ["peer_list", "session_status"]) {
+      const tool = tools.get(name)!
+      expect(tool.options?.namespace).toBe("orchestrator")
+      expect(tool.options?.permission).toBe(PEER_TOOL_PERMISSION)
+    }
   })
 
   test("gates the peer query to the orchestrator agent", async () => {

@@ -244,8 +244,20 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
         }
         let status: WorktreeRecord["status"] = record?.status ?? "pending"
         if (!present) status = "orphaned"
-        else if (dirtyText.length > 0) status = "dirty"
-        else if (record) status = "ready"
+        else if (
+          dirtyText.length > 0 &&
+          record?.status !== "moved" &&
+          record?.status !== "cleanup-failed"
+        ) {
+          status = "dirty"
+        }
+        else if (record && (record.status === "moved" || record.status === "cleanup-failed")) {
+          // A clean checkout does not undo a lifecycle transition. In
+          // particular, `moved` is the durable proof that the owning session
+          // entered the tree; turning it back into `ready` would permit a
+          // second enter while the event/reconciler is still catching up.
+          status = record.status
+        } else if (record) status = "ready"
         let current = record
         if (record && status !== record.status) {
           current = await writeWorktree(deps.storage, { ...record, status })
@@ -603,7 +615,7 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
         if (!record) {
           return result("worktree_enter: no tracked worktree for this session; create one with orchestrator_worktree_create first")
         }
-        if (record.status !== "ready") {
+        if (record.status !== "ready" && record.status !== "moved") {
           return result(`worktree_enter refused: tracked worktree is ${record.status}; only a ready worktree can be entered`)
         }
         // The record's dir is already the canonical form persisted at create;
@@ -612,9 +624,35 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
         const directory = await canon(record.dir)
         const outcome = await moveSessionToDirectory(
           { session: deps.session, storage: deps.storage, location: deps.location, moveCoordinator: deps.moveCoordinator },
-          { sessionID: tool.sessionID, target: directory },
+          {
+            sessionID: tool.sessionID,
+            target: directory,
+            // V2 current-session moves complete at the next safe boundary.
+            // A failed immediate read is therefore a pending request, not a
+            // successful entry; the event sync will reconcile it after this
+            // tool returns. For an already-moved record, only verify and
+            // reconcile the current location—never enqueue a second move.
+            deferVerification: true,
+            ...(record.status === "moved" ? { reconcileOnly: true } : {}),
+          },
         )
         if (!outcome.ok) {
+          if (outcome.pending) {
+            return result(
+              JSON.stringify({
+                entered: false,
+                pending: true,
+                directory,
+                sessionID: tool.sessionID,
+                message:
+                  "session move accepted but entry is pending the next safe boundary; do not delegate yet, and retry orchestrator_worktree_enter after the session.moved event",
+                reason: redactor(outcome.reason),
+              }),
+            )
+          }
+          if (record.status === "moved") {
+            return result("worktree_enter refused: tracked worktree is moved; only a ready worktree can be entered")
+          }
           return result(`worktree_enter failed: ${redactor(outcome.reason)}`)
         }
         // The helper relocated/marked the anchor and index and flipped the

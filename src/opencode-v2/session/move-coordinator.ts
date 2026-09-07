@@ -14,7 +14,7 @@ export type SessionMoveCoordinator = {
 export type SessionMoveLease = {
   /** The native move completed; suppress its matching event reconciliation. */
   suppressEvent(): void
-  /** The native move did not complete; allow a future event to reconcile. */
+  /** The move was not verified by the helper; allow an event to reconcile. */
   cancel(): void
 }
 

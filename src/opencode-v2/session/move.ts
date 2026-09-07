@@ -77,9 +77,17 @@ export type MoveSessionInput = {
   /** Raw target: absolute, or relative to the session's current directory. */
   target: string
   delivery?: "steer" | "queue" | null
+  /**
+   * OpenCode V2 may accept a current-session move for the next safe boundary.
+   * When set, a bounded read-after-write miss is reported as pending so the
+   * `session.moved` backstop can reconcile it after the tool returns.
+   */
+  deferVerification?: boolean
+  /** Reconcile an already-completed move without enqueueing another one. */
+  reconcileOnly?: boolean
 }
 
-export type MoveSessionFailure = { ok: false; reason: string }
+export type MoveSessionFailure = { ok: false; reason: string; pending?: boolean }
 export type MoveSessionSuccess = { ok: true; session: SessionInfoLike; anchor: SessionAnchor }
 export type MoveSessionOutcome = MoveSessionSuccess | MoveSessionFailure
 
@@ -95,6 +103,7 @@ export async function moveSessionToDirectory(deps: MoveSessionDeps, input: MoveS
     return { ok: false, reason: "could not read the current session before moving" }
   }
   if (!before) return { ok: false, reason: "could not read the current session before moving" }
+  if (before.id !== input.sessionID) return { ok: false, reason: "session move verification failed: session ID changed" }
 
   const baseDirectory = typeof before.location?.directory === "string" ? before.location.directory : deps.location.directory
   const invalid = validateTarget(input.target)
@@ -105,6 +114,28 @@ export async function moveSessionToDirectory(deps: MoveSessionDeps, input: MoveS
   const info = await probe(target)
   if (!info.exists) return { ok: false, reason: `target does not exist: ${redact(target)}` }
   if (!info.isDirectory) return { ok: false, reason: `target is not a directory: ${redact(target)}` }
+
+  const canonicalTarget = await canonicalDirectory(target)
+  const beforeDirectory = typeof before.location?.directory === "string" ? before.location.directory : ""
+  if (beforeDirectory && (await canonicalDirectory(beforeDirectory)) === canonicalTarget) {
+    try {
+      const anchor = await relocateAnchor(deps, input.sessionID, {
+        before,
+        after: before,
+        target,
+        fallbackOrigin: { directory: baseDirectory, projectID: before.projectID ?? deps.location.project.id },
+      })
+      return { ok: true, session: before, anchor }
+    } catch (error) {
+      return { ok: false, reason: `session move reconciliation failed: ${redact(errorMessage(error))}` }
+    }
+  }
+  if (input.reconcileOnly) {
+    return {
+      ok: false,
+      reason: `session move verification failed: session is at ${redact(beforeDirectory)}, expected ${redact(canonicalTarget)}`,
+    }
+  }
 
   const workspaceID = typeof before.location?.workspaceID === "string" ? before.location.workspaceID : deps.location.workspaceID
   const lease = deps.moveCoordinator?.begin(input.sessionID, target)
@@ -120,22 +151,46 @@ export async function moveSessionToDirectory(deps: MoveSessionDeps, input: MoveS
     return { ok: false, reason: `session move failed: ${redact(errorMessage(error))}` }
   }
 
+  let verified: Awaited<ReturnType<typeof verifyMovedSession>>
   try {
-    const verified = await verifyMovedSession(deps, input.sessionID, target)
-    if (!verified.ok) return verified
-    const after = verified.session
+    verified = await verifyMovedSession(deps, input.sessionID, target)
+  } catch (error) {
+    if (input.deferVerification) lease?.cancel()
+    else lease?.suppressEvent()
+    throw error
+  }
+  if (!verified.ok) {
+    if (input.deferVerification) {
+      // The V2 API accepted the move, but the current session cannot expose
+      // its new location until the current execution reaches a safe boundary.
+      // Let the event backstop reconcile after this tool has returned. This
+      // result is deliberately not a successful enter receipt.
+      lease?.cancel()
+      return { ...verified, pending: true }
+    }
+    // A helper-owned event must not mutate durable state when the helper was
+    // asked to require immediate verification. The caller can retry safely.
+    lease?.suppressEvent()
+    return verified
+  }
 
+  const after = verified.session
+  try {
     const anchor = await relocateAnchor(deps, input.sessionID, {
       before,
       after,
       target,
       fallbackOrigin: { directory: baseDirectory, projectID: before.projectID ?? deps.location.project.id },
     })
-    return { ok: true, session: after, anchor }
-  } finally {
     // A successful native move may emit before, during, or just after the
     // verification loop. Only this helper may reconcile that event.
     lease?.suppressEvent()
+    return { ok: true, session: after, anchor }
+  } catch (error) {
+    // Durable reconciliation failed after the native move was verified. Let
+    // the event backstop repair the durable state instead of swallowing it.
+    lease?.cancel()
+    throw error
   }
 }
 

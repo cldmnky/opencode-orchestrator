@@ -379,7 +379,7 @@ Give the current session a separate checkout and branch without changing your ma
 ```
 
 - One managed worktree per current session, under the `root` you choose
-- The orchestrator creates → enters → then delegates. Entering moves only the current session; delegated children inherit and share that context, not an atomic sandbox.
+- The orchestrator creates → enters → then delegates. Entering moves only the current session; delegated children inherit and share that context, not an atomic sandbox. OpenCode may complete a current-session move at the next safe boundary, so a pending enter is not a receipt—retry until `entered:true` before delegating.
 - Create, sync, push, and cleanup require `worktree.allow_mutations: true` and a literal `confirm: true` on each call. Enter requires neither beyond `worktree.enabled: true`.
 - `orchestrator_worktree_sync` fetches the latest remote base branch and merges it into the tracked branch when needed, recording an exact-revision sync receipt. It refuses a dirty tree and never resolves conflicts automatically: a conflicted merge is aborted and reported truthfully (safe relative unmerged paths only). After a conflict, the orchestrator autonomously delegates an implementer to perform the merge/resolution in the tracked worktree, then reruns verification and sync, commits, and restarts the exact-revision review — stopping only if the conflicts cannot safely be resolved.
 - Verify: `./node_modules/.bin/opencode-v2-agent-orchestrator doctor` checks `git worktree list`

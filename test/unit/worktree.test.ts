@@ -43,7 +43,7 @@ import {
 import { addWorktreeTools } from "../../src/opencode-v2/worktree/tools.js"
 import { startWorktreeEventSync } from "../../src/opencode-v2/worktree/events.js"
 import { moveSessionToDirectory } from "../../src/opencode-v2/session/move.js"
-import { createSessionMoveCoordinator } from "../../src/opencode-v2/session/move-coordinator.js"
+import { createSessionMoveCoordinator, type SessionMoveCoordinator } from "../../src/opencode-v2/session/move-coordinator.js"
 import { sessionAnchorStorageKey, type SessionAnchor } from "../../src/opencode-v2/session/state.js"
 import { evidenceSchema, type EvidenceRecord } from "../../src/opencode-v2/orchestration/evidence.js"
 import { reviewStorageKey, type ReviewV1Record } from "../../src/opencode-v2/observability/review.js"
@@ -399,6 +399,7 @@ function collectWorktreeTools(deps: {
   runner?: ProcessRunner
   pathExists?: (directory: string) => Promise<boolean>
   session?: Parameters<typeof addWorktreeTools>[1]["session"]
+  moveCoordinator?: SessionMoveCoordinator
 } = {}): { tools: Map<string, ToolLike>; values: Map<string, unknown> } {
   const values = deps.values ?? new Map<string, unknown>()
   const storage = memStorage(values)
@@ -418,6 +419,7 @@ function collectWorktreeTools(deps: {
       session: deps.session ?? sessionFixture({ id: "session-1", projectID: "origin", directory: "/workspace" }),
       pathExists: deps.pathExists,
       secrets: ["supersecret-token"],
+      moveCoordinator: deps.moveCoordinator,
     },
   )
   return { tools, values }
@@ -1202,6 +1204,68 @@ describe("worktree tools", () => {
       expect(output.content).toContain("verification failed")
       expect(output.content).not.toContain("evidence")
     })
+
+    test("returns a pending receipt for a queued current-session move and requires a later verified enter", async () => {
+      const tracked = await mkdtemp(path.join(tmpdir(), "orchestrator-enter-"))
+      const canonical = await resolveRealpath(tracked)
+      const values = new Map<string, unknown>()
+      const stream = createEventStream()
+      const moveCoordinator = createSessionMoveCoordinator()
+      const base = sessionFixture({ id: "session-1", projectID: "origin", directory: "/workspace" })
+      let current = base.state()
+      const session = {
+        get: async () => ({
+          id: current.id,
+          projectID: current.projectID,
+          location: { directory: current.directory },
+        }),
+        move: async (input: Record<string, unknown>) => {
+          // The real V2 server queues a move for the next safe boundary. Keep
+          // the fake old until after the helper's bounded verification window.
+          setTimeout(() => {
+            current = { ...current, directory: String(input.directory) }
+            stream.push({
+              type: "session.moved",
+              data: {
+                sessionID: "session-1",
+                projectID: "origin",
+                location: { directory: String(input.directory) },
+              },
+            })
+          }, 220)
+        },
+      }
+      const { tools } = collectWorktreeTools({ values, session, moveCoordinator })
+      seedRecord(values, { dir: canonical })
+      values.set(sessionIndexStorageKey("session-1"), {
+        version: 1,
+        sessionID: "session-1",
+        projectID: "origin",
+        originProjectID: "origin",
+        directory: "/workspace",
+        updatedAt: 100,
+      })
+      const stop = startWorktreeEventSync(
+        { event: { subscribe: () => stream }, storage: memStorage(values), moveCoordinator },
+        parseOptions({}),
+      )
+
+      const first = await tools.get("worktree_enter")!.execute({}, toolContext("session-1", "orchestrator"))
+      const pending = JSON.parse(first.content) as { entered: boolean; pending: boolean; message: string }
+      expect(pending).toMatchObject({ entered: false, pending: true })
+      expect(pending.message).toContain("do not delegate yet")
+      expect((values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord).status).toBe("ready")
+
+      await waitFor(() => (values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord | undefined)?.status === "moved")
+      const second = await tools.get("worktree_enter")!.execute({}, toolContext("session-1", "orchestrator"))
+      const entered = JSON.parse(second.content) as { entered: boolean; record: WorktreeRecord }
+      expect(entered.entered).toBe(true)
+      expect(entered.record.status).toBe("moved")
+      expect(current.directory).toBe(canonical)
+
+      await stop()
+      moveCoordinator.dispose()
+    })
   })
 
   test("requires allow_mutations for create but not for list", async () => {
@@ -1321,6 +1385,23 @@ describe("worktree tools", () => {
     seedRecord(orphaned.values)
     const orphanOut = await orphaned.tools.get("worktree_status")!.execute({}, toolContext("session-1", "orchestrator"))
     expect((JSON.parse(orphanOut.content) as { status: string }).status).toBe("orphaned")
+  })
+
+  test("status preserves moved lifecycle state when the clean worktree is still present", async () => {
+    const { tools, values } = collectWorktreeTools({
+      runner: scriptedGit((call) => {
+        if (call.args[0] === "worktree" && call.args[1] === "list") return ok(`${MAIN_ONLY}\n\nworktree /srv/worktrees/feature`)
+        if (call.args[0] === "status") return ok("")
+        return undefined
+      }).runner,
+    })
+    seedRecord(values, { status: "moved" })
+
+    const output = await tools.get("worktree_status")!.execute({}, toolContext("session-1", "orchestrator"))
+    const parsed = JSON.parse(output.content) as { status: string; record: WorktreeRecord }
+    expect(parsed.status).toBe("moved")
+    expect(parsed.record.status).toBe("moved")
+    expect((values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord).status).toBe("moved")
   })
 
   test("sync merges the latest remote base into the tracked branch and persists an exact-revision receipt", async () => {

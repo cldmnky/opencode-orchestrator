@@ -31,6 +31,7 @@ import { PEER_TOOL_PERMISSION } from "../../core/permissions.js"
 import {
   goalProjectPrefix,
   goalSessionIDFromKey,
+  goalStorageKey,
   parseGoalRecord,
   stableProjectID,
   type GoalRecord,
@@ -38,7 +39,9 @@ import {
   type LocationLike,
   type StorageLike,
 } from "../goal/state.js"
+import { parseReviewRecord, reviewStorageKey, type ReviewV1State } from "../observability/review.js"
 import { redactKnownPatterns } from "../process/redact.js"
+import { readWorktree, type WorktreeStatus } from "../worktree/state.js"
 import type { Info as ToolInfo } from "@opencode-ai/plugin/promise/tool"
 
 type ToolDraftLike = {
@@ -101,6 +104,31 @@ export function addPeerTools(draft: ToolDraftLike, deps: { storage: StorageLike;
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
       const result = await queryPeerGoals(deps.storage, deps.location, {
+        selfSessionID: tool.sessionID,
+        limit: numberField(input, "limit"),
+        after: stringField(input, "after"),
+        includeSelf: booleanField(input, "includeSelf"),
+      })
+      return resultContent(JSON.stringify(result))
+    },
+  })
+  draft.add({
+    name: "session_status",
+    description:
+      "Read-only bounded status metadata for orchestrator sessions in the same stable project. With a sessionID, returns the goal/worktree/review summary for that one session (summary null when no readable goal record exists). Without one, returns a bounded, cursor-paginated session list with the same ordering and cursor semantics as orchestrator_peer_list. Metadata only: redacted and truncated objective hints, branch names, and worktree paths; never full objectives, transcripts, files, credentials, SHAs, task IDs, repos, or bases. Orchestrator-only.",
+    input: sessionStatusInput,
+    options: { namespace: "orchestrator", permission: PEER_TOOL_PERMISSION },
+    execute: async (input, tool) => {
+      requireOrchestrator(tool.agent, deps.options)
+      const sessionID = stringField(input, "sessionID")
+      if (sessionID) {
+        const result = await querySessionStatus(deps.storage, deps.location, {
+          selfSessionID: tool.sessionID,
+          sessionID,
+        })
+        return resultContent(JSON.stringify(result))
+      }
+      const result = await querySessionStatuses(deps.storage, deps.location, {
         selfSessionID: tool.sessionID,
         limit: numberField(input, "limit"),
         after: stringField(input, "after"),
@@ -234,6 +262,240 @@ function resultContent(content: string): ToolResult {
 const peerListInput = {
   type: "object",
   properties: {
+    limit: { type: "integer", minimum: 1, maximum: PEER_RESULT_LIMIT_MAX },
+    after: { type: "string", minLength: 1, maxLength: 512 },
+    includeSelf: { type: "boolean" },
+  },
+  additionalProperties: false,
+} as const
+
+/**
+ * Read-only session status query (`orchestrator_session_status`).
+ *
+ * Compact, durable, metadata-only status for the caller's stable project:
+ * for one named session (goal/worktree/review joins, each null when missing
+ * or malformed) or for sessions discoverable through the same bounded
+ * `goal/v1/<project>/` scan used by `queryPeerGoals` (identical limit,
+ * scan cap, page size, cursor, ordering, and self-filter semantics).
+ * Everything is keyed under the caller-resolved stable project only; no
+ * mutation, no git/gh, and no review transitions happen here. Objective
+ * hints, branch names, and worktree paths are known-pattern-redacted and
+ * length-truncated; SHAs, task IDs, repos, bases, evidence, transcripts,
+ * and credentials never leave the query.
+
+ */
+export const SESSION_STATUS_LIMITATIONS = [
+  "metadata only: redacted and truncated objective hints, branch names, and worktree paths; never full objectives, evidence, transcripts, prompts, files, credentials, SHAs, task IDs, repos, or bases",
+  "same stable project only: goal, worktree,and review records keyed under other projects are never read",
+  "no live completeness guarantee: sessions without a readable goal record (or with a malformed one) yield no summary (null in single mode, absent from lists); missing or malformed worktree/review joins are null",
+  "read-only: this query never mutates storage, Git, or GitHub",
+] as const
+
+const SESSION_STATUS_BRANCH_LENGTH = 120
+const SESSION_STATUS_PATH_LENGTH = 240
+
+export type SessionStatusSummary = {
+  sessionID: string
+  goal: { status: GoalStatus; objectiveHint: string } | null
+  worktree: { status: WorktreeStatus; branch: string; dir: string } | null
+  review: { state: ReviewV1State } | null
+}
+
+export type SessionStatusSingleInput = {
+  selfSessionID: string
+  sessionID: string
+}
+
+export type SessionStatusListInput = {
+  selfSessionID: string
+  limit?: number
+  /** Resume cursor: only sessions with sessionID strictly greater than this. */
+  after?: string
+  includeSelf?: boolean
+}
+
+export type SessionStatusSingleResult = {
+  version: 1
+  projectID: string
+  /** Null when no readable goal record exists for the requested session. */
+  summary: SessionStatusSummary | null
+  limitations: readonly string[]
+}
+
+export type SessionStatusListResult = {
+  version: 1
+  projectID: string
+  sessions: SessionStatusSummary[]
+  /** Cursor for the next page (last returned sessionID) when more may exist. */
+  next?: string
+  /** False when scan is unavailable or the bounded scan cap was hit. */
+  complete: boolean
+  /** Malformed or out-of-shape scan entries skipped while collecting. */
+  skipped: number
+  limitations: readonly string[]
+}
+
+/**
+ * Single-session status query: reads goal, worktree,and review under the
+ * caller-resolved stable project only. Returns a null summary when no
+ * readable goal record exists for the requested session.
+
+ */
+export async function querySessionStatus(
+  storage: StorageLike,
+  location: LocationLike,
+  input: SessionStatusSingleInput,
+): Promise<SessionStatusSingleResult> {
+
+
+  const projectID = await stableProjectID(storage, location, input.selfSessionID)
+  const goal = parseGoalRecord(await storage.get(goalStorageKey({ ...location, project: { id: projectID } }, input.sessionID)))
+  if (!goal) {
+    return {
+      version: 1,
+      projectID,
+      summary: null,
+      limitations: SESSION_STATUS_LIMITATIONS,
+    }
+  }
+  const summary = await summarizeSessionStatus(storage, projectID, input.sessionID, goal)
+  return { version: 1, projectID, summary, limitations: SESSION_STATUS_LIMITATIONS }
+}
+
+/**
+ * Bounded same-project session status list: identical scan bounds, cap,
+ * page size, cursor, ordering,and self-filter as `queryPeerGoals`, but
+ * each returned session additionally joins its worktree/review records (both
+ * null when missing or malformed; only the returned slice is joined).
+ */
+export async function querySessionStatuses(
+  storage: StorageLike,
+  location: LocationLike,
+  input: SessionStatusListInput,
+): Promise<SessionStatusListResult> {
+
+
+  const projectID = await stableProjectID(storage, location, input.selfSessionID)
+  const resultLimit = normalizeLimit(input.limit)
+  const cursor = input.after?.trim() ?? ""
+  const includeSelf = input.includeSelf === true
+  const prefix = goalProjectPrefix(projectID)
+
+  if (!storage.scan) {
+    return {
+      version: 1,
+      projectID,
+      sessions: [],
+      complete: false,
+      skipped: 0,
+      limitations: [...SESSION_STATUS_LIMITATIONS, "storage.scan is unavailable in this storage backend; no session records could be read"],
+    }
+  }
+
+  type Candidate = { sessionID: string; goal: GoalRecord }
+  const candidates: Candidate[] = []
+  const seen = new Set<string>()
+  let skipped = 0
+  let scanned = 0
+  let capped = false
+  let afterKey: string | undefined
+
+
+  scanLoop: for (;;) {
+    const page = await storage.scan({ prefix, after: afterKey, limit: PEER_SCAN_PAGE_SIZE })
+    for (const entry of page.entries) {
+      scanned += 1
+      if (scanned > PEER_SCAN_ENTRY_CAP) {
+
+
+
+        capped = true
+        break scanLoop
+      }
+      const sessionID = goalSessionIDFromKey(entry.key, projectID)
+      const record = parseGoalRecord(entry.value)
+      if (!sessionID || !record) {
+        skipped += 1
+        continue
+      }
+      if (seen.has(sessionID)) continue
+      seen.add(sessionID)
+      // Resume cursor: strictly-greater comparison keeps pages disjoint even
+      // though every page rescans from the prefix.
+
+
+      if (cursor.length > 0 && sessionID <= cursor) continue
+      if (!includeSelf && sessionID === input.selfSessionID) continue
+      candidates.push({ sessionID, goal: record })
+    }
+    if (capped || !page.next) break
+    afterKey = page.next
+  }
+
+
+  // Deterministic ordering regardless of backend scan order.
+
+  candidates.sort((a, b) => (a.sessionID < b.sessionID ? -1 : a.sessionID > b.sessionID ? 1 : 0))
+  const selected = candidates.slice(0, resultLimit)
+  const sessions: SessionStatusSummary[] = []
+  for (const { sessionID, goal } of selected) {
+    sessions.push(await summarizeSessionStatus(storage, projectID, sessionID, goal))
+  }
+  const complete = !capped
+  const next = candidates.length > resultLimit ? selected[selected.length - 1]?.sessionID : undefined
+  return { version: 1, projectID, sessions, ...(next !== undefined ? { next } : {}), complete, skipped, limitations: SESSION_STATUS_LIMITATIONS }
+}
+
+async function summarizeSessionStatus(
+  storage: StorageLike,
+  projectID: string,
+  sessionID: string,
+  goal: GoalRecord,
+): Promise<SessionStatusSummary> {
+
+
+  const worktree = await readWorktree(storage, projectID, sessionID)
+  const review = parseReviewRecord(await storage.get(reviewStorageKey({ project: { id: projectID } }, sessionID)))
+  return {
+    sessionID,
+    goal: { status: goal.status, objectiveHint: objectiveHint(goal.objective) },
+    worktree: worktree
+      ? {
+          status: worktree.status,
+          branch: redactAndTruncate(worktree.branch, SESSION_STATUS_BRANCH_LENGTH),
+          dir: redactPath(worktree.dir, SESSION_STATUS_PATH_LENGTH),
+        }
+      : null,
+    review: review ? { state: review.state } : null,
+  }
+}
+
+/**
+ * Known-pattern redaction first, then whitespace collapse and head truncation
+ * with a trailing ellipsis (same shape as peer objective hints) for branch
+ * names. Worktree dirs use `redactPath` instead so the identifying leaf of
+ * the path survives truncation.
+
+
+
+ */
+function redactAndTruncate(value: string, maxLength: number): string {
+  const collapsed = redactKnownPatterns(value).replace(/\s+/g, " ").trim()
+  if (collapsed.length <= maxLength) return collapsed
+  return `${collapsed.slice(0,maxLength)}…`
+}
+
+/** Head-truncated path variant that keeps the trailing (most identifying) part. */
+function redactPath(value: string, maxLength: number): string {
+  const collapsed = redactKnownPatterns(value).replace(/\s+/g, " ").trim()
+  if (collapsed.length <= maxLength) return collapsed
+  return `…${collapsed.slice(-(maxLength - 1))}`
+}
+
+const sessionStatusInput = {
+  type: "object",
+  properties: {
+    sessionID: { type: "string", minLength: 1, maxLength: 512 },
     limit: { type: "integer", minimum: 1, maximum: PEER_RESULT_LIMIT_MAX },
     after: { type: "string", minLength: 1, maxLength: 512 },
     includeSelf: { type: "boolean" },

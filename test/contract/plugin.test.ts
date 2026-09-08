@@ -135,7 +135,7 @@ describe("server plugin contract", () => {
     // The tool transform registers the goal family plus the orchestrator-only
     // github, worktree, orchestration validation, publish policy, and peer
     // discovery families with their shared permission actions:
-    // 3 goal + 11 github + 7 worktree + 3 validation + 1 publish + 1 peer = 26.
+    // 3 goal + 11 github + 7 worktree + 3 validation + 1 publish + 2 peer = 27.
     const allToolNames = tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)
     expect(allToolNames).toEqual([
       "orchestrator_goal_get",
@@ -164,12 +164,13 @@ describe("server plugin contract", () => {
       "orchestrator_admission_transition",
       "orchestrator_publish_policy_get",
       "orchestrator_peer_list",
+      "orchestrator_session_status",
     ])
-    expect(allToolNames).toHaveLength(26)
+    expect(allToolNames).toHaveLength(27)
     expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBe(11)
     expect(tools.filter((tool) => tool.options?.permission === WORKTREE_TOOL_PERMISSION).length).toBe(7)
     expect(tools.filter((tool) => tool.options?.permission === PUBLISH_TOOL_PERMISSION).length).toBe(1)
-    expect(tools.filter((tool) => tool.options?.permission === PEER_TOOL_PERMISSION).length).toBe(1)
+    expect(tools.filter((tool) => tool.options?.permission === PEER_TOOL_PERMISSION).length).toBe(2)
     const goalTools = tools.filter((tool) => tool.options?.permission === GOAL_TOOL_PERMISSION)
     expect(goalTools).toHaveLength(3)
     // Every registered goal tool must declare the shared permission action so

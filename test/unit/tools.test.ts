@@ -193,7 +193,7 @@ describe("goal tools", () => {
 })
 
 describe("publish and peer tools", () => {
-  test("registers publish_policy_get and peer_list with their exact permission actions", () => {
+  test("registers publish_policy_get and peer tools with their exact permission actions", () => {
     const publishTools = collectPublishTools().tools
     expect([...publishTools.keys()]).toEqual(["publish_policy_get"])
     for (const tool of publishTools.values()) {
@@ -202,7 +202,7 @@ describe("publish and peer tools", () => {
     }
 
     const peerTools = collectPeerTools().tools
-    expect([...peerTools.keys()]).toEqual(["peer_list"])
+    expect([...peerTools.keys()]).toEqual(["peer_list", "session_status"])
     for (const tool of peerTools.values()) {
       expect(tool.options?.namespace).toBe("orchestrator")
       expect(tool.options?.permission).toBe(PEER_TOOL_PERMISSION)

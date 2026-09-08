@@ -1,10 +1,11 @@
 import type { Definition } from "@opencode-ai/plugin/tui/plugin"
 import type { Context, KeymapCommand } from "@opencode-ai/plugin/tui/context"
 import { commandDefinitions } from "./opencode-v2/commands/index.js"
-import { parseOptions } from "./core/config.js"
+import { parseOptions, type OrchestratorOptions } from "./core/config.js"
 import { formatModelReference, parseModelReference, type ModelReference } from "./core/model-reference.js"
 import { workerAgentRoles } from "./core/roles.js"
 import { RUNTIME_PLUGIN_ID } from "./core/package-identity.js"
+import { filterOrchestratorSessions, renderSidebar, type SessionStatus } from "./tui/sidebar.js"
 
 export const tuiPlugin = {
   id: RUNTIME_PLUGIN_ID,
@@ -51,12 +52,17 @@ export const tuiPlugin = {
       },
     })
 
+    // Read-only live sidebar list of orchestrator sessions. Requires session
+    // tabs to derive the "busy" state, so hosts without tabs skip it entirely.
+    const stopSidebar = registerSidebar(context, options)
+
     try {
       await context.data.location.command.sync(location)
     } catch (error) {
       stopFailureNotice()
       stopCommandUpdates()
       stopLayer()
+      stopSidebar?.()
       throw error
     }
 
@@ -64,9 +70,57 @@ export const tuiPlugin = {
       stopFailureNotice()
       stopCommandUpdates()
       stopLayer()
+      stopSidebar?.()
     }
   },
 } satisfies Definition
+
+/**
+ * Registers the read-only `sidebar.content` orchestrator session list.
+ *
+ * The contribution is strictly read-only: it only reads reactive client
+ * caches (`context.data.session.*`, `context.ui.tabs`) and subscribes to
+ * events to invalidate/sync those caches. It never writes storage, git,
+ * GitHub, commands, prompts, or mutations, and it never reads server
+ * storage directly. Because the "busy" state comes from session tabs, hosts
+ * that do not expose `context.ui.tabs` skip the contribution entirely.
+ */
+function registerSidebar(context: Context, options: OrchestratorOptions): (() => void) | undefined {
+  if (!context.ui.tabs) return undefined
+
+  const refresh = (sessionID: string): void => {
+    context.data.session.invalidate(sessionID)
+    void context.data.session.sync(sessionID)
+  }
+  const stopRefresh = [
+    context.data.on("session.execution.started", (event) => refresh(event.data.sessionID)),
+    context.data.on("session.execution.succeeded", (event) => refresh(event.data.sessionID)),
+    context.data.on("session.execution.failed", (event) => refresh(event.data.sessionID)),
+    context.data.on("session.execution.interrupted", (event) => refresh(event.data.sessionID)),
+    context.data.on("session.status", (event) => refresh(event.data.sessionID)),
+    context.data.on("session.usage.updated", (event) => refresh(event.data.sessionID)),
+    context.data.on("session.renamed", (event) => refresh(event.data.sessionID)),
+    context.data.on("session.created", (event) => refresh(event.data.sessionID)),
+  ]
+  const stopSidebar = context.ui.slot({
+    append: "sidebar.content",
+    render: () => {
+      const sessions = filterOrchestratorSessions(context.data.session.list() ?? [], options.orchestrator)
+      const tabs = context.ui.tabs.list()
+      const statuses = new Map<string, SessionStatus>()
+      const costs = new Map<string, number>()
+      for (const session of sessions) {
+        statuses.set(session.id, context.data.session.status(session.id))
+        costs.set(session.id, context.data.session.cost(session.id))
+      }
+      return renderSidebar({ sessions, statuses, costs, tabs })
+    },
+  })
+  return () => {
+    for (const stop of stopRefresh) stop()
+    stopSidebar()
+  }
+}
 
 function tuiCommand(context: Context, name: string, description: string): KeymapCommand {
   return {

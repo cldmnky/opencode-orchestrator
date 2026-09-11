@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import {
+  cleanRowTitle,
   filterOrchestratorSessions,
   formatRow,
   liveStatus,
+  MAX_ROW_TITLE_LENGTH,
   type CachedSessionSummary,
   type SessionLike,
 } from "../../src/tui/sidebar.js"
@@ -62,17 +64,17 @@ describe("formatRow", () => {
       worktree: { status: "ready", branch: "feat/x" },
       review: { state: "approved" },
     }
-    const input = { sessionID: "session", status: "running" as const, cost: 12.5, title: "  Fix the bug  ", summary }
+    const input = { status: "running" as const, cost: 12.5, title: "  Fix the bug  ", summary }
     const before = JSON.stringify(input)
 
-    expect(formatRow(input)).toBe("[running] Fix the bug (session) $12.50 goal:active tree:ready@feat/x review:approved")
+    expect(formatRow(input)).toBe("[running] Fix the bug $12.50 goal:active tree:ready@feat/x review:approved")
     expect(JSON.stringify(input)).toBe(before)
   })
 
   test("falls back to (untitled), unknown status, and $0.00 for missing data", () => {
-    expect(formatRow({ sessionID: "s", status: "unknown", cost: 0 })).toBe("[unknown] (untitled) (s) $0.00")
-    expect(formatRow({ sessionID: "s", status: "unknown", cost: Number.NaN })).toBe("[unknown] (untitled) (s) $0.00")
-    expect(formatRow({ sessionID: "s", status: "unknown", cost: Number.POSITIVE_INFINITY })).toBe("[unknown] (untitled) (s) $0.00")
+    expect(formatRow({ status: "unknown", cost: 0 })).toBe("[unknown] (untitled) $0.00")
+    expect(formatRow({ status: "unknown", cost: Number.NaN })).toBe("[unknown] (untitled) $0.00")
+    expect(formatRow({ status: "unknown", cost: Number.POSITIVE_INFINITY })).toBe("[unknown] (untitled) $0.00")
   })
 
   test("includes only the summary joins that are present", () => {
@@ -82,9 +84,7 @@ describe("formatRow", () => {
       worktree: { status: "dirty", branch: "feat" },
       review: null,
     }
-    expect(formatRow({ sessionID: "s", status: "busy", cost: 1, summary: worktreeOnly })).toBe(
-      "[busy] (untitled) (s) $1.00 tree:dirty@feat",
-    )
+    expect(formatRow({ status: "busy", cost: 1, summary: worktreeOnly })).toBe("[busy] (untitled) $1.00 tree:dirty@feat")
 
     const goalOnly: CachedSessionSummary = {
       sessionID: "s",
@@ -92,8 +92,30 @@ describe("formatRow", () => {
       worktree: null,
       review: null,
     }
-    expect(formatRow({ sessionID: "s", status: "idle", cost: 2, title: "  T  ", summary: goalOnly })).toBe(
-      "[idle] T (s) $2.00 goal:paused",
-    )
+    expect(formatRow({ status: "idle", cost: 2, title: "  T  ", summary: goalOnly })).toBe("[idle] T $2.00 goal:paused")
+  })
+
+  test("never exposes the raw session id in the row", () => {
+    const row = formatRow({ status: "running", cost: 0.93, title: "Material UI SPA Redesign" })
+    expect(row).toBe("[running] Material UI SPA Redesign $0.93")
+    expect(row).not.toContain("ses_")
+  })
+})
+
+describe("cleanRowTitle", () => {
+  test("collapses internal whitespace and newlines so rows stay single-line", () => {
+    expect(cleanRowTitle("Fix   the\tbug\nnow")).toBe("Fix the bug now")
+    expect(cleanRowTitle("  Fix   the\tbug  ")).toBe("Fix the bug")
+    expect(cleanRowTitle(undefined)).toBe("(untitled)")
+    expect(cleanRowTitle("   ")).toBe("(untitled)")
+  })
+
+  test("truncates titles longer than MAX_ROW_TITLE_LENGTH with an ellipsis", () => {
+    const long = `Implement xsto catalog bootstrap plan fully and completely`
+    expect(long.length).toBeGreaterThan(MAX_ROW_TITLE_LENGTH)
+    const cleaned = cleanRowTitle(long)
+    expect(cleaned).toBe(`${long.slice(0, MAX_ROW_TITLE_LENGTH - 1)}…`)
+    expect(cleaned).not.toContain("\n")
+    expect(cleanRowTitle("a".repeat(MAX_ROW_TITLE_LENGTH))).toBe("a".repeat(MAX_ROW_TITLE_LENGTH))
   })
 })

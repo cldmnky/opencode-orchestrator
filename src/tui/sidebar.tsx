@@ -10,6 +10,7 @@
  */
 import { For } from "solid-js"
 import type { JSX } from "@opentui/solid"
+import type { RGBA } from "@opentui/core"
 
 /** Minimal structural view of a session; the SDK's SessionInfo satisfies it. */
 export type SessionLike = {
@@ -69,24 +70,53 @@ export function liveStatus(
   return status === "running" || status === "idle" ? status : "unknown"
 }
 
-/** Formats one deterministic, human-readable sidebar row. */
+/** Sidebar rows are single-line: titles are collapsed and truncated to this length. */
+export const MAX_ROW_TITLE_LENGTH = 40
+
+/** Collapses whitespace, falls back to `(untitled)`, and truncates long titles. */
+export function cleanRowTitle(title?: string): string {
+  const collapsed = title?.replace(/\s+/g, " ").trim() ?? ""
+  if (!collapsed) return "(untitled)"
+  return collapsed.length > MAX_ROW_TITLE_LENGTH ? `${collapsed.slice(0, MAX_ROW_TITLE_LENGTH - 1)}…` : collapsed
+}
+
+/** Theme colors for the sidebar rows; mirrors the host's semantic text tokens. */
+export type SidebarTheme = {
+  readonly text: RGBA
+  readonly subdued: RGBA
+  readonly running: RGBA
+}
+
+/** Decomposed row content: status and title render in accent colors, metadata dimmed. */
+export type RowParts = {
+  readonly status: LiveStatus
+  readonly title: string
+  readonly meta: string
+}
+
+/** Splits a row into styled parts; `formatRow` joins them for plain-text use. */
+export function rowParts(input: {
+  status: LiveStatus
+  cost: number
+  title?: string
+  summary?: CachedSessionSummary
+}): RowParts {
+  const meta = [`$${Number.isFinite(input.cost) ? input.cost.toFixed(2) : "0.00"}`]
+  if (input.summary?.goal) meta.push(`goal:${input.summary.goal.status}`)
+  if (input.summary?.worktree) meta.push(`tree:${input.summary.worktree.status}@${input.summary.worktree.branch}`)
+  if (input.summary?.review) meta.push(`review:${input.summary.review.state}`)
+  return { status: input.status, title: cleanRowTitle(input.title), meta: meta.join(" ") }
+}
+
+/** Formats one deterministic, human-readable sidebar row (always single-line). */
 export function formatRow(input: {
-  sessionID: string
   status: LiveStatus
   cost: number
   title?: string
   summary?: CachedSessionSummary
 }): string {
-  const parts = [
-    `[${input.status}]`,
-    input.title?.trim() ? input.title.trim() : "(untitled)",
-    `(${input.sessionID})`,
-    `$${Number.isFinite(input.cost) ? input.cost.toFixed(2) : "0.00"}`,
-  ]
-  if (input.summary?.goal) parts.push(`goal:${input.summary.goal.status}`)
-  if (input.summary?.worktree) parts.push(`tree:${input.summary.worktree.status}@${input.summary.worktree.branch}`)
-  if (input.summary?.review) parts.push(`review:${input.summary.review.state}`)
-  return parts.join(" ")
+  const parts = rowParts(input)
+  return `[${parts.status}] ${parts.title} ${parts.meta}`
 }
 
 export type SidebarSessionsProps = {
@@ -96,6 +126,8 @@ export type SidebarSessionsProps = {
   tabs: readonly TabLike[]
   /** Optional cached durable summaries; never read from server storage here. */
   summaries?: readonly CachedSessionSummary[]
+  /** Optional host theme colors; rows fall back to unstyled text without it. */
+  theme?: SidebarTheme
 }
 
 /**
@@ -112,23 +144,27 @@ export function SidebarSessions(props: SidebarSessionsProps): JSX.Element {
   const busySessionIDs = new Set(props.tabs.filter((tab) => tab.busy).map((tab) => tab.sessionID))
   return (
     <box flexDirection="column">
-      <text>Orchestrator sessions</text>
+      <text fg={props.theme?.subdued}>Orchestrator sessions ({props.sessions.length})</text>
       <For each={props.sessions}>
         {(session) => {
           const summary = props.summaries?.find((candidate) => candidate.sessionID === session.id)
+          const parts = rowParts({
+            title: session.title,
+            status: liveStatus(session.id, props.statuses, busySessionIDs),
+            cost: props.costs.get(session.id) ?? 0,
+            summary,
+          })
+          const active = parts.status === "running" || parts.status === "busy"
           return (
-            <text>
-              {formatRow({
-                sessionID: session.id,
-                title: session.title,
-                status: liveStatus(session.id, props.statuses, busySessionIDs),
-                cost: props.costs.get(session.id) ?? 0,
-                summary,
-              })}
+            <text wrapMode="none" truncate>
+              <span style={{ fg: active ? props.theme?.running : props.theme?.subdued }}>[{parts.status}]</span>
+              <span style={{ fg: props.theme?.text }}> {parts.title} </span>
+              <span style={{ fg: props.theme?.subdued }}>{parts.meta}</span>
             </text>
           )
         }}
       </For>
+      {props.sessions.length === 0 ? <text fg={props.theme?.subdued}>No orchestrator sessions</text> : null}
     </box>
   )
 }

@@ -77,6 +77,17 @@ export const OBSERVABILITY_TOOL_PERMISSION = "orchestrator_observability"
  */
 export const ORCHESTRATION_TOOL_PERMISSION = "orchestrator_validation"
 
+/**
+ * Shared permission action for the per-session gate inspection tool.
+ *
+ * `orchestrator_gates_get` is a read-only surface, but it is still
+ * orchestrator-only: a worker that somehow reaches the execute handler is
+ * rejected regardless of visibility rules, and the installer writes the same
+ * allow/deny family rules it writes for the other orchestrator-only families.
+ * There is deliberately no model-facing gate setter.
+ */
+export const GATES_TOOL_PERMISSION = "orchestrator_gates"
+
 export type PermissionEffect = "allow" | "deny" | "ask"
 
 export type PermissionRule = {
@@ -117,6 +128,7 @@ export function orchestratorOnlyPermissionRules(effect: PermissionEffect): Permi
     { action: OBSERVABILITY_TOOL_PERMISSION, resource: "*", effect },
     { action: PUBLISH_TOOL_PERMISSION, resource: "*", effect },
     { action: PEER_TOOL_PERMISSION, resource: "*", effect },
+    { action: GATES_TOOL_PERMISSION, resource: "*", effect },
   ]
 }
 

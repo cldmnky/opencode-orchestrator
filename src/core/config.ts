@@ -13,6 +13,7 @@ export const COMMAND_NAMES = [
   "polish",
   "stress-plan",
   "publish",
+  "gates",
 ] as const
 
 /**

@@ -113,14 +113,18 @@ const APPROVED_REVIEW: ReviewV1Record = {
 }
 
 /**
- * Storage backing the durable publication capability and the internal review
- * receipt. `capabilities` grants the publish record for the stable project
- * "origin"; `record` (when provided) is returned for the session's review key.
+ * Storage backing the durable publication capability, the per-session gate
+ * narrowing record, and the internal review receipt. `capabilities` grants the
+ * publish record for the stable project "origin"; `record` (when provided) is
+ * returned for the session's review key; `disabledGates` (when non-empty) is
+ * returned for the session's `gates/v1/<sessionID>` key exactly as
+ * `gates/state.ts` writes it.
  */
 function lifecycleStorage(options: {
   capabilities?: readonly string[]
   record?: ReviewV1Record | undefined
   publishRecord?: unknown
+  disabledGates?: readonly string[]
 } = {}): StorageLike {
   const publishRecord =
     options.publishRecord ??
@@ -138,6 +142,15 @@ function lifecycleStorage(options: {
     async get(key) {
       if (key.startsWith("review/v1/")) return options.record
       if (key.startsWith("publish/v1/")) return publishRecord
+      if (key.startsWith("gates/v1/")) {
+        if (!options.disabledGates || options.disabledGates.length === 0) return undefined
+        return {
+          version: 1,
+          sessionID: decodeURIComponent(key.slice("gates/v1/".length)),
+          disabled: [...options.disabledGates],
+          updatedAt: 1,
+        }
+      }
       return undefined
     },
     async set() {},
@@ -2070,54 +2083,78 @@ describe("github tools", () => {
   describe("github pr merge tool", () => {
     const HEAD_SHA_7_40 = "abc1234def567890123456789012345678901234"
     const MERGE_SHA = "9f8e7d6c5b4a39281726354b6a7c8d9e0f1a2b3c4"
-    const OPEN_PULL = { ...PULL, state: "open", merged: false, head: { ref: "feature", sha: HEAD_SHA_7_40 } }
-    const MERGED_PULL = {
+    const OPEN_PULL = {
       ...PULL,
+      state: "open",
+      merged: false,
+      draft: false,
+      mergeable: true,
+      mergeable_state: "clean",
+      head: { ref: "feature", sha: HEAD_SHA_7_40 },
+      base: { ref: "main", sha: BASE_SHA },
+    }
+    const MERGED_PULL = {
+      ...OPEN_PULL,
       state: "closed",
       merged: true,
       merged_at: "2026-08-31T00:00:00Z",
-      head: { ref: "feature", sha: HEAD_SHA_7_40 },
     }
+    /**
+     * Autonomous merge input: the exact expected head/base SHAs are required and
+     * there is deliberately NO `confirm` field. `confirm` is no longer user
+     * authorization, so a merge without it must succeed on the happy path.
+     */
     const mergeInput = {
       owner: "acme",
       repo: "widgets",
       number: 7,
       expectedHeadSha: HEAD_SHA_7_40,
-      confirm: true,
+      expectedBaseSha: BASE_SHA,
     }
+    /** Exact-revision APPROVED receipt bound to the merge head/base pair. */
+    const MERGE_REVIEW: ReviewV1Record = { ...APPROVED_REVIEW, headSha: HEAD_SHA_7_40, baseSha: BASE_SHA }
+    const MERGE_STORAGE = lifecycleStorage({ capabilities: ["merge"], record: MERGE_REVIEW })
 
-    test("requires a literal confirm: true", async () => {
-      const { tools } = collectGhTools()
-      const session = toolContext("session-1", "orchestrator")
-      const missing = await tools.get("github_pr_merge")!.execute({ owner: "acme", repo: "widgets", number: 7, expectedHeadSha: HEAD_SHA_7_40 }, session)
-      expect(missing.content).toContain("requires confirm: true")
-      const falsy = await tools
-        .get("github_pr_merge")!
-        .execute({ ...mergeInput, confirm: false }, session)
-      expect(falsy.content).toContain("requires confirm: true")
-    })
-
-    test("requires owner, repo, number, and expectedHeadSha", async () => {
-      const { tools } = collectGhTools()
-      const output = await tools
-        .get("github_pr_merge")!
-        .execute({ owner: "acme", repo: "widgets", number: 7, confirm: true }, toolContext("session-1", "orchestrator"))
-      expect(output.content).toContain("owner, repo, number, and expectedHeadSha are required")
-    })
-
-    test("runs pre-view -> merge with the expected head SHA -> verified post-view and reports mutation evidence", async () => {
-      const { runner, calls } = scriptedGh((call, calls, body) => {
-        if (call.args[0] === "api" && call.args.includes("--method") && call.args.includes("PUT")) {
-          expect(body).toEqual({ sha: HEAD_SHA_7_40, merge_method: "squash", commit_title: "Ship it", commit_message: "why" })
-          return ok(JSON.stringify({ sha: MERGE_SHA, merged: true, message: "Pull Request successfully merged" }))
+    /** Scripted gh for the merge pipeline: refs, compare, pre/post views, PUT. */
+    function mergePipeline(options: {
+      put?: (body: unknown) => ProcessResult
+      baseSha?: string
+      prePull?: Record<string, unknown>
+      postPull?: Record<string, unknown>
+    } = {}): (call: Call, calls: Call[], body: unknown) => ProcessResult | undefined {
+      const baseSha = options.baseSha ?? BASE_SHA
+      const prePull = options.prePull ?? OPEN_PULL
+      const postPull = options.postPull ?? MERGED_PULL
+      const put =
+        options.put ??
+        (() => ok(JSON.stringify({ sha: MERGE_SHA, merged: true, message: "Pull Request successfully merged" })))
+      return (call, calls, body) => {
+        if (call.args[0] === "api" && call.args.includes("--method") && call.args.includes("PUT")) return put(body)
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA_7_40))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", baseSha))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, baseSha))
         }
         if (call.args.includes("repos/acme/widgets/pulls/7")) {
           const views = calls.filter((c) => c.args[0] === "api" && c.args.includes("repos/acme/widgets/pulls/7"))
-          return ok(JSON.stringify(views.length <= 1 ? OPEN_PULL : MERGED_PULL))
+          return ok(JSON.stringify(views.length <= 1 ? prePull : postPull))
         }
         return undefined
-      })
-      const { tools } = collectGhTools({ runner })
+      }
+    }
+
+    test("merges autonomously without a confirm field after every gate and reports mutation evidence", async () => {
+      expect("confirm" in mergeInput).toBe(false)
+      let sentBody: unknown
+      const { runner, calls } = scriptedGh(
+        mergePipeline({
+          put: (body) => {
+            sentBody = body
+            return ok(JSON.stringify({ sha: MERGE_SHA, merged: true, message: "Pull Request successfully merged" }))
+          },
+        }),
+      )
+      const { tools } = collectGhTools({ runner, storage: MERGE_STORAGE })
       const output = await tools
         .get("github_pr_merge")!
         .execute(
@@ -2128,6 +2165,7 @@ describe("github tools", () => {
         mergeSha: string
         mergeMessage: string
         expectedHeadSha: string
+        expectedBaseSha: string
         verified: boolean
         evidence: unknown
       }
@@ -2137,7 +2175,9 @@ describe("github tools", () => {
       expect(parsed.merged).toBe(true)
       expect(parsed.mergeSha).toBe(MERGE_SHA)
       expect(parsed.expectedHeadSha).toBe(HEAD_SHA_7_40)
+      expect(parsed.expectedBaseSha).toBe(BASE_SHA)
       expect(parsed.html_url.startsWith("https://")).toBe(true)
+      expect(sentBody).toEqual({ sha: HEAD_SHA_7_40, merge_method: "squash", commit_title: "Ship it", commit_message: "why" })
       expect(parsed.evidence).toEqual({
         marker: "EVIDENCE_MUTATION",
         freshness: "per-invocation",
@@ -2149,62 +2189,193 @@ describe("github tools", () => {
         mutation: { verified: true, id: 2001, number: 7, url: PULL.html_url },
       })
       expect(evidenceSchema.safeParse(parsed.evidence).success).toBe(true)
-      // Exact sequence: pre-view GET, merge PUT, post-view GET — no retries or fallbacks.
+      // Exact sequence: pre-view GET, head ref, base ref, compare, merge PUT, post-view GET.
       expect(calls.map((call) => `${call.args[2]} ${call.args.at(-1)}`)).toEqual([
         "GET repos/acme/widgets/pulls/7",
+        "GET repos/acme/widgets/branches/feature",
+        "GET repos/acme/widgets/branches/main",
+        "GET repos/acme/widgets/compare/main...feature",
         "PUT repos/acme/widgets/pulls/7/merge",
         "GET repos/acme/widgets/pulls/7",
       ])
     })
 
-    test("refuses a stale expected head SHA before any merge call", async () => {
-      const { runner, calls } = scriptedGh((call) => {
-        if (call.args.includes("repos/acme/widgets/pulls/7")) {
-          return ok(JSON.stringify({ ...PULL, state: "open", merged: false, head: { ref: "feature", sha: "d15ea5ed" } }))
-        }
-        return undefined
+    test("requires owner, repo, number, expectedHeadSha, and expectedBaseSha", async () => {
+      let calls = 0
+      const runner: ProcessRunner = {
+        async run() {
+          calls += 1
+          return ok()
+        },
+      }
+      const { tools } = collectGhTools({ runner, storage: MERGE_STORAGE })
+      const output = await tools
+        .get("github_pr_merge")!
+        .execute({ owner: "acme", repo: "widgets", number: 7 }, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("owner, repo, number, expectedHeadSha, and expectedBaseSha are required")
+      expect(calls).toBe(0)
+    })
+
+    test("refuses without the durable publish capability merge before any read", async () => {
+      let calls = 0
+      const runner: ProcessRunner = {
+        async run() {
+          calls += 1
+          return ok()
+        },
+      }
+      const { tools } = collectGhTools({ runner, storage: lifecycleStorage({ record: MERGE_REVIEW }) })
+      const output = await tools
+        .get("github_pr_merge")!
+        .execute(mergeInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr merge refused")
+      expect(output.content).toContain("publication capability 'merge' is not authorized for project origin")
+      expect(output.content).toContain("/publish enable")
+      expect(() => JSON.parse(output.content)).toThrow()
+      expect(calls).toBe(0)
+    })
+
+    test("refuses when the merge gate is disabled for the session with a /gates message", async () => {
+      let calls = 0
+      const runner: ProcessRunner = {
+        async run() {
+          calls += 1
+          return ok()
+        },
+      }
+      const { tools } = collectGhTools({
+        runner,
+        storage: lifecycleStorage({ capabilities: ["merge"], record: MERGE_REVIEW, disabledGates: ["merge"] }),
       })
-      const { tools } = collectGhTools({ runner })
+      const output = await tools
+        .get("github_pr_merge")!
+        .execute(mergeInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr merge refused")
+      expect(output.content).toContain("'merge' is disabled for this session")
+      expect(output.content).toContain("/gates merge=on")
+      expect(output.content).not.toContain("evidence")
+      expect(calls).toBe(0)
+    })
+
+    test("refuses every merge when the github-mutations gate is disabled for the session", async () => {
+      let calls = 0
+      const runner: ProcessRunner = {
+        async run() {
+          calls += 1
+          return ok()
+        },
+      }
+      const { tools } = collectGhTools({
+        runner,
+        storage: lifecycleStorage({
+          capabilities: ["merge"],
+          record: MERGE_REVIEW,
+          disabledGates: ["github-mutations"],
+        }),
+      })
+      const output = await tools
+        .get("github_pr_merge")!
+        .execute(mergeInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr merge refused")
+      expect(output.content).toContain("'github-mutations' is disabled for this session")
+      expect(output.content).toContain("/gates github-mutations=on")
+      expect(output.content).not.toContain("evidence")
+      expect(calls).toBe(0)
+    })
+
+    test("refuses without an approved exact-revision review receipt before any read", async () => {
+      let calls = 0
+      const runner: ProcessRunner = {
+        async run() {
+          calls += 1
+          return ok()
+        },
+      }
+      const missing = await collectGhTools({
+        runner,
+        storage: lifecycleStorage({ capabilities: ["merge"] }),
+      }).tools
+        .get("github_pr_merge")!
+        .execute(mergeInput, toolContext("session-1", "orchestrator"))
+      expect(missing.content).toContain("github pr merge refused")
+      expect(missing.content).toContain("no review record")
+      expect(calls).toBe(0)
+
+      const mismatched = await collectGhTools({
+        runner,
+        storage: lifecycleStorage({ capabilities: ["merge"], record: { ...MERGE_REVIEW, headSha: OTHER_SHA } }),
+      }).tools
+        .get("github_pr_merge")!
+        .execute(mergeInput, toolContext("session-1", "orchestrator"))
+      expect(mismatched.content).toContain("github pr merge refused")
+      expect(mismatched.content).toContain("bound to a different head/base revision")
+      expect(calls).toBe(0)
+    })
+
+    test("refuses a draft pull request before any merge call", async () => {
+      const { runner, calls } = scriptedGh(mergePipeline({ prePull: { ...OPEN_PULL, draft: true } }))
+      const { tools } = collectGhTools({ runner, storage: MERGE_STORAGE })
+      const output = await tools
+        .get("github_pr_merge")!
+        .execute(mergeInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr merge refused")
+      expect(output.content).toContain("not ready for review (draft=true)")
+      expect(output.content).not.toContain("evidence")
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.args).not.toContain("PUT")
+    })
+
+    test("refuses a stale expected head SHA before any merge call", async () => {
+      const { runner, calls } = scriptedGh(
+        mergePipeline({ prePull: { ...OPEN_PULL, head: { ref: "feature", sha: OTHER_SHA } } }),
+      )
+      const { tools } = collectGhTools({ runner, storage: MERGE_STORAGE })
       const output = await tools
         .get("github_pr_merge")!
         .execute(mergeInput, toolContext("session-1", "orchestrator"))
       expect(output.content).toContain("github pr merge refused")
       expect(output.content).toContain("expected head SHA")
       expect(output.content).not.toContain("evidence")
-      expect(() => JSON.parse(output.content)).toThrow()
       expect(calls).toHaveLength(1)
       expect(calls[0]?.args).not.toContain("PUT")
     })
 
-    test("refuses a PR that is already merged or not open", async () => {
-      const { runner, calls } = scriptedGh((call) => {
-        if (call.args.includes("repos/acme/widgets/pulls/7")) {
-          return ok(JSON.stringify({ ...PULL, state: "closed", merged: true }))
-        }
-        return undefined
-      })
-      const { tools } = collectGhTools({ runner })
+    test("refuses a PR that is already merged or not open before any merge call", async () => {
+      const { runner, calls } = scriptedGh(
+        mergePipeline({ prePull: { ...OPEN_PULL, state: "closed", merged: true } }),
+      )
+      const { tools } = collectGhTools({ runner, storage: MERGE_STORAGE })
       const output = await tools
         .get("github_pr_merge")!
-        .execute(
-          { ...mergeInput, expectedHeadSha: HEAD_SHA_7_40 },
-          toolContext("session-1", "orchestrator"),
-        )
+        .execute(mergeInput, toolContext("session-1", "orchestrator"))
       expect(output.content).toContain("github pr merge refused")
       expect(output.content).toContain("not open and unmerged")
+      expect(output.content).not.toContain("evidence")
       expect(calls).toHaveLength(1)
       expect(calls[0]?.args).not.toContain("PUT")
+    })
+
+    test("refuses when the remote base moved from the exact expected revision", async () => {
+      const { runner, calls } = scriptedGh(mergePipeline({ baseSha: OTHER_SHA }))
+      const { tools } = collectGhTools({ runner, storage: MERGE_STORAGE })
+      const output = await tools
+        .get("github_pr_merge")!
+        .execute(mergeInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr merge refused")
+      expect(output.content).toContain("remote base ref main")
+      expect(output.content).toContain("not the expected exact revision")
+      expect(output.content).not.toContain("evidence")
+      expect(calls).toHaveLength(4)
+      expect(calls.some((call) => call.args.includes("PUT"))).toBe(false)
     })
 
     test("never claims success when the merge API reports merged:false", async () => {
-      const { runner } = scriptedGh((call) => {
-        if (call.args[0] === "api" && call.args.includes("--method") && call.args.includes("PUT")) {
-          return ok(JSON.stringify({ sha: HEAD_SHA_7_40, merged: false, message: "Pull Request is not mergeable" }))
-        }
-        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(OPEN_PULL))
-        return undefined
-      })
-      const { tools } = collectGhTools({ runner })
+      const { runner, calls } = scriptedGh(
+        mergePipeline({
+          put: () => ok(JSON.stringify({ sha: HEAD_SHA_7_40, merged: false, message: "Pull Request is not mergeable" })),
+        }),
+      )
+      const { tools } = collectGhTools({ runner, storage: MERGE_STORAGE })
       const output = await tools
         .get("github_pr_merge")!
         .execute(mergeInput, toolContext("session-1", "orchestrator"))
@@ -2212,38 +2383,30 @@ describe("github tools", () => {
       expect(output.content).toContain("merged:false")
       expect(output.content).not.toContain("evidence")
       expect(() => JSON.parse(output.content)).toThrow()
+      expect(calls).toHaveLength(5)
     })
 
     test("never claims success when the post-merge view does not confirm merged:true", async () => {
-      const { runner, calls } = scriptedGh((call, calls) => {
-        if (call.args[0] === "api" && call.args.includes("--method") && call.args.includes("PUT")) {
-          return ok(JSON.stringify({ sha: MERGE_SHA, merged: true, message: "merged" }))
-        }
-        if (call.args.includes("repos/acme/widgets/pulls/7")) {
-          const views = calls.filter((c) => c.args[0] === "api" && c.args.includes("repos/acme/widgets/pulls/7"))
-          return ok(JSON.stringify(views.length <= 1 ? OPEN_PULL : { ...OPEN_PULL, state: "closed", merged: false }))
-        }
-        return undefined
-      })
-      const { tools } = collectGhTools({ runner })
+      const { runner, calls } = scriptedGh(
+        mergePipeline({ postPull: { ...OPEN_PULL, state: "closed", merged: false } }),
+      )
+      const { tools } = collectGhTools({ runner, storage: MERGE_STORAGE })
       const output = await tools
         .get("github_pr_merge")!
         .execute(mergeInput, toolContext("session-1", "orchestrator"))
       expect(output.content).toContain("github pr merge failed")
       expect(output.content).toContain("post-merge view")
       expect(output.content).not.toContain("evidence")
-      expect(calls).toHaveLength(3)
+      expect(calls).toHaveLength(6)
     })
 
     test("failure surfaces the redacted gh error with no success evidence", async () => {
-      const { runner } = scriptedGh((call) => {
-        if (call.args[0] === "api" && call.args.includes("--method") && call.args.includes("PUT")) {
-          return fail("Merge blocked: review required\nclient_secret: leaked-leak super-dupersecret")
-        }
-        if (call.args.includes("repos/acme/widgets/pulls/7")) return ok(JSON.stringify(OPEN_PULL))
-        return undefined
-      })
-      const { tools } = collectGhTools({ runner, secrets: ["super-dupersecret"] })
+      const { runner, calls } = scriptedGh(
+        mergePipeline({
+          put: () => fail("Merge blocked: review required\nclient_secret: leaked-leak super-dupersecret"),
+        }),
+      )
+      const { tools } = collectGhTools({ runner, storage: MERGE_STORAGE, secrets: ["super-dupersecret"] })
       const output = await tools
         .get("github_pr_merge")!
         .execute(mergeInput, toolContext("session-1", "orchestrator"))
@@ -2252,6 +2415,7 @@ describe("github tools", () => {
       expect(output.content).not.toContain("super-dupersecret")
       expect(output.content).not.toContain("evidence")
       expect(() => JSON.parse(output.content)).toThrow()
+      expect(calls).toHaveLength(5)
     })
   })
 })

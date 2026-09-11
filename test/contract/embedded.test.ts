@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url"
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, relative, resolve } from "node:path"
-import { OpenCode } from "@opencode-ai/sdk"
+import { OpenCode } from "@opencode/sdk"
 
 describe("embedded V2 host", () => {
   test("loads the source plugin and config-backed agents without an HTTP listener", async () => {

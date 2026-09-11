@@ -11,7 +11,7 @@ import {
   type StorageLike,
   type GoalRecord,
 } from "./state.js"
-import type { Info as ToolInfo } from "@opencode-ai/plugin/promise/tool"
+import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 
 type ToolDraftLike = {
   add(tool: ToolInfo<any, undefined>): void

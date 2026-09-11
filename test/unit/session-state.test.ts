@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { parseOptions, type OrchestratorOptions } from "../../src/core/config.js"
 import {
+  GATES_TOOL_PERMISSION,
   GH_TOOL_PERMISSION,
   OBSERVABILITY_TOOL_PERMISSION,
   ORCHESTRATION_TOOL_PERMISSION,
@@ -88,13 +89,14 @@ describe("configuration feature policy", () => {
 })
 
 describe("permission constants", () => {
-  test("exports goal-style orchestrator-only actions for gh/worktree/validation/publish/peer without dead cd actions", () => {
+  test("exports goal-style orchestrator-only actions for gh/worktree/validation/publish/peer/gates without dead cd actions", () => {
     expect(GH_TOOL_PERMISSION).toBe("orchestrator_gh")
     expect(WORKTREE_TOOL_PERMISSION).toBe("orchestrator_worktree")
     expect(ORCHESTRATION_TOOL_PERMISSION).toBe("orchestrator_validation")
     expect(OBSERVABILITY_TOOL_PERMISSION).toBe("orchestrator_observability")
     expect(PUBLISH_TOOL_PERMISSION).toBe("orchestrator_publish")
     expect(PEER_TOOL_PERMISSION).toBe("orchestrator_peer")
+    expect(GATES_TOOL_PERMISSION).toBe("orchestrator_gates")
   })
 
   test("builds an orchestrator-only deny rule over the whole feature family incl. orchestration validation, observability, publish, and peer", () => {
@@ -114,6 +116,9 @@ describe("permission constants", () => {
     // The legacy /cd and session-move actions are no longer emitted.
     expect(rule.action).not.toContain("orchestrator_cd")
     expect(rule.action).not.toContain("orchestrator_session_move")
+    // The legacy piped shape intentionally omits the gates family; new code
+    // must use orchestratorOnlyPermissionRules for per-family rules.
+    expect(rule.action).not.toContain(GATES_TOOL_PERMISSION)
   })
 
   test("each family has its own permission rule in the modern rules helper", () => {
@@ -125,7 +130,12 @@ describe("permission constants", () => {
       OBSERVABILITY_TOOL_PERMISSION,
       PUBLISH_TOOL_PERMISSION,
       PEER_TOOL_PERMISSION,
+      GATES_TOOL_PERMISSION,
     ])
+    for (const rule of rules) {
+      expect(rule.resource).toBe("*")
+      expect(rule.effect).toBe("deny")
+    }
   })
 })
 

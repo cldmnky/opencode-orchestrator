@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import type { Context } from "@opencode-ai/plugin/promise/plugin"
+import type { Context } from "@opencode/plugin/promise/plugin"
 import {
+  GATES_TOOL_PERMISSION,
   GH_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
   OBSERVABILITY_TOOL_PERMISSION,
@@ -50,6 +51,7 @@ describe("server plugin contract", () => {
     const disposed: string[] = []
     const switches: string[] = []
     const prompts: any[] = []
+    const rpcRegistrations: Array<{ definition: any; handlers: any }> = []
     let contextHook: ((event: any) => void) | undefined
     const stream = eventStream()
 
@@ -96,6 +98,12 @@ describe("server plugin contract", () => {
         },
         hook: async (name: string) => registration(name),
       },
+      rpc: {
+        register: async (definition: unknown, handlers: unknown) => {
+          rpcRegistrations.push({ definition, handlers })
+          return registration("rpc")
+        },
+      },
       event: {
         subscribe: () => stream,
       },
@@ -128,19 +136,31 @@ describe("server plugin contract", () => {
       "polish",
       "stress-plan",
       "publish",
+      "gates",
     ])
     const commandNames = new Set(commands.map((command) => command.name))
     expect(commandNames.has("cd")).toBe(false)
+    // The gates command is orchestrator-only and carries no required argument.
+    const gatesCommand = commands.find((command) => command.name === "gates")
+    expect(gatesCommand).toBeDefined()
+    // The gates RPC surface is registered for the TUI picker; the model only
+    // gets the read-only gates tool.
+    expect(rpcRegistrations).toHaveLength(1)
+    expect(rpcRegistrations[0]?.definition).toMatchObject({ id: "opencode-orchestrator.gates" })
+    expect(typeof rpcRegistrations[0]?.handlers?.get).toBe("function")
+    expect(typeof rpcRegistrations[0]?.handlers?.set).toBe("function")
 
-    // The tool transform registers the goal family plus the orchestrator-only
-    // github, worktree, orchestration validation, publish policy, and peer
-    // discovery families with their shared permission actions:
-    // 3 goal + 11 github + 7 worktree + 3 validation + 1 publish + 2 peer = 27.
+    // The tool transform registers the goal family plus the read-only
+    // per-session gates surface and the orchestrator-only github, worktree,
+    // orchestration validation, publish policy, and peer discovery families
+    // with their shared permission actions:
+    // 3 goal + 1 gates + 11 github + 7 worktree + 3 validation + 1 publish + 2 peer = 28.
     const allToolNames = tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)
     expect(allToolNames).toEqual([
       "orchestrator_goal_get",
       "orchestrator_goal_set",
       "orchestrator_goal_update",
+      "orchestrator_gates_get",
       "orchestrator_github_capabilities",
       "orchestrator_github_repo_view",
       "orchestrator_github_issue_view",
@@ -166,11 +186,15 @@ describe("server plugin contract", () => {
       "orchestrator_peer_list",
       "orchestrator_session_status",
     ])
-    expect(allToolNames).toHaveLength(27)
+    expect(allToolNames).toHaveLength(28)
     expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBe(11)
     expect(tools.filter((tool) => tool.options?.permission === WORKTREE_TOOL_PERMISSION).length).toBe(7)
     expect(tools.filter((tool) => tool.options?.permission === PUBLISH_TOOL_PERMISSION).length).toBe(1)
     expect(tools.filter((tool) => tool.options?.permission === PEER_TOOL_PERMISSION).length).toBe(2)
+    // The read-only per-session gates surface shares its own permission action.
+    const gatesTools = tools.filter((tool) => tool.options?.permission === GATES_TOOL_PERMISSION)
+    expect(gatesTools.map((tool) => `${tool.options?.namespace}_${tool.name}`)).toEqual(["orchestrator_gates_get"])
+    expect(gatesTools[0]?.options?.permission).toBe("orchestrator_gates")
     const goalTools = tools.filter((tool) => tool.options?.permission === GOAL_TOOL_PERMISSION)
     expect(goalTools).toHaveLength(3)
     // Every registered goal tool must declare the shared permission action so
@@ -212,7 +236,16 @@ describe("server plugin contract", () => {
     expect(contextText.join("\n")).toContain("orchestrator_worktree_enter")
     expect(contextText.join("\n")).toContain("orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer")
     expect(contextText.join("\n")).toContain("GitHub lifecycle is enabled")
-    expect(contextText.join("\n")).toContain("confirm: true and checker approval are never user authorization")
+    // Per-session gates: the runtime context discloses the user-mediated
+    // narrowing surface and the read-only inspection tool.
+    expect(contextText.join("\n")).toContain("The user can narrow or disable individual gates for the current session with /gates or the TUI gate picker")
+    expect(contextText.join("\n")).toContain("inspect the effective per-session gates with orchestrator_gates_get")
+    expect(contextText.join("\n")).toContain("A gate disabled for this session is final")
+    // Merge is autonomous (no separate user instruction) and the terminal-drive
+    // Definition of Done is part of the orchestrator runtime context.
+    expect(contextText.join("\n")).toContain("merge are autonomous when the durable publish capability and the per-session gates allow them")
+    expect(contextText.join("\n")).toContain("no separate user merge instruction is required")
+    expect(contextText.join("\n")).toContain("Definition of Done (terminal drive)")
     expect(contextText.join("\n")).toContain("orchestrator_task_complexity_classify")
     expect(contextText.join("\n")).toContain("orchestrator_handoff_validate")
     expect(contextText.join("\n")).toContain("orchestrator_admission_transition")
@@ -234,7 +267,7 @@ describe("server plugin contract", () => {
     expect(prompts[0].delivery).toBe("queue")
 
     await cleanup?.()
-    expect(disposed).toEqual(["execute.after", "session-hook", "tool", "command", "agent"])
+    expect(disposed).toEqual(["execute.after", "session-hook", "rpc", "tool", "command", "agent"])
     // The worktree event sync registered its own real dispose, which closed
     // the subscribed event stream.
     expect(stream.closed).toBe(true)
@@ -251,6 +284,7 @@ describe("server plugin contract", () => {
     const disposed: string[] = []
     const switches: string[] = []
     const prompts: any[] = []
+    const rpcRegistrations: Array<{ definition: any; handlers: any }> = []
     const stream = eventStream()
     let contextHook: ((event: any) => void) | undefined
     const registration = (name: string) => ({
@@ -296,6 +330,12 @@ describe("server plugin contract", () => {
           return registration("tool")
         },
         hook: async (name: string) => registration(name),
+      },
+      rpc: {
+        register: async (definition: unknown, handlers: unknown) => {
+          rpcRegistrations.push({ definition, handlers })
+          return registration("rpc")
+        },
       },
       event: {
         subscribe: () => stream,
@@ -350,14 +390,20 @@ describe("server plugin contract", () => {
     expect(disabledContext.join("\n")).not.toContain("orchestrator_worktree_create")
     expect(disabledContext.join("\n")).not.toContain("GitHub lifecycle is enabled")
     expect(disabledContext.join("\n")).not.toContain("orchestrator_github_pr_merge")
+    // The terminal-drive Definition of Done is gated on github||publish too.
+    expect(disabledContext.join("\n")).not.toContain("Definition of Done (terminal drive)")
     expect(disabledContext.join("\n")).toContain("orchestrator_task_complexity_classify")
+    // The read-only gates surface and its user-mediated narrowing note are
+    // universal context regardless of feature flags.
+    expect(disabledContext.join("\n")).toContain("orchestrator_gates_get")
+    expect(disabledContext.join("\n")).toContain("A gate disabled for this session is final")
 
     await cleanup?.()
     // Disposal order is reverse registration order: the worktree sync (inline
     // dispose, no named registration), the plugin's execute.after warn hook,
-    // the session hook, the tool/command/agent transforms, and the
-    // observability runtime last (which disposes its before/after hooks).
-    expect(disposed).toEqual(["execute.after", "session-hook", "tool", "command", "agent", "execute.before", "execute.after"])
+    // the session hook, the gates rpc, the tool/command/agent transforms, and
+    // the observability runtime last (which disposes its before/after hooks).
+    expect(disposed).toEqual(["execute.after", "session-hook", "rpc", "tool", "command", "agent", "execute.before", "execute.after"])
     expect(stream.closed).toBe(true)
   })
 })

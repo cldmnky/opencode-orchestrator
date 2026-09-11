@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import type { Context } from "@opencode-ai/plugin/tui/context"
+import type { Context } from "@opencode/plugin/tui/context"
 import { tuiPlugin } from "../../src/tui.js"
+import { commandDefinitions } from "../../src/opencode-v2/commands/index.js"
+import { parseOptions } from "../../src/core/config.js"
 
 describe("TUI plugin contract", () => {
   test("registers its keymap layer from the app slot before the first async boundary", async () => {
@@ -136,6 +138,134 @@ describe("TUI plugin contract", () => {
       "session.created",
       "slot",
     ])
+  })
+
+  test("registers palette commands with short /name titles", async () => {
+    const commands: Array<{ id?: string; title?: string; group?: string; palette?: boolean; slash?: { name: string } }> = []
+    const specs = commandDefinitions(parseOptions({}))
+    const context = {
+      options: {},
+      location: { directory: "/workspace" },
+      data: {
+        on: () => () => {},
+        location: {
+          default: () => ({ directory: "/workspace" }),
+          command: {
+            sync: async () => {},
+            invalidate: () => {},
+            list: () => specs.map((spec) => ({ name: spec.name, description: spec.description })),
+          },
+        },
+      },
+      ui: {
+        slot: (claim: { render: (input: Record<string, never>) => unknown }) => {
+          claim.render({})
+          return () => {}
+        },
+      },
+      keymap: {
+        layer: (definition: () => { commands: typeof commands }) => {
+          commands.push(...definition().commands)
+        },
+      },
+    } as unknown as Context
+
+    const cleanup = await tuiPlugin.setup(context)
+    await cleanup?.()
+
+    // Every runtime command is in the palette and `/` completion with a
+    // short /name title; the group header already says "OpenCode
+    // Orchestrator" so titles carry no redundant prefix.
+    expect(commands.map((command) => command.slash?.name).sort()).toEqual(specs.map((spec) => spec.name).sort())
+    for (const command of commands) {
+      expect(command.title).toBe(`/${command.slash?.name}`)
+      expect(command.group).toBe("OpenCode Orchestrator")
+      expect(command.palette).toBe(true)
+      expect(command.slash?.name).toBeTruthy()
+    }
+  })
+
+  test("opens the session gate picker and toggles gates through the server RPC", async () => {
+    const commands: Array<{ id?: string; run(input?: string): Promise<void> | void }> = []
+    const specs = commandDefinitions(parseOptions({}))
+    const selections: string[] = []
+    const setCalls: unknown[] = []
+    const toasts: string[] = []
+    let selectCalls = 0
+    const gate = (name: string, state: { enabled: boolean; ceiling?: boolean; sessionDisabled?: boolean; ceilingReason?: string }) => ({
+      gate: name,
+      enabled: state.enabled,
+      ceiling: state.ceiling ?? true,
+      ceilingSource: "project",
+      sessionDisabled: state.sessionDisabled ?? !state.enabled,
+      ...(state.ceilingReason !== undefined ? { ceilingReason: state.ceilingReason } : {}),
+    })
+    const view = {
+      sessionID: "session",
+      gates: [
+        gate("merge", { enabled: true }),
+        gate("push", { enabled: false, sessionDisabled: true }),
+        gate("github-mutations", { enabled: false, ceiling: false, ceilingReason: "github.enabled is off" }),
+      ],
+    }
+    const context = {
+      options: {},
+      location: { directory: "/workspace" },
+      data: {
+        on: () => () => {},
+        location: {
+          default: () => ({ directory: "/workspace" }),
+          command: {
+            sync: async () => {},
+            invalidate: () => {},
+            list: () => specs.map((spec) => ({ name: spec.name, description: spec.description })),
+          },
+        },
+      },
+      ui: {
+        slot: (claim: { render: (input: Record<string, never>) => unknown }) => {
+          claim.render({})
+          return () => {}
+        },
+        router: { current: () => ({ type: "session", sessionID: "session" }) },
+        dialog: {
+          select: async (input: { title: string }) => {
+            selections.push(input.title)
+            selectCalls += 1
+            // First open selects the enabled `merge` row (turning it off for
+            // the session); the reopened dialog closes.
+            return selectCalls === 1 ? { kind: "gate", status: view.gates[0] } : { kind: "close" }
+          },
+          alert: async () => {},
+        },
+        toast: { show: (input: { message?: string }) => void toasts.push(input.message ?? "") },
+      },
+      keymap: {
+        layer: (definition: () => { commands: typeof commands }) => {
+          commands.push(...definition().commands)
+        },
+      },
+      client: {
+        rpc: (definition: { id: string }) => {
+          expect(definition.id).toBe("opencode-orchestrator.gates")
+          return {
+            get: async () => view,
+            set: async (input: unknown) => {
+              setCalls.push(input)
+              return { ...view, message: "'merge' is now off for this session" }
+            },
+          }
+        },
+      },
+    } as unknown as Context
+
+    const cleanup = await tuiPlugin.setup(context)
+    await commands.find((command) => command.id?.endsWith(".gates"))?.run()
+    await cleanup?.()
+
+    expect(selections).toEqual(["Session gates (select to toggle)", "Session gates (select to toggle)"])
+    expect(setCalls).toEqual([{ sessionID: "session", gate: "merge", disabled: true }])
+    expect(toasts).toContain("'merge' is now off for this session")
   })
 })
 

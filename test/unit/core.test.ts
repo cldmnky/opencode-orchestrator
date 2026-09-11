@@ -15,6 +15,7 @@ import {
   HANDOFF_FORMAT,
   MANAGED_WORKTREE_GUIDANCE,
   PROMPTING_POLICY_GUIDANCE,
+  PUBLICATION_POLICY_GUIDANCE,
   REMOTE_ORCHESTRATION_GUIDANCE,
   SECRET_HANDLING_GUIDANCE,
   STRUCTURED_HANDOFF_GUIDANCE,
@@ -23,6 +24,7 @@ import {
   WORKTREE_LIFECYCLE_GUIDANCE,
   orchestrationCapabilities,
   orchestrationRules,
+  terminalDriveGuidance,
 } from "../../src/core/policy.js"
 import { ROLE_DELEGATION, ROLE_GUIDANCE, delegationGraphSummary } from "../../src/core/roles.js"
 
@@ -108,6 +110,8 @@ describe("configuration", () => {
       expect(options.commands.cd).toBe(value)
       expect(COMMAND_NAMES).not.toContain("cd")
     }
+    // `gates` is a normal command now; `cd` stays a legacy, ignored key.
+    expect(COMMAND_NAMES).toContain("gates")
     const definitions = commandDefinitions(parseOptions({ commands: { cd: true } }))
     expect(definitions.map((definition) => definition.name)).toEqual([
       "orchestrate",
@@ -120,6 +124,7 @@ describe("configuration", () => {
       "polish",
       "stress-plan",
       "publish",
+      "gates",
     ])
     expect(definitions.map((definition) => definition.name)).not.toContain("cd")
     // An unknown command key is still rejected by the strict schema.
@@ -493,8 +498,10 @@ describe("remote orchestration policy", () => {
     const enabled = parseOptions({ publish: { enabled: true } })
     for (const [, prompt] of promptKinds(enabled)) {
       expect(prompt).toContain("Durable publication authorization is capability policy, never caller authentication")
-      expect(prompt).toContain("without re-prompting for exactly: worktree push, draft PR creation, the draft-to-ready transition, and the verified post-ready approval")
-      expect(prompt).toContain("It never authorizes issue creation and never authorizes PR merge")
+      expect(prompt).toContain("without re-prompting for exactly: worktree push, draft PR creation, the draft-to-ready transition, the verified post-ready approval, and merge after the full merge precondition chain")
+      expect(prompt).toContain("It never authorizes issue creation")
+      expect(prompt).toContain("/gates (or the TUI gate picker) can narrow any of these steps — including merge — for the current session only")
+      expect(prompt).toContain("a session-disabled gate is final")
       expect(prompt).toContain("Mandatory publication sequence: commit clean changes first")
       expect(prompt).toContain("rerun verification and sync, commit, and restart the exact-revision review")
       expect(prompt).toContain("Pull requests are always created as drafts")
@@ -516,6 +523,52 @@ describe("remote orchestration policy", () => {
     }
   })
 
+  test("terminal drive guidance appears exactly when github or publish is enabled", () => {
+    const publishOnly = parseOptions({ publish: { enabled: true } })
+    // The terminal-drive Definition of Done is embedded by featureGuidance, so
+    // it appears in worker/command/continuation prompt kinds when github or
+    // publish is enabled. The static orchestrator system prompt does not embed
+    // it; the runtime context hook does instead (asserted in the contract test).
+    for (const [name, prompt] of promptKinds(GITHUB)) {
+      if (name === "orchestrator system") continue
+      expect(prompt, name).toContain("Definition of Done (terminal drive)")
+      expect(prompt, name).toContain("Run the terminal chain in order as soon as the work is verified")
+      expect(prompt, name).toContain("The publish capability authorizes these steps; only the fail-closed preconditions can refuse them")
+    }
+    for (const [name, prompt] of promptKinds(publishOnly)) {
+      if (name === "orchestrator system") continue
+      expect(prompt, name).toContain("Definition of Done (terminal drive)")
+      expect(prompt, name).toContain("If a terminal step is refused by a session-disabled gate")
+      // Publish-only prompts never carry the github terminal-chain line.
+      expect(prompt, name).not.toContain("Run the terminal chain in order as soon as the work is verified")
+    }
+    // The terminal drive never leaks into the all-disabled prompts.
+    for (const [, prompt] of allPromptKinds()) {
+      expect(prompt).not.toContain("Definition of Done (terminal drive)")
+    }
+    // Exactly one terminal-drive section per feature-guidance prompt.
+    const worker = buildWorkerSystem("implementation", GITHUB)
+    expect(worker.split("Definition of Done (terminal drive)").length - 1).toBe(1)
+
+    // The guidance function composes per enabled feature: the github terminal
+    // chain appears only with github, the gate-refusal note only with publish.
+    const both = terminalDriveGuidance({
+      github: { enabled: true },
+      worktree: { enabled: false },
+      publish: { enabled: true },
+    })
+    expect(both).toContain("Definition of Done (terminal drive)")
+    expect(both).toContain("Run the terminal chain in order as soon as the work is verified")
+    expect(both).toContain("If a terminal step is refused by a session-disabled gate")
+    expect(
+      terminalDriveGuidance({
+        github: { enabled: false },
+        worktree: { enabled: false },
+        publish: { enabled: true },
+      }),
+    ).not.toContain("Run the terminal chain in order as soon as the work is verified")
+  })
+
   test("worktree lifecycle guidance appears only when worktree is enabled", () => {
     for (const [, prompt] of promptKinds(WORKTREE)) {
       expect(prompt).toContain("Worktree lifecycle is mandatory for implementation when worktree support is enabled")
@@ -535,21 +588,24 @@ describe("remote orchestration policy", () => {
       expect(prompt).toContain("implementers never push branches or create or merge pull requests")
       expect(prompt).toContain("orchestrator_github_pr_create")
       expect(prompt).toContain("orchestrator_github_pr_merge")
-      expect(prompt).toContain("separate explicit user request")
-      expect(prompt).toContain("expected head SHA")
-      expect(prompt).toContain("literal confirm: true")
-      expect(prompt).toContain("is never user authorization")
+      // Merge is autonomous now; the old "separate explicit user request"
+      // framing is gone.
+      expect(prompt).toContain("Merge is autonomous when the durable publish capability 'merge' and the per-session gates allow it")
+      expect(prompt).toContain("no separate user merge instruction is required")
+      expect(prompt).not.toContain("separate explicit user request")
+      expect(prompt).toContain("the exact head and base SHAs")
       expect(prompt).toContain("stop truthfully")
     }
     for (const [, prompt] of allPromptKinds()) {
       expect(prompt).not.toContain("orchestrator_github_pr_merge")
-      expect(prompt).not.toContain("is never user authorization")
+      expect(prompt).not.toContain("Merge is autonomous")
     }
   })
 
   test("worktree-only and github-only options compose without leaking the other feature's guidance", () => {
     for (const [, prompt] of promptKinds(WORKTREE)) {
       expect(prompt).not.toContain("orchestrator_github_pr_merge")
+      expect(prompt).not.toContain("Merge is autonomous")
     }
     for (const [, prompt] of promptKinds(GITHUB)) {
       expect(prompt).not.toContain("Worktree lifecycle is mandatory")
@@ -558,18 +614,27 @@ describe("remote orchestration policy", () => {
     for (const [, prompt] of promptKinds(BOTH)) {
       expect(prompt).toContain("orchestrator_github_pr_merge")
       expect(prompt).toContain("the orchestrator MUST run orchestrator_worktree_create -> orchestrator_worktree_enter")
-      expect(prompt).toContain("is never user authorization")
+      expect(prompt).toContain("Merge is autonomous")
+      // Publication policy stays gated behind publish.enabled even with
+      // github+worktree on.
+      expect(prompt).not.toContain("Durable publication authorization is capability policy")
     }
   })
 
-  test("github guidance keeps confirm:true and checker approval distinct from user authorization", () => {
+  test("github guidance makes merge autonomous while issue creation stays the only never-authorized step", () => {
     expect(GITHUB_LIFECYCLE_GUIDANCE).toContain(
-      "A confirm: true flag or a checker's approval is never user authorization",
+      "Merge is autonomous when the durable publish capability 'merge' and the per-session gates allow it",
     )
-    expect(GITHUB_LIFECYCLE_GUIDANCE).toContain("run orchestrator_github_pr_merge with a fresh")
-    expect(GITHUB_LIFECYCLE_GUIDANCE).toContain("then verify merged:true again with a fresh orchestrator_github_pr_view")
+    expect(GITHUB_LIFECYCLE_GUIDANCE).toContain("no separate user merge instruction is required")
+    expect(GITHUB_LIFECYCLE_GUIDANCE).toContain("Run orchestrator_github_pr_merge with a fresh conflict-free view")
+    expect(GITHUB_LIFECYCLE_GUIDANCE).toContain("verify merged:true again with a fresh orchestrator_github_pr_view")
+    expect(GITHUB_LIFECYCLE_GUIDANCE).not.toContain("separate explicit user request")
+    // Issue creation is the one step the durable capability never authorizes.
+    expect(PUBLICATION_POLICY_GUIDANCE).toContain("It never authorizes issue creation")
+    expect(PUBLICATION_POLICY_GUIDANCE).not.toContain("never authorizes PR merge")
     for (const [, prompt] of promptKinds(BOTH)) {
-      expect(prompt).toContain("is never user authorization")
+      expect(prompt).toContain("Merge is autonomous")
+      expect(prompt).toContain("no separate user merge instruction is required")
     }
   })
 

@@ -48,6 +48,7 @@ import { sessionAnchorStorageKey, type SessionAnchor } from "../../src/opencode-
 import { evidenceSchema, type EvidenceRecord } from "../../src/opencode-v2/orchestration/evidence.js"
 import { reviewStorageKey, type ReviewV1Record } from "../../src/opencode-v2/observability/review.js"
 import { publishStorageKey } from "../../src/opencode-v2/publish/state.js"
+import { gatesStorageKey } from "../../src/opencode-v2/gates/state.js"
 
 const location = { directory: "/workspace", project: { id: "origin" } }
 
@@ -1277,6 +1278,57 @@ describe("worktree tools", () => {
     await expect(
       tools.get("worktree_create")!.execute({ confirm: true }, toolContext("session-1", "orchestrator")),
     ).rejects.toThrow(/allow_mutations/)
+  })
+
+  test("a session-disabled worktree-mutations gate refuses mutations while worktree_enter stays allowed", async () => {
+    const tracked = await mkdtemp(path.join(tmpdir(), "orchestrator-gated-enter-"))
+    const { tools, values } = collectWorktreeTools()
+    // Fully seed the publication pipeline so the refusal below comes from the
+    // session gate alone, not from a missing record/grant/receipt.
+    seedSyncedRecord(values)
+    seedPublishGrant(values)
+    seedApprovedReview(values)
+    // Seed the per-session narrowing exactly as gates/state.ts writes it.
+    values.set(gatesStorageKey("session-1"), {
+      version: 1,
+      sessionID: "session-1",
+      disabled: ["worktree-mutations"],
+      updatedAt: 1,
+    })
+    const context = toolContext("session-1", "orchestrator")
+
+    const create = await tools
+      .get("worktree_create")!
+      .execute(
+        { repoRoot: "/repo", directory: "/srv/worktrees/feature", branch: "feature", base: "main", confirm: true },
+        context,
+      )
+    const sync = await tools.get("worktree_sync")!.execute({ confirm: true }, context)
+    const push = await tools.get("worktree_push")!.execute({ confirm: true }, context)
+    const cleanup = await tools.get("worktree_cleanup")!.execute({ confirm: true }, context)
+    const refusals: Array<[string, string]> = [
+      ["worktree_create", create.content],
+      ["worktree_sync", sync.content],
+      ["worktree_push", push.content],
+      ["worktree_cleanup", cleanup.content],
+    ]
+    for (const [name, content] of refusals) {
+      expect(content, name).toContain(`${name} refused`)
+      expect(content, name).toContain("'worktree-mutations' is disabled for this session")
+      expect(content, name).toContain("/gates worktree-mutations=on")
+      expect(content, name).not.toContain("evidence")
+    }
+
+    // worktree_enter never runs git and is deliberately not gated by
+    // worktree-mutations: point the tracked record at a real directory so the
+    // entry itself succeeds despite the disabled mutation gate.
+    const record = values.get(worktreeStorageKey("origin", "session-1")) as WorktreeRecord
+    values.set(worktreeStorageKey("origin", "session-1"), { ...record, dir: tracked })
+    const enter = await tools.get("worktree_enter")!.execute({}, context)
+    const entered = JSON.parse(enter.content) as { entered: boolean; record: WorktreeRecord }
+    expect(entered.entered).toBe(true)
+    expect(entered.record.status).toBe("moved")
+    expect(enter.content).not.toContain("disabled for this session")
   })
 
   test("create requires a literal confirm: true", async () => {

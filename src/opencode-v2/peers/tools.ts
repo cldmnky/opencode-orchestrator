@@ -42,7 +42,7 @@ import {
 import { parseReviewRecord, reviewStorageKey, type ReviewV1State } from "../observability/review.js"
 import { redactKnownPatterns } from "../process/redact.js"
 import { readWorktree, type WorktreeStatus } from "../worktree/state.js"
-import type { Info as ToolInfo } from "@opencode-ai/plugin/promise/tool"
+import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 
 type ToolDraftLike = {
   add(tool: ToolInfo<any, undefined>): void

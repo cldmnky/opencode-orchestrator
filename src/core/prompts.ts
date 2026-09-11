@@ -14,6 +14,7 @@ import {
   WORKTREE_LIFECYCLE_GUIDANCE,
   orchestrationCapabilities,
   orchestrationRules,
+  terminalDriveGuidance,
 } from "./policy.js"
 import type { OrchestratorOptions } from "./config.js"
 import { ROLE_GUIDANCE } from "./roles.js"
@@ -85,6 +86,7 @@ export function buildCommandPrompt(name: string, argumentsText: string, options?
     handover: `Create a self-contained continuation handover for: ${args}. Read the current session context and VCS state, preserve user requirements accurately, redact secrets, separate established facts from assumptions, and include completed work, pending work, decisions, verification, and blockers.`,
     polish: `Polish the requested scope without changing behavior: ${args}. Inspect changed files, make only justified cleanup edits, verify each affected area, and request an independent aggregate review of the full change.`,
     "stress-plan": `Create a robust plan for: ${args}. Gather repository facts, draft the plan, obtain independent critiques covering correctness, scope, security, and feasibility, then synthesize one revised plan with an explicit phase order under .orchestrator/plans/.`,
+    gates: `Manage the per-session orchestrator gates for: ${args}. This control request is handled by the plugin before any model turn; no prompt is delivered.`,
   }
 
   return `${prompts[name] ?? `Execute ${name}: ${args}`}\n\n${common}`
@@ -153,6 +155,7 @@ function featureGuidance(options: OrchestratorOptions | undefined): string {
   if (options.worktree.enabled) sections.push(WORKTREE_LIFECYCLE_GUIDANCE)
   if (options.github.enabled) sections.push(GITHUB_LIFECYCLE_GUIDANCE)
   if (options.publish.enabled) sections.push(PUBLICATION_POLICY_GUIDANCE)
+  if (options.github.enabled || options.publish.enabled) sections.push(terminalDriveGuidance(options))
   return sections.join("\n")
 }
 

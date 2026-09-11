@@ -15,7 +15,7 @@ Give the orchestrator a task in plain English — it breaks the work down, deleg
 - **Built-in review.** Every implementation is audited by a dedicated reviewer before you see the final result.
 - **Asks before it guesses.** When a request is ambiguous, the orchestrator asks you a few targeted questions — with answer options — before breaking the work down. Disable with `"clarify": { "mode": "off" }`.
 - **Goals that survive idle.** Start a long-running objective and let it continue during idle periods in the same OpenCode session.
-- **Optional power features** when you need them: GitHub and git worktree integration, budgets and review gates, a durable `/publish` publication capability, and same-project peer-orchestrator discovery.
+- **Optional power features** when you need them: GitHub and git worktree integration, budgets and review gates, a durable `/publish` publication capability with per-session `/gates` narrowing, and same-project peer-orchestrator discovery.
 
 ### The team
 
@@ -61,6 +61,7 @@ Delegation outside an agent’s own graph is off-limits even if the host would a
 | Hand context to the next session | `/handover` | *“Focus on payments regression”* |
 | Choose models for worker agents | `/worker-models` | — |
 | Inspect or toggle the durable publication capability | `/publish` | `/publish status` |
+| Narrow the publication/gate steps for this session only | `/gates` | `/gates merge=off` |
 
 For a single-file typo or one-line edit, just prompt the model directly — you don’t need orchestration.
 
@@ -90,7 +91,7 @@ What the installer does:
 - Adds the five agents (`orchestrator`, `planner`, `explore`, `implementer`, `reviewer`) if they’re missing
 - Sets `experimental.subagent_depth: 3` (only when the key is absent) so OpenCode’s native subagent depth limit — which defaults to 1 — doesn’t block the deepest approved chain `orchestrator → implementer → planner → explore`
 - Gives new agents permission defaults that allow exactly the bounded nested-delegation graph (see [Bounded nested delegation](#bounded-nested-delegation)): a broad `subagent` deny followed by exact target-specific allows, with `webfetch`/`websearch` granted directly to `explore`
-- Writes the orchestrator-only permission actions for the feature tool families — `orchestrator_gh`, `orchestrator_worktree`, `orchestrator_validation`, `orchestrator_observability`, plus the publication policy (`orchestrator_publish`) and peer discovery (`orchestrator_peer`) — as `allow` for the orchestrator and `deny` for every worker
+- Writes the orchestrator-only permission actions for the feature tool families — `orchestrator_gh`, `orchestrator_worktree`, `orchestrator_validation`, `orchestrator_observability`, plus the publication policy (`orchestrator_publish`), peer discovery (`orchestrator_peer`), and the read-only session gate inspection (`orchestrator_gates`) — as `allow` for the orchestrator and `deny` for every worker
 - Leaves your existing config and commands untouched — re-running it is safe
 
 > **Upgrading?** The installer never rewrites agents that already exist in your config. If your workers were installed by an older version (before nested delegation), they carry a flat `subagent` deny and cannot delegate. Either delete the old agent entries and reinstall, or add the target-specific allows yourself — for example, to `implementer`:
@@ -103,14 +104,15 @@ What the installer does:
 > ]
 > ```
 >
-> Agents preserved from an older install also predate the shared permission actions for the newer tool families (`orchestrator_publish`, `orchestrator_peer`): the plugin’s agent transform appends the family rules automatically only when no exact rule exists, and an explicit user-authored rule is never overridden. To migrate by hand, add to the **orchestrator**:
+> Agents preserved from an older install also predate the shared permission actions for the newer tool families (`orchestrator_publish`, `orchestrator_peer`, `orchestrator_gates`): the plugin’s agent transform appends the family rules automatically only when no exact rule exists, and an explicit user-authored rule is never overridden. To migrate by hand, add to the **orchestrator**:
 >
 > ```jsonc
 > { "action": "orchestrator_publish", "resource": "*", "effect": "allow" },
-> { "action": "orchestrator_peer", "resource": "*", "effect": "allow" }
+> { "action": "orchestrator_peer", "resource": "*", "effect": "allow" },
+> { "action": "orchestrator_gates", "resource": "*", "effect": "allow" }
 > ```
 >
-> and the same two actions with `"effect": "deny"` to each worker you want kept locked down. Anything you write explicitly stays authoritative — the installer and the agent transform never rewrite it.
+> and the same three actions with `"effect": "deny"` to each worker you want kept locked down. Anything you write explicitly stays authoritative — the installer and the agent transform never rewrite it.
 >
 > The plugin’s agent transform never overrides user-authored permission rules, so whatever you write stays authoritative. Re-running the installer also adds `experimental.subagent_depth: 3` when that key is absent; an explicit value you set is always preserved.
 
@@ -245,6 +247,10 @@ Mark a plan done with `status: complete` in frontmatter or a `## Status / comple
 /publish status    # inspect the durable project-scoped publication policy
 /publish enable    # opt in per project (requires publish.enabled: true in config)
 /publish disable   # revoke the durable authorization
+/gates             # open the TUI gate picker for this session
+/gates <gate>=off  # narrow one step for this session only
+/gates <gate>=on   # re-enable it (never beyond the project/config ceiling)
+/gates reset       # clear this session's narrowing
 /worker-models            # open the TUI worker-model picker
 /worker-models explore=default
 /worker-models reset      # restore all workers to configured models
@@ -252,6 +258,7 @@ Mark a plan done with `status: complete` in frontmatter or a `## Status / comple
 
 `/stress-plan` drafts a plan, then critiques it from four angles (correctness, simplicity, security, feasibility) before finalizing.
 `/publish` toggles a durable, project-scoped **authorization policy** — see [Publication capability](#publication-capability-publish) for exactly what it does and does not authorize.
+`/gates` shows and narrows the per-session orchestrator gates (`push`, `pr-draft-create`, `pr-ready-transition`, `approve-after-review`, `merge`, `github-mutations`, `worktree-mutations`). Running it with no argument opens the TUI gate picker; `/gates <gate>=off` narrows one step for this session, `/gates <gate>=on` removes that narrowing, and `/gates reset` follows the project ceiling again. A session can only **narrow** the project/config ceiling and can never widen it — turning a gate on still requires the ceiling (the durable publication capability or the static `github`/`worktree` mutation switches) to allow it. Session gates apply to the current session only.
 `/worker-models` selects durable runtime models for `planner`, `explore`, `implementer`, and `reviewer` only. The TUI picker lists enabled, tool-capable models and their variants. Text form accepts `worker=provider/model[#variant]`, `worker=default`, `list`, and `reset`.
 
 ---
@@ -367,6 +374,7 @@ Let the orchestrator create and list issues/PRs via your local `gh` CLI.
 - Creating issues/PRs needs `allow_mutations: true` **and** `confirm: true` on each call
 - Pull requests are **always created as drafts** — `orchestrator_github_pr_create` has no draft toggle; the client sends `draft: true` and refuses a response that is not a draft. A PR is moved to ready (`orchestrator_github_pr_ready`) only when a fresh view directly proves the exact head revision, `draft: true`, `mergeable: true`, no dirty/unknown conflict state, and current remote base ancestry; unknown mergeability stays draft and is truthfully deferred — no polling
 - Verified automatic approval (`orchestrator_github_pr_approve`) requires the ready transition, an exact-revision approved internal review, a non-author authenticated viewer, and fresh conflict-free evidence. A same-author attempt or API failure is refused and reported truthfully, and the automated approval is never claimed to satisfy branch protection
+- Merging (`orchestrator_github_pr_merge`) is **autonomous** once the durable `merge` capability and the per-session `merge` gate allow it: no separate user request and no `confirm` flag are involved. It merges only after a fresh view proves the exact head/base revision, an open, unmerged, non-draft, `mergeable: true` pull with no dirty/unknown conflict state, the current remote base as an ancestor of the exact head, and an exact-revision approved internal review receipt — then verifies `merged: true` with a fresh post-merge view. Any moved SHA, conflict, missing receipt, branch protection, required check/review, permission failure, or merge queue is reported truthfully, never bypassed or polled
 - Auth stays with `gh` — run `gh auth login` with least privilege. The plugin never reads tokens.
 - Verify: `orchestrator_github_capabilities` (inside OpenCode) or `gh auth status` locally
 
@@ -402,19 +410,25 @@ Three prerequisites must all be in place before the orchestrator may publish aut
 What the capability means:
 
 - **Authorization policy, not authentication.** The durable record says the project capability is enabled and lists what it authorizes; nothing in it proves which human invoked `/publish`. It never mutates Git or GitHub itself, and it never weakens the static `github.enabled` / `github.allow_mutations` / `worktree.enabled` / `worktree.allow_mutations` gates.
-- **When enabled, it authorizes the orchestrator to pass `confirm: true` without re-prompting** for exactly four steps: worktree push, draft PR creation, the draft-to-ready transition, and the verified post-ready approval. It **never authorizes issue creation** (still gated on `github.allow_mutations` + `confirm: true`) and **never authorizes PR merge** — merge continues to need the static gate plus a separate explicit user request (see below).
-- Every publication step still runs the full fail-closed gate chain: static gates, the durable capability, a clean tree, an unchanged latest remote base, the exact synced head, base ancestry, a literal `confirm: true`, and an exact-revision approved internal review receipt.
+- **When enabled, it authorizes the orchestrator to pass `confirm: true` without re-prompting** for exactly five steps: worktree push, draft PR creation, the draft-to-ready transition, the verified post-ready approval, and the merge once the full merge precondition chain passes. It **never authorizes issue creation** (still gated on `github.allow_mutations` + `confirm: true`). Merge is the fifth authorized capability — not a separate approval.
+- Every publication step still runs the full fail-closed gate chain: static gates, the durable capability, the per-session gates, a clean tree, an unchanged latest remote base, the exact synced head, base ancestry, and an exact-revision approved internal review receipt. The confirm-gated steps additionally require a literal `confirm: true`; the autonomous merge does not.
 
 Mandatory sequence (prompt policy, enforced by the tools):
 
 ```
 commit clean changes → worktree_sync against the latest remote base →
-verify/test → exact-revision bounded review → worktree_push → draft PR create
+verify/test → exact-revision bounded review → worktree_push → draft PR create →
+ready → approve at the exact revision → merge at the exact approved SHA →
+post-merge verify → worktree cleanup
 ```
 
 If the sync reports conflicts after aborting, the orchestrator delegates an implementer to resolve them in the tracked worktree, reruns verification/sync, commits, and restarts the exact-revision review; it stops only when conflicts cannot safely be resolved. If the base or head changes after the review, it re-syncs and re-reviews. A push without a sync receipt, with a moved base, a changed head, or a missing/mismatched approved review receipt is refused.
 
-**Merge authorization is unchanged:** merging a PR still requires a separate explicit user request, a fresh `orchestrator_github_pr_view` with the exact expected head SHA, a literal `confirm: true`, and post-merge verification. A `confirm: true` flag or the checker’s approval is never user authorization.
+**Merge is the fifth authorized capability, and it is autonomous.** `orchestrator_github_pr_merge` needs no separate user request and ignores a `confirm` flag. It requires the durable `merge` capability plus the per-session `merge` gate, an exact-revision approved internal review receipt for the same head/base, and a fresh `orchestrator_github_pr_view` proving the pull is open, unmerged, and non-draft with `mergeable: true` and no dirty or unknown conflict state. It checks the exact expected head and base SHAs, requires the current remote base to be an ancestor of the exact head, merges with that exact SHA, then proves `merged: true` with a fresh post-merge view. Branch protection, required checks or reviews, permission failures, and merge queues are reported truthfully — never bypassed, never polled.
+
+**Definition of Done (terminal drive):** a ship-shaped task is finished only when it is merged and the tracked worktree is cleaned up, or when a configured gate or missing capability refuses the next terminal step. The orchestrator runs the terminal chain as soon as the work is verified — it never stops at “changes are ready” or “the PR is open” and waits for you to ask for the merge. If a session-disabled `/gates` step or a missing durable capability refuses a step, it names the exact step and the one command that would change it instead of re-planning around the gate.
+
+A session can narrow (never widen) any of these steps for the current session with `/gates`; see the command description above. A gate disabled for the session is final until you re-enable it.
 
 Verify the current policy inside OpenCode with `/publish status` or `orchestrator_publish_policy_get` (read-only, orchestrator-only). Tool: `orchestrator_publish_policy_get`.
 
@@ -476,6 +490,8 @@ For teams that want cost/usage limits or a stricter review gate:
 - For worktree create/sync/push/cleanup, enable the feature and mutations, then pass literal `confirm: true`; enter needs only `worktree.enabled: true`
 - Push/PR-create refusals naming a missing capability mean the durable project policy is off: run `/publish status`, then `/publish enable` (needs `publish.enabled: true` in config). Refusals naming a missing sync receipt or review receipt mean the gate chain was not satisfied: set `review.mode: "bounded"` (the default `"prompt"` registers no review tools, so no exact-revision review receipt can exist), then run `orchestrator_worktree_sync`, verify/test, run the bounded review, and push
 - Ready transition refused? A fresh view must show `draft: true`, `mergeable: true`, no dirty/unknown conflict state, and the exact head revision — an unknown or conflicted mergeability keeps the PR a draft by design
+- Merge refused? The durable `merge` capability and the per-session `merge` gate must both allow it, and a fresh view must show an open, unmerged, non-draft pull at the exact head and base SHAs with `mergeable: true`, no dirty/unknown conflict state, the current remote base as an ancestor of the exact head, and an exact-revision approved review receipt. Branch protection, required checks or reviews, and merge queues are reported truthfully — never bypassed
+- A publication step you expected to be on may be narrowed for this session: run `/gates` to inspect the effective gates, and `/gates <gate>=on` to remove a session narrowing (it still cannot exceed the project/config ceiling). `/gates reset` clears every session narrowing
 
 **Nested delegation stops after the first hop?**
 
@@ -490,7 +506,8 @@ OpenCode’s native `experimental.subagent_depth` defaults to 1, which prevents 
 - **File ownership coordinates agents.** The orchestrator assigns non-overlapping file scopes to each `implementer`, but those prompt-level scopes are not filesystem isolation. `max_parallel` (default 4) caps concurrency.
 - **Handoffs are structured.** Workers return a five-field summary (`Outcome / Files / Verification / Risks / Follow-up`) plus a version-1 JSON envelope. The orchestrator can run `orchestrator_handoff_validate` for deterministic checks before using a handoff. Inter-agent messages — parent→child prompts and child→parent handoffs alike — are expected to be explicit, self-contained, and legible on their own.
 - **Review is prompt-based by default.** `require_review: true` means the orchestrator *asks* a reviewer. There’s no hard runtime gate — `bounded` review adds an explicit `review_get` / `review_transition` flow with a circuit breaker if you need it.
-- **Publication is capability policy.** `/publish` toggles a durable, project-scoped authorization record (never caller identity). When the config master gate is on and the record is enabled, the orchestrator may pass `confirm: true` without re-prompting for push / draft PR create / ready / approve — never issue creation, never merge. Every step still requires the mandatory sync → verify → exact-revision review sequence and fails closed otherwise.
+- **Publication is capability policy.** `/publish` toggles a durable, project-scoped authorization record (never caller identity). When the config master gate is on and the record is enabled, the orchestrator may pass `confirm: true` without re-prompting for push / draft PR create / ready / approve / merge (merge is autonomous and ignores `confirm`) — never issue creation. Every step still requires the mandatory sync → verify → exact-revision review sequence and fails closed otherwise, and a per-session `/gates` narrowing can turn any step off for the current session.
+- **Terminal drive is the default ending.** For ship-shaped work, the Definition of Done is merged and cleaned up, or a named gate/capability refusal — not a paused “PR is open” state waiting for a merge instruction.
 - **State lives in OpenCode storage.** Goals and plan runs are keyed to the current session and persist through its idle periods via `ctx.storage` with per-session locks; session deletion removes that state. Conversations remain the source of truth.
 
 Want the formal contracts? `docs/phase-1/` has them (D2 handoff, D4 gate, etc.) — you don’t need them to get started.
@@ -506,7 +523,8 @@ Want the formal contracts? `docs/phase-1/` has them (D2 handoff, D4 gate, etc.) 
 - No persistence of evidence receipts beyond the tool response.
 - Token/cost tracking uses `session.usage.updated` snapshots; if the host doesn’t emit them, budgets report `unknown`.
 - S3/V1 controls are opt-in and bounded: budgets pause only *between* steps, review gates only after an explicit transition. No in-flight cancellation.
-- The publication capability is authorization bookkeeping, not caller identity: it does not prove a human invoked `/publish`, and it never bypasses the static gates, issue creation, or the separate explicit user authorization for PR merge.
+- The publication capability is authorization bookkeeping, not caller identity: it does not prove a human invoked `/publish`, and it never bypasses the static gates or issue creation. Merge still requires the durable `merge` capability, the per-session `merge` gate, and every fail-closed precondition — never a bare user ask.
+- Session gates (`/gates`, `/gates <gate>=on|off`, `/gates reset`) are a per-session narrowing only: they can turn a ceiling-allowed step off, but never widen the project/config ceiling, and they do not carry over to another session. The model has a read-only `orchestrator_gates_get` view; only `/gates` and the TUI gate picker write the narrowing record.
 - Draft/ready/approval have hard limits by design: PRs are always created as drafts; a ready transition requires fresh conflict-free evidence at the exact revision (unknown mergeability stays draft — no polling); automated approval is never claimed or relied on to satisfy branch protection, and same-author or API failures are reported truthfully, never as successes.
 - Peer discovery covers the same stable project only, and only sessions with readable goal records — it is durable metadata with a redacted objective hint, never a live or complete directory of sessions.
 
@@ -532,8 +550,8 @@ bun run build            # emits dist/index.js, dist/tui.js, dist/commands.js, d
 
 Tested against:
 
-- `@opencode-ai/plugin` `0.0.0-beta-19192`
-- `@opencode-ai/sdk` `0.0.0-beta-19192` (integration tests)
+- `@opencode/plugin` `0.0.0-beta-19425`
+- `@opencode/sdk` `0.0.0-beta-19425` (integration tests)
 
 Main plugin sets `tui: true` and publishes `./tui`. CLI-only config belongs in `cli.json`.
 

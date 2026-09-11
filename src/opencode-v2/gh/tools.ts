@@ -1,11 +1,11 @@
 import type { OrchestratorOptions } from "../../core/config.js"
 import { GH_TOOL_PERMISSION } from "../../core/permissions.js"
-import type { Info as ToolInfo } from "@opencode-ai/plugin/promise/tool"
+import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 import type { LocationLike, StorageLike } from "../goal/state.js"
 import { liveEvidence, mutationEvidence } from "../orchestration/evidence.js"
 import { createRedactor } from "../process/redact.js"
 import type { ProcessRunner } from "../process/runner.js"
-import { isPublishCapabilityAuthorized } from "../publish/state.js"
+import { requireGateEnabled } from "../gates/state.js"
 import { readReviewRecord } from "../observability/runtime.js"
 import { validateApprovedReviewRevision } from "../observability/review.js"
 import {
@@ -62,14 +62,15 @@ import {
  * review with matching id/state/commit/viewer/https URL. It never counts
  * branch-protection required checks or claims any blocked state is clean.
  *
- * `github_pr_merge` is the safe explicit-confirmation merge: it never trusts
- * the caller's SHA, method, or a `confirm: true` flag as user authorization.
- * It runs a fresh PR view, requires an open unmerged PR whose head SHA matches
- * the required `expectedHeadSha` exactly, merges with that SHA, requires
- * `merged: true`, and verifies with a second fresh view before returning any
- * success evidence. `confirm: true` is a tool flag, not proof of user
- * authorization; the caller (the orchestrator prompt) is told to merge only
- * after a separate explicit user request.
+ * `github_pr_merge` is the autonomous merge: it never trusts the caller's SHA
+ * or a `confirm: true` flag as user authorization, and no separate user merge
+ * request is required. It requires the durable publish capability `merge`
+ * (plus the per-session gate) and the exact-revision approved internal review
+ * receipt, runs a fresh PR view requiring an open, unmerged, NON-draft pull
+ * with `mergeable: true`, no dirty/unknown conflict state, and the exact
+ * expected head SHA, verifies current remote base ancestry at the exact
+ * expected base SHA, merges with that SHA, requires `merged: true`, and
+ * verifies with a second fresh view before returning any success evidence.
  *
  * All raw `gh` process output and error text is redacted inside the client
  * (known secret shapes plus caller-known `secrets`); only validated typed
@@ -197,6 +198,8 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
       requireMutations(deps.options)
+      const mutation = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "github-mutations")
+      if (!mutation.ok) return result(`github issue create refused: ${mutation.message}`)
       if (inputConfirm(input) !== true) return result("github_issue_create requires confirm: true")
       const owner = stringField(input, "owner")
       const repo = stringField(input, "repo")
@@ -269,6 +272,8 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
       requireMutations(deps.options)
+      const mutation = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "github-mutations")
+      if (!mutation.ok) return result(`github pr create refused: ${mutation.message}`)
       if (inputConfirm(input) !== true) return result("github_pr_create requires confirm: true")
       const owner = stringField(input, "owner")
       const repo = stringField(input, "repo")
@@ -282,13 +287,12 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
         return result("owner, repo, title, head, base, expectedHeadSha, and expectedBaseSha are required")
       }
       try {
-        // Durable publication authorization: policy only, never caller
-        // identity proof, and never a substitute for the static gates above.
-        const grant = await isPublishCapabilityAuthorized(deps.storage, deps.location, tool.sessionID, "pr-draft-create")
-        if (!grant.authorized) {
-          return result(
-            `github pr create refused: publication capability 'pr-draft-create' is not authorized for project ${grant.projectID}; enable it with /publish enable`,
-          )
+        // Durable publication authorization plus the per-session narrowing:
+        // policy only, never caller identity proof, and never a substitute
+        // for the static gates above.
+        const capability = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "pr-draft-create")
+        if (!capability.ok) {
+          return result(`github pr create refused: ${capability.message}`)
         }
         // Exact-revision internal review: the current bounded review record
         // must be APPROVED and carry the exact expected head/base pair.
@@ -354,6 +358,8 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
       requireMutations(deps.options)
+      const mutation = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "github-mutations")
+      if (!mutation.ok) return result(`github pr ready refused: ${mutation.message}`)
       if (inputConfirm(input) !== true) return result("github_pr_ready requires confirm: true")
       const owner = stringField(input, "owner")
       const repo = stringField(input, "repo")
@@ -363,11 +369,9 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
         return result("owner, repo, number, and expectedHeadSha are required")
       }
       try {
-        const grant = await isPublishCapabilityAuthorized(deps.storage, deps.location, tool.sessionID, "pr-ready-transition")
-        if (!grant.authorized) {
-          return result(
-            `github pr ready refused: publication capability 'pr-ready-transition' is not authorized for project ${grant.projectID}; enable it with /publish enable`,
-          )
+        const capability = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "pr-ready-transition")
+        if (!capability.ok) {
+          return result(`github pr ready refused: ${capability.message}`)
         }
         // Fresh pre-view: every gate is checked against this exact snapshot.
         const before = await viewPull(gh, { owner, repo, number })
@@ -460,6 +464,8 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
       requireMutations(deps.options)
+      const mutation = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "github-mutations")
+      if (!mutation.ok) return result(`github pr approve refused: ${mutation.message}`)
       if (inputConfirm(input) !== true) return result("github_pr_approve requires confirm: true")
       const owner = stringField(input, "owner")
       const repo = stringField(input, "repo")
@@ -470,11 +476,9 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
         return result("owner, repo, number, expectedHeadSha, and expectedBaseSha are required")
       }
       try {
-        const grant = await isPublishCapabilityAuthorized(deps.storage, deps.location, tool.sessionID, "approve-after-review")
-        if (!grant.authorized) {
-          return result(
-            `github pr approve refused: publication capability 'approve-after-review' is not authorized for project ${grant.projectID}; enable it with /publish enable`,
-          )
+        const capability = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "approve-after-review")
+        if (!capability.ok) {
+          return result(`github pr approve refused: ${capability.message}`)
         }
         // Exact internal receipt: the approved review record must carry the
         // exact expected head/base pair; anything else fails closed.
@@ -592,22 +596,24 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
   draft.add({
     name: "github_pr_merge",
     description:
-      "Merge a GitHub pull request after a fresh view, the exact expected head SHA, and post-merge verification. Requires confirm: true and a separate explicit user request.",
+      "Merge a GitHub pull request autonomously when the durable publish capability 'merge' and the per-session gates allow it, after an exact-revision approved internal review, a fresh conflict-free view at the exact expected head/base SHA, current remote base ancestry, and post-merge verification. No separate user merge instruction is required; every precondition fails closed.",
     input: prMergeInput,
     options: { namespace: "orchestrator", permission: GH_TOOL_PERMISSION },
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
       requireMutations(deps.options)
-      if (inputConfirm(input) !== true) return result("github_pr_merge requires confirm: true")
+      const mutation = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "github-mutations")
+      if (!mutation.ok) return result(`github pr merge refused: ${mutation.message}`)
       const owner = stringField(input, "owner")
       const repo = stringField(input, "repo")
       const number = numberField(input, "number")
       const expectedHeadSha = stringField(input, "expectedHeadSha")
+      const expectedBaseSha = stringField(input, "expectedBaseSha")
       const mergeMethod = stringField(input, "mergeMethod")
       const commitTitle = stringField(input, "commitTitle")
       const commitMessage = stringField(input, "commitMessage")
-      if (!owner || !repo || number === undefined || !expectedHeadSha) {
-        return result("owner, repo, number, and expectedHeadSha are required")
+      if (!owner || !repo || number === undefined || !expectedHeadSha || !expectedBaseSha) {
+        return result("owner, repo, number, expectedHeadSha, and expectedBaseSha are required")
       }
       const merge: PullMergeInput = {
         owner,
@@ -619,17 +625,70 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
         commitMessage: commitMessage || undefined,
       }
       try {
-        // Fresh pre-view: the PR must be open and unmerged, and its head SHA
-        // must match the required expected head SHA exactly. A stale or moved
-        // head refuses before any merge call; nothing is retried or fallen
-        // back to a different SHA.
+        // Durable 'merge' capability plus the per-session narrowing: no
+        // separate user merge instruction is required, but a disabled
+        // capability or session gate refuses before any read.
+        const capability = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "merge")
+        if (!capability.ok) return result(`github pr merge refused: ${capability.message}`)
+        // Exact-revision internal review receipt for the same head/base pair.
+        const reviewRecord = await readReviewRecord(deps.storage, deps.location, tool.sessionID)
+        const receipt = validateApprovedReviewRevision({
+          record: reviewRecord,
+          headSha: expectedHeadSha,
+          baseSha: expectedBaseSha,
+        })
+        if (!receipt.valid) {
+          return result(`github pr merge refused: ${receipt.message}`)
+        }
+        // Fresh pre-view: open, unmerged, NOT a draft, conflict-free, and the
+        // exact expected head revision.
         const before = await viewPull(gh, { owner, repo, number })
         if (before.merged || before.state !== "open") {
           return result(`github pr merge refused: pull ${owner}/${repo}#${number} is not open and unmerged`)
         }
+        if (before.draft !== false) {
+          return result(
+            `github pr merge refused: pull ${owner}/${repo}#${number} is not ready for review (draft=${String(before.draft)})`,
+          )
+        }
         if (before.head?.sha !== expectedHeadSha) {
           return result(
             `github pr merge refused: expected head SHA does not match pull ${owner}/${repo}#${number} (head ${before.head?.sha ?? "(unknown)"})`,
+          )
+        }
+        if (before.mergeable !== true) {
+          return result(
+            `github pr merge refused: pull ${owner}/${repo}#${number} is not mergeable (mergeable=${String(before.mergeable)})`,
+          )
+        }
+        if (before.mergeableState === "dirty" || before.mergeableState === "unknown") {
+          return result(
+            `github pr merge refused: pull ${owner}/${repo}#${number} has conflict state '${before.mergeableState}'`,
+          )
+        }
+        const headRef = before.head?.ref
+        const baseRef = before.base?.ref
+        if (!headRef || !baseRef) {
+          return result(`github pr merge refused: pull ${owner}/${repo}#${number} has no head or base ref`)
+        }
+        // Current remote base ancestry with a fresh remote read: the remote
+        // head must still be the exact expected revision, the remote base must
+        // still be the exact expected revision, and the base must be an
+        // ancestor of the head.
+        const ancestry = await currentRemoteBaseAncestry(gh, owner, repo, headRef, baseRef)
+        if (ancestry.headSha !== expectedHeadSha) {
+          return result(
+            `github pr merge refused: remote head ref ${headRef} moved to ${ancestry.headSha}, no longer the expected exact revision ${expectedHeadSha}`,
+          )
+        }
+        if (ancestry.baseSha !== expectedBaseSha) {
+          return result(
+            `github pr merge refused: remote base ref ${baseRef} is ${ancestry.baseSha}, not the expected exact revision ${expectedBaseSha}`,
+          )
+        }
+        if (!ancestry.ancestor) {
+          return result(
+            `github pr merge refused: the current remote base (${baseRef}) is not an ancestor of the pull head (${headRef})`,
           )
         }
 
@@ -655,6 +714,7 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
             mergeSha: merged.sha,
             mergeMessage: merged.message,
             expectedHeadSha,
+            expectedBaseSha,
             verified: true,
             evidence,
           }),
@@ -864,12 +924,15 @@ const prMergeInput = {
     owner: { type: "string", minLength: 1 },
     repo: { type: "string", minLength: 1 },
     number: { type: "number", minimum: 1 },
-    expectedHeadSha: { type: "string", pattern: "^[A-Fa-f0-9]{7,40}$", minLength: 1 },
+    expectedHeadSha: { type: "string", pattern: FULL_SHA_PATTERN, minLength: 40 },
+    expectedBaseSha: { type: "string", pattern: FULL_SHA_PATTERN, minLength: 40 },
     mergeMethod: { type: "string", enum: ["merge", "squash", "rebase"] },
     commitTitle: { type: "string" },
     commitMessage: { type: "string" },
+    // Retained for backward compatibility with callers that still pass it; it
+    // is no longer required and never constitutes user authorization.
     confirm: { type: "boolean" },
   },
-  required: ["owner", "repo", "number", "expectedHeadSha", "confirm"],
+  required: ["owner", "repo", "number", "expectedHeadSha", "expectedBaseSha"],
   additionalProperties: false,
 } as const

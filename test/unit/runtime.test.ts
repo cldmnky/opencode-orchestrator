@@ -2,13 +2,14 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Context } from "@opencode-ai/plugin/promise/plugin"
+import type { Context } from "@opencode/plugin/promise/plugin"
 import { parseOptions } from "../../src/core/config.js"
 import type { CommandInvocationLike } from "../../src/opencode-v2/commands/index.js"
 import { runCommand } from "../../src/opencode-v2/commands/runtime.js"
 import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
 import { goalStorageKey, runStorageKey, stopStorageKey } from "../../src/opencode-v2/goal/state.js"
 import { publishStorageKey, type PublishRecord } from "../../src/opencode-v2/publish/state.js"
+import { gatesStorageKey, type GatesRecord } from "../../src/opencode-v2/gates/state.js"
 import type { WorkerModelRuntime } from "../../src/opencode-v2/worker-models/runtime.js"
 
 describe("runtime commands", () => {
@@ -429,8 +430,8 @@ describe("runtime commands", () => {
     const output = fixture.statuses[0]
     expect(output).toContain("Publication capability — project \"project\"")
     expect(output).toContain("Durable policy: disabled")
-    expect(output).toContain("Authorized capabilities (when enabled): push, pr-draft-create, pr-ready-transition, approve-after-review")
-    expect(output).toContain("Never authorized: issue creation or PR merge")
+    expect(output).toContain("Authorized capabilities (when enabled): push, pr-draft-create, pr-ready-transition, approve-after-review, merge")
+    expect(output).toContain("Never authorized: issue creation (still requires the static github gates plus confirm: true).")
     expect(output).toContain("publish.enabled=false; github.enabled=false; github.allow_mutations=false; worktree.enabled=false; worktree.allow_mutations=false")
     expect(output).toContain("not caller authentication")
     expect(output).toContain("never mutates Git or GitHub")
@@ -445,15 +446,15 @@ describe("runtime commands", () => {
     expect(fixture.prompts).toHaveLength(0)
     const output = fixture.statuses[0]
     expect(output).toContain("Publication enabled for project \"project\"")
-    expect(output).toContain("authorized capabilities: push, pr-draft-create, pr-ready-transition, approve-after-review")
+    expect(output).toContain("authorized capabilities: push, pr-draft-create, pr-ready-transition, approve-after-review, merge")
     expect(output).toContain("This is a capability toggle, not caller authentication")
-    expect(output).toContain("never issue creation and never PR merge")
+    expect(output).toContain("never issue creation")
     expect(output).toContain("No Git or GitHub mutation happened")
 
     const record = fixture.values.get(publishStorageKey("project")) as PublishRecord
     expect(record?.version).toBe(1)
     expect(record?.enabled).toBe(true)
-    expect(record?.capabilities).toEqual(["push", "pr-draft-create", "pr-ready-transition", "approve-after-review"])
+    expect(record?.capabilities).toEqual(["push", "pr-draft-create", "pr-ready-transition", "approve-after-review", "merge"])
     expect(record?.updatedBy).toBe("session")
     expect(record?.updatedAt).toBeTypeOf("number")
   })
@@ -531,6 +532,81 @@ describe("runtime commands", () => {
     await runCommand(fixture.context, parseOptions({}), "publish", invocation("frobnicate"), undefined)
     expect(fixture.prompts).toHaveLength(0)
     expect(fixture.statuses[0]).toBe("Usage: /publish [status|enable|disable]")
+  })
+})
+
+describe("session gate command", () => {
+  const enabledOptions = () =>
+    parseOptions({
+      publish: { enabled: true },
+      github: { enabled: true, allow_mutations: true },
+      worktree: { enabled: true, allow_mutations: true, root: "/srv/worktrees" },
+    })
+
+  test("/gates lists every gate with its effective state and source", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    const options = enabledOptions()
+    await runCommand(fixture.context, options, "publish", invocation("enable"), undefined)
+    fixture.statuses.length = 0
+
+    await runCommand(fixture.context, options, "gates", invocation(""), undefined)
+
+    expect(fixture.prompts).toHaveLength(0)
+    const output = fixture.statuses[0]
+    expect(output).toContain("Session gates — session")
+    expect(output).toContain("[on ] push — allowed by the project capability")
+    expect(output).toContain("[on ] merge — allowed by the project capability")
+    expect(output).toContain("[on ] github-mutations — allowed by the config")
+    expect(output).toContain("[on ] worktree-mutations — allowed by the config")
+    expect(output).toContain("can only narrow")
+  })
+
+  test("/gates <gate>=off narrows the session, =on restores it, and reset clears the record", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    const options = enabledOptions()
+    await runCommand(fixture.context, options, "publish", invocation("enable"), undefined)
+    fixture.statuses.length = 0
+
+    await runCommand(fixture.context, options, "gates", invocation("merge=off"), undefined)
+    expect(fixture.statuses[0]).toContain("'merge' is now off for this session")
+    expect(fixture.statuses[0]).toContain("[off] merge — disabled for this session")
+    expect((fixture.values.get(gatesStorageKey("session")) as GatesRecord).disabled).toEqual(["merge"])
+
+    await runCommand(fixture.context, options, "gates", invocation("merge=on"), undefined)
+    expect(fixture.statuses[1]).toContain("'merge' is now on for this session")
+    expect((fixture.values.get(gatesStorageKey("session")) as GatesRecord).disabled).toEqual([])
+
+    await runCommand(fixture.context, options, "gates", invocation("reset"), undefined)
+    expect(fixture.statuses[2]).toContain("reset to the project ceiling")
+    expect(fixture.values.has(gatesStorageKey("session"))).toBe(false)
+  })
+
+  test("/gates <gate>=on clears a narrowing or follows the ceiling; unknown gates are rejected", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    // No narrowing and no ceiling: =on is a no-op that truthfully reports the
+    // gate follows the project ceiling, and nothing is persisted.
+    await runCommand(fixture.context, parseOptions({}), "gates", invocation("github-mutations=on"), undefined)
+    expect(fixture.statuses[0]).toContain("now follows the project ceiling")
+    expect(fixture.statuses[0]).toContain("github.enabled is off")
+    expect(fixture.values.has(gatesStorageKey("session"))).toBe(false)
+
+    // A narrowing recorded while the ceiling was off is cleared by =on and
+    // still truthfully reports the ceiling, never claiming the gate is on.
+    await runCommand(fixture.context, parseOptions({}), "gates", invocation("merge=off"), undefined)
+    expect((fixture.values.get(gatesStorageKey("session")) as GatesRecord).disabled).toEqual(["merge"])
+    await runCommand(fixture.context, parseOptions({}), "gates", invocation("merge=on"), undefined)
+    expect(fixture.statuses[2]).toContain("now follows the project ceiling")
+
+    await runCommand(fixture.context, parseOptions({}), "gates", invocation("frobnicate=off"), undefined)
+    expect(fixture.statuses[3]).toContain("Usage: /gates")
+    expect(fixture.statuses[3]).toContain("merge")
+  })
+
+  test("/gates <gate>=off narrows even when the ceiling is already off", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    await runCommand(fixture.context, parseOptions({}), "gates", invocation("merge=off"), undefined)
+    expect(fixture.statuses[0]).toContain("'merge' is now off for this session")
+    expect((fixture.values.get(gatesStorageKey("session")) as GatesRecord).disabled).toEqual(["merge"])
   })
 })
 

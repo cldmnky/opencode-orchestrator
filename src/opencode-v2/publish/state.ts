@@ -28,20 +28,23 @@ export type { LocationLike, StorageLike } from "../goal/state.js"
  * The precise autonomous steps enabling the capability authorizes. Nothing
  * is added here without a deliberate change to this constant set: enabling
  * grants exactly these capabilities, disabling revokes all of them.
+ *
+ * `merge` is included: once the capability is enabled, a PR this orchestrator
+ * drove through the exact-revision review chain may be merged autonomously
+ * after every merge precondition passes. Issue creation remains outside the
+ * capability set by definition (see `PUBLISH_NEVER_AUTHORIZED`).
  */
 export const PUBLISH_CAPABILITIES = [
   "push",
   "pr-draft-create",
   "pr-ready-transition",
   "approve-after-review",
+  "merge",
 ] as const
 export type PublishCapability = (typeof PUBLISH_CAPABILITIES)[number]
 
 /** Fixed policy statement: what the capability can never authorize. */
-export const PUBLISH_NEVER_AUTHORIZED = [
-  "issue creation",
-  "PR merge (still requires the static github.allow_mutations gate plus a fresh user-requested merge flow)",
-]
+export const PUBLISH_NEVER_AUTHORIZED = ["issue creation"]
 
 export type PublishRecord = {
   version: 1
@@ -103,6 +106,13 @@ export function publishStorageKey(projectID: string): string {
  * means "disabled" (callers must treat undefined exactly like a disabled
  * record); a malformed record is ignored with a warning and counts as
  * disabled, never guessed from.
+ *
+ * A record written by an older plugin generation may carry a smaller
+ * capability set (for example, before `merge` existed). An ENABLED record is
+ * normalized to the current capability set on read: enabling authorizes the
+ * capability family as it exists for the running plugin, so the durable grant
+ * does not silently lose a new step. The narrowing that matters — a session
+ * gate or an explicit `/publish disable` — is unaffected.
  */
 export async function readPublishRecord(storage: StorageLike, projectID: string): Promise<PublishRecord | undefined> {
   const value = await storage.get(publishStorageKey(projectID))
@@ -111,6 +121,9 @@ export async function readPublishRecord(storage: StorageLike, projectID: string)
   if (!parsed.success) {
     console.warn(`Ignoring malformed publish state at ${publishStorageKey(projectID)}`)
     return undefined
+  }
+  if (parsed.data.enabled && PUBLISH_CAPABILITIES.some((capability) => !parsed.data.capabilities.includes(capability))) {
+    return { ...parsed.data, capabilities: [...PUBLISH_CAPABILITIES] }
   }
   return parsed.data
 }

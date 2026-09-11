@@ -264,13 +264,25 @@ describe("agent transform feature permissions", () => {
     expect(system).toContain("orchestrator_github_pr_merge")
     expect(system).toContain("implementers never push branches or create or merge pull requests")
     expect(system).toContain("the orchestrator MUST run orchestrator_worktree_create -> orchestrator_worktree_enter")
-    expect(system).toContain("is never user authorization")
+    // The rewritten policy makes merge autonomous and drops the old "separate
+    // explicit user request" framing: no user merge instruction is required.
+    expect(system).toContain("Merge is autonomous when the durable publish capability 'merge' and the per-session gates allow it")
+    expect(system).toContain("no separate user merge instruction is required")
+    expect(system).not.toContain("separate explicit user request")
+    // With github (or publish) enabled the feature guidance also carries the
+    // terminal-drive Definition of Done for ship-shaped work.
+    expect(system).toContain("Definition of Done (terminal drive)")
+    expect(system).toContain("Run the terminal chain in order as soon as the work is verified")
 
     const draft2 = draftWith({ orchestrator: { mode: "primary" }, implementer: { mode: "subagent" } })
     applyAgentTransform(draft2, options)
     const plain = draft2.get("implementer")!.system!
     expect(plain).not.toContain("orchestrator_github_pr_merge")
     expect(plain).not.toContain("Worktree lifecycle is mandatory")
+    // Terminal drive is feature-gated too, and the old authorization framing is
+    // gone from the disabled-feature prompt entirely.
+    expect(plain).not.toContain("Definition of Done (terminal drive)")
+    expect(plain).not.toContain("no separate user merge instruction is required")
     // The universal boundary stays present with or without the features.
     expect(plain).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
   })

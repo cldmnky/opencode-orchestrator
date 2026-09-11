@@ -1,11 +1,13 @@
-import type { Definition } from "@opencode-ai/plugin/tui/plugin"
-import type { Context, KeymapCommand } from "@opencode-ai/plugin/tui/context"
+import type { Definition } from "@opencode/plugin/tui/plugin"
+import type { Context, KeymapCommand } from "@opencode/plugin/tui/context"
 import { commandDefinitions } from "./opencode-v2/commands/index.js"
+import { gatesRpcDefinition, parseGatesView } from "./opencode-v2/gates/rpc.js"
+import type { GateStatus } from "./opencode-v2/gates/state.js"
 import { parseOptions, type OrchestratorOptions } from "./core/config.js"
 import { formatModelReference, parseModelReference, type ModelReference } from "./core/model-reference.js"
 import { workerAgentRoles } from "./core/roles.js"
 import { RUNTIME_PLUGIN_ID } from "./core/package-identity.js"
-import { filterOrchestratorSessions, renderSidebar, type SessionStatus } from "./tui/sidebar.js"
+import { filterOrchestratorSessions, renderSidebar, type SessionStatus, type SidebarTheme } from "./tui/sidebar.js"
 
 export const tuiPlugin = {
   id: RUNTIME_PLUGIN_ID,
@@ -113,7 +115,7 @@ function registerSidebar(context: Context, options: OrchestratorOptions): (() =>
         statuses.set(session.id, context.data.session.status(session.id))
         costs.set(session.id, context.data.session.cost(session.id))
       }
-      return renderSidebar({ sessions, statuses, costs, tabs })
+      return renderSidebar({ sessions, statuses, costs, tabs, theme: sidebarTheme(context) })
     },
   })
   return () => {
@@ -125,9 +127,11 @@ function registerSidebar(context: Context, options: OrchestratorOptions): (() =>
 function tuiCommand(context: Context, name: string, description: string): KeymapCommand {
   return {
     id: `${RUNTIME_PLUGIN_ID}.${name}`,
-    title: `Orchestrator: /${name}`,
+    title: `/${name}`,
     description,
     group: "OpenCode Orchestrator",
+    // Palette + slash: short `/name` titles (the group header already says
+    // who owns them), with the worker-models picker interception in `run`.
     palette: true,
     slash: { name, arguments: true },
     enabled: () => activeSessionID(context) !== undefined,
@@ -141,6 +145,10 @@ function tuiCommand(context: Context, name: string, description: string): Keymap
       try {
         if (name === "worker-models" && !(input?.trim() ?? "")) {
           await openWorkerModelPicker(context)
+          return
+        }
+        if (name === "gates" && !(input?.trim() ?? "")) {
+          await openGatesDialog(context)
           return
         }
         await context.client.session.command({
@@ -265,6 +273,81 @@ async function openWorkerModelPicker(context: Context): Promise<void> {
   }
 }
 
+type GateChoice = { kind: "gate"; status: GateStatus } | { kind: "close" }
+
+/**
+ * One-screen session gate toggler, built on the worker-models picker pattern:
+ * every gate is listed with its effective state and source, selecting a row
+ * toggles it through the server RPC (which enforces the ceiling), and the
+ * dialog re-renders with the returned state. The picker never widens a gate:
+ * rows whose ceiling is off are disabled and explained.
+ */
+async function openGatesDialog(context: Context): Promise<void> {
+  const sessionID = activeSessionID(context)
+  if (!sessionID) {
+    context.ui.toast.show({ title: "Orchestrator", message: "Open a session before configuring gates.", variant: "warning" })
+    return
+  }
+
+  const location = context.location ?? context.data.location.default()
+  const rpc = context.client.rpc(gatesRpcDefinition)
+  try {
+    for (;;) {
+      const view = parseGatesView(await rpc.get({ sessionID }, { location }))
+      if (!view) {
+        context.ui.toast.show({
+          title: "Orchestrator",
+          message: "Could not load the session gate state.",
+          variant: "error",
+        })
+        return
+      }
+
+      const options: Array<{ title: string; value: GateChoice; description?: string; disabled?: boolean }> = view.gates.map(
+        (status) => ({
+          title: `${status.enabled ? "[on]" : "[off]"} ${status.gate}`,
+          value: { kind: "gate", status },
+          description: gateChoiceDescription(status),
+          // A row is actionable while it can be narrowed or its narrowing
+          // cleared; only a gate that is ceiling-off AND un-narrowed has no
+          // action at all.
+          disabled: !status.ceiling && !status.sessionDisabled,
+        }),
+      )
+      options.push({ title: "Done", value: { kind: "close" }, description: "Close without further changes" })
+
+      const selected = await context.ui.dialog.select<GateChoice>({
+        title: "Session gates (select to toggle)",
+        options,
+      })
+      if (!selected || selected.kind === "close") return
+
+      const disabled = !selected.status.sessionDisabled
+      const updated = parseGatesView(await rpc.set({ sessionID, gate: selected.status.gate, disabled }, { location }))
+      if (updated?.message) {
+        context.ui.toast.show({ title: "Orchestrator", message: updated.message })
+      }
+    }
+  } catch (error) {
+    context.ui.toast.show({
+      title: "Orchestrator",
+      message: error instanceof Error ? error.message : "Could not load the session gates.",
+      variant: "error",
+    })
+  }
+}
+
+function gateChoiceDescription(status: GateStatus): string {
+  if (status.sessionDisabled) {
+    return status.ceiling
+      ? "Off for this session — select to follow the project ceiling again"
+      : `Off for this session; the ceiling is also off (${status.ceilingReason ?? "the ceiling is off"}) — select to follow the ceiling again`
+  }
+  if (!status.ceiling) return `Unavailable: ${status.ceilingReason ?? "the ceiling is off"}`
+  const source = status.ceilingSource === "project" ? "the project capability" : "config"
+  return `Allowed by ${source} — select to turn off for this session`
+}
+
 function addModelChoice(
   options: Array<{ title: string; value: ModelChoice; description?: string; category?: string }>,
   model: TuiModel,
@@ -288,6 +371,17 @@ function addModelChoice(
 
 async function dispatchModelCommand(context: Context, sessionID: string, text: string): Promise<void> {
   await context.client.session.command({ sessionID, command: "worker-models", text, delivery: "steer" })
+}
+
+/**
+ * Reads the host's semantic text colors for the sidebar. The theme object
+ * always exists on a live host; the guard keeps the contribution unstyled
+ * (rather than throwing) on hosts that do not provide one.
+ */
+function sidebarTheme(context: Context): SidebarTheme | undefined {
+  const text = (context as { theme?: { text?: { default?: SidebarTheme["text"]; subdued?: SidebarTheme["subdued"]; status?: { running?: SidebarTheme["running"] } } } }).theme?.text
+  if (!text?.default || !text?.subdued || !text?.status?.running) return undefined
+  return { text: text.default, subdued: text.subdued, running: text.status.running }
 }
 
 function responseData<T>(response: unknown): T[] {

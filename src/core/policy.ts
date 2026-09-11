@@ -107,15 +107,16 @@ export const WORKTREE_LIFECYCLE_GUIDANCE = [
 /**
  * Feature-specific GitHub lifecycle guidance, embedded only when
  * `github.enabled`. The orchestrator owns the branch push -> PR create ->
- * merge lifecycle; implementers never push or create/merge PRs, and a merge
- * happens only after a separate explicit user request plus a fresh view, the
- * exact expected head SHA, a literal `confirm: true`, and post-merge evidence.
+ * ready -> approve -> merge -> cleanup lifecycle; implementers never push or
+ * create/merge PRs, and merge is autonomous once the durable publish
+ * capability and the per-session gates allow it, always behind the full
+ * fail-closed precondition chain.
  */
 export const GITHUB_LIFECYCLE_GUIDANCE = [
   "GitHub lifecycle is orchestrator-owned: preflight with orchestrator_github_capabilities and use only the tools the host actually exposes; implementers never push branches or create or merge pull requests.",
   "The orchestrator pushes the worktree branch (orchestrator_worktree_push) and creates the pull request (orchestrator_github_pr_create) only after validated maker/checker review and direct verification of the branch, changes, and commits.",
-  "Merge a pull request only after a separate explicit user request and confirmation: run orchestrator_github_pr_merge with a fresh orchestrator_github_pr_view result and the exact expected head SHA, with a literal confirm: true, then verify merged:true again with a fresh orchestrator_github_pr_view. A confirm: true flag or a checker's approval is never user authorization.",
-  "Stale, refused, or failed merges (expected-head SHA mismatch, branch protection, required checks or reviews, conflicts, permission failures, merge queues, merged:false, or a failed post-merge view) stop truthfully; never retry, fall back, or report a merge without direct evidence.",
+  "Merge is autonomous when the durable publish capability 'merge' and the per-session gates allow it: no separate user merge instruction is required. Run orchestrator_github_pr_merge with a fresh conflict-free view at the exact approved revision, the exact head and base SHAs, and the exact-revision approved internal review receipt; verify merged:true again with a fresh orchestrator_github_pr_view, then clean up the tracked worktree.",
+  "Every publication step fails closed: stale base or head, a dirty tree, a missing sync or review receipt, a moved revision, unresolved conflicts, branch protection, required checks or reviews, permission failures, merge queues, merged:false, or a failed post-merge view stop truthfully; never retry, fall back to a different SHA, or report a step without direct evidence.",
 ].join("\n")
 
 /**
@@ -133,21 +134,55 @@ export const PEER_DISCOVERY_GUIDANCE = [
 /**
  * Publication capability policy, embedded only when `publish.enabled` is on
  * (the config master gate). States the capability-not-authentication
- * semantics, the exact authorized steps, the never-authorized steps, the
- * mandatory commit -> sync -> verify -> exact-revision review -> push
- * sequence with the conflict-delegation recovery flow, the draft-first PR
- * lifecycle with its ready/approval limitations, and the unchanged
- * separate-explicit-user-authorization merge policy.
+ * semantics, the exact authorized steps (including merge), the never-authorized
+ * step, the per-session narrowing boundary, the mandatory commit -> sync ->
+ * verify -> exact-revision review -> push -> ready -> approve -> merge ->
+ * cleanup sequence with the conflict-delegation recovery flow, the draft-first
+ * PR lifecycle with its ready/approval limitations, and the merge
+ * preconditions.
  */
 export const PUBLICATION_POLICY_GUIDANCE = [
   "Durable publication authorization is capability policy, never caller authentication: /publish toggles a project-scoped durable authorization record; nothing in it proves which human invoked it, it never weakens the static github/worktree gates, and it never mutates Git or GitHub itself.",
-  "When the durable capability is enabled it authorizes the orchestrator to pass confirm:true without re-prompting for exactly: worktree push, draft PR creation, the draft-to-ready transition, and the verified post-ready approval. It never authorizes issue creation and never authorizes PR merge — merge still requires the static github.allow_mutations gate, a separate explicit user request, a fresh view, the exact head SHA, a literal confirm:true, and post-merge verification.",
-  "Mandatory publication sequence: commit clean changes first, then synchronize against the latest remote base (orchestrator_worktree_sync, which records an exact-revision receipt), verify/test the synced result, run the exact-revision bounded review, and only then push (orchestrator_worktree_push) and create the always-draft pull request (orchestrator_github_pr_create) and mark it ready (orchestrator_github_pr_ready).",
+  "When the durable capability is enabled it authorizes the orchestrator to pass confirm:true without re-prompting for exactly: worktree push, draft PR creation, the draft-to-ready transition, the verified post-ready approval, and merge after the full merge precondition chain. It never authorizes issue creation. /gates (or the TUI gate picker) can narrow any of these steps — including merge — for the current session only; a session-disabled gate is final.",
+  "Mandatory publication sequence: commit clean changes first, then synchronize against the latest remote base (orchestrator_worktree_sync, which records an exact-revision receipt), verify/test the synced result, run the exact-revision bounded review, and only then push (orchestrator_worktree_push) and create the always-draft pull request (orchestrator_github_pr_create), mark it ready (orchestrator_github_pr_ready), approve at the exact revision (orchestrator_github_pr_approve), merge (orchestrator_github_pr_merge), verify the merge, and clean up the tracked worktree (orchestrator_worktree_cleanup).",
   "When a sync reports conflicts after aborting, autonomously delegate an implementer to perform the merge/resolution inside the tracked worktree, rerun verification and sync, commit, and restart the exact-revision review; stop only when conflicts cannot safely be resolved, and never push from an unresolved or unsynced state.",
-  "If the base or head changes after the exact-revision review, re-sync and re-review before any push; stale base/head, dirty trees, missing sync receipts, and missing or mismatched approved review receipts all fail closed.",
+  "If the base or head changes after the exact-revision review, re-sync and re-review before any push or merge; stale base/head, dirty trees, missing sync receipts, and missing or mismatched approved review receipts all fail closed.",
   "Pull requests are always created as drafts; fresh views must directly show the conflict-free exact revision (draft:true, mergeable:true, no dirty/unknown conflict state, remote base ancestry) before a ready transition, an unknown mergeability stays draft and is truthfully deferred without polling, and a draft that reports conflict state is never forced ready.",
   "Auto-approve happens only after the ready transition and the exact internal review, with an authenticated non-author viewer and fresh conflict-free evidence; same-author attempts and API failures are refused and reported truthfully, and an automated approval is never claimed to satisfy branch protection.",
+  "Merge preconditions (all required, checked against fresh reads): an open, unmerged, non-draft pull whose head SHA equals the exact expected revision; mergeable:true with no dirty or unknown conflict state; an exact-revision approved internal review receipt for the same head/base; the current remote base is an ancestor of the exact head; and the durable 'merge' capability plus the per-session gate allow it. Merge with the exact SHA, verify merged:true with a fresh view, log the merge SHA, then clean up. Branch protection, required checks or reviews, permission failures, and merge queues are reported truthfully — never bypassed, never polled.",
 ].join("\n")
+
+/**
+ * Terminal-drive policy: the Definition of Done for ship-shaped work.
+ *
+ * The orchestrator has historically stopped after "changes are ready" or "the
+ * PR is open" and waited for a separate instruction to push, merge, and clean
+ * up. This guidance makes the whole terminal chain the expected ending whenever
+ * the configured capability and per-session gates allow it, while a disabled
+ * gate or a failed step still stops truthfully. Embedded only when the GitHub
+ * or publication features are enabled.
+ */
+export function terminalDriveGuidance(options: {
+  github: { enabled: boolean }
+  worktree: { enabled: boolean }
+  publish: { enabled: boolean }
+}): string {
+  return [
+    "Definition of Done (terminal drive): a ship-shaped task is finished only when it is merged and the tracked worktree is cleaned up, or when a configured gate/capability refuses the next terminal step. Never stop at 'changes are ready' or 'the PR is open' and wait for the user to ask for the next step.",
+    ...(options.github.enabled
+      ? [
+          "Run the terminal chain in order as soon as the work is verified: verify/tests green -> commit -> sync against the latest remote base -> exact-revision review -> push -> draft PR -> ready -> approve -> merge -> post-merge verify -> worktree cleanup. The publish capability authorizes these steps; only the fail-closed preconditions can refuse them.",
+        ]
+      : []),
+    ...(options.publish.enabled
+      ? [
+          "If a terminal step is refused by a session-disabled gate (/gates) or a missing durable capability, state exactly which step is unavailable and the one command that would change it; do not re-plan around the gate, do not re-enable it yourself, and do not claim completion.",
+        ]
+      : []),
+    "If a terminal step fails, attempt at most one targeted recovery with new evidence (for example re-sync and re-review after a moved base or head); never re-dispatch an identical failed step without new evidence.",
+    "Implementer handoffs must arrive with green tests for the delivered scope; do not start the terminal chain on unverified work.",
+  ].join("\n")
+}
 
 /**
  * Capability flags that decide which feature-specific lifecycle guidance a
@@ -240,6 +275,15 @@ export function orchestrationRules(
     ...(capabilities.worktree ? [WORKTREE_LIFECYCLE_GUIDANCE] : []),
     ...(capabilities.github ? [GITHUB_LIFECYCLE_GUIDANCE] : []),
     ...(capabilities.publish ? [PUBLICATION_POLICY_GUIDANCE] : []),
+    ...(capabilities.github || capabilities.publish
+      ? [
+          terminalDriveGuidance({
+            github: { enabled: capabilities.github === true },
+            worktree: { enabled: capabilities.worktree === true },
+            publish: { enabled: capabilities.publish === true },
+          }),
+        ]
+      : []),
     "Start independent read-only work in parallel/background mode.",
     "Record the original branch, HEAD, changed files, commits, and verification in the task ledger when those facts are available.",
     "Do not claim automated GitHub issue or pull request coordination unless the user explicitly performs and verifies those steps.",

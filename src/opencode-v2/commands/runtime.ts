@@ -1,7 +1,7 @@
 import { readFile, readdir, realpath, stat } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
-import type { Context } from "@opencode-ai/plugin/promise/plugin"
-import type { Model } from "@opencode-ai/schema/model"
+import type { Context } from "@opencode/plugin/promise/plugin"
+import type { Model } from "@opencode/schema/model"
 import type { CommandName, CommandInvocationLike } from "./index.js"
 import { commandDefinitions } from "./index.js"
 import type { OrchestratorOptions } from "../../core/config.js"
@@ -22,6 +22,15 @@ import {
   type PlanRunRecord,
 } from "../goal/state.js"
 import { publicationStatus, setPublicationEnabled, type PublicationStatusView } from "../publish/state.js"
+import {
+  clearGates,
+  gateChangeMessage,
+  gateStatuses,
+  isSessionGate,
+  setGateDisabled,
+  SESSION_GATES,
+  type GateStatus,
+} from "../gates/state.js"
 
 type ModelRefLike = {
   id: string
@@ -62,6 +71,10 @@ export async function runCommand(
   }
   if (name === "publish") {
     await runPublishCommand(context, input.sessionID, args, options)
+    return
+  }
+  if (name === "gates") {
+    await runGatesCommand(context, input.sessionID, args, options)
     return
   }
   if (name === "handover") {
@@ -433,11 +446,12 @@ async function mutateHaltCommand(
  *
  * This is a capability toggle, not caller authentication: enabling writes a
  * durable record that authorizes future autonomous push, draft PR creation,
- * ready transition, and verified approval after internal review — never
- * issue creation and never PR merge. It does not prove a human invoked it,
- * it never mutates Git or GitHub, and it never weakens the static
+ * ready transition, verified approval after internal review, and — after every
+ * merge precondition passes at the exact revision — the merge itself. It never
+ * authorizes issue creation. It does not prove a human invoked it, it never
+ * mutates Git or GitHub, and it never weakens the static
  * `github.enabled` / `github.allow_mutations` / `worktree.enabled` /
- * `worktree.allow_mutations` gates.
+ * `worktree.allow_mutations` gates or the per-session gate narrowing.
  *
  * `enable` additionally requires the `publish.enabled` config master switch
  * (default off); `disable` and `status` always work so a stale durable
@@ -491,9 +505,10 @@ async function mutatePublishCommand(
       context,
       sessionID,
       `Publication enabled for project "${toggle.record.projectID}" (durable policy updated; authorized capabilities: ${toggle.record.capabilities.join(", ")}). ` +
-        "This is a capability toggle, not caller authentication: it authorizes autonomous push, draft PR creation, ready transition, and verified " +
-        "approval after internal review — never issue creation and never PR merge, which still require the static github gates and a fresh " +
-        "user-requested merge flow. No Git or GitHub mutation happened, and the static github/worktree gates are unchanged.",
+        "This is a capability toggle, not caller authentication: it authorizes autonomous push, draft PR creation, ready transition, verified " +
+        "approval after internal review, and merge after a fresh conflict-free view at the exact approved revision — never issue creation, which " +
+        "still requires github.allow_mutations plus confirm: true. No Git or GitHub mutation happened, and the static github/worktree gates are unchanged. " +
+        "Use /gates to narrow any step for the current session only.",
     )
     return
   }
@@ -501,7 +516,7 @@ async function mutatePublishCommand(
     context,
     sessionID,
     `Publication disabled for project "${toggle.record.projectID}" (durable policy updated; authorized capabilities: none). ` +
-      "Future autonomous push, draft PR creation, ready transition, and approval steps are no longer authorized by this capability. " +
+      "Future autonomous push, draft PR creation, ready transition, approval, and merge steps are no longer authorized by this capability. " +
       "No Git or GitHub mutation happened.",
   )
 }
@@ -514,16 +529,90 @@ function formatPublicationStatus(status: PublicationStatusView): string {
     : " (never changed; absent records count as disabled)"
   const capabilities = durable.enabled && durable.capabilities.length > 0
     ? `Authorized capabilities (when enabled): ${durable.capabilities.join(", ")}.`
-    : "Authorized capabilities (when enabled): push, pr-draft-create, pr-ready-transition, approve-after-review."
+    : "Authorized capabilities (when enabled): push, pr-draft-create, pr-ready-transition, approve-after-review, merge."
   return [
     `Publication capability — project "${status.projectID}"`,
     `Durable policy: ${state}${changed}`,
     capabilities,
-    "Never authorized: issue creation or PR merge (both still require the static github gates; merge additionally needs a fresh user-requested merge flow).",
+    "Never authorized: issue creation (still requires the static github gates plus confirm: true).",
     `Static gates: publish.enabled=${status.config.enabled}; github.enabled=${status.staticGates.githubEnabled}; ` +
       `github.allow_mutations=${status.staticGates.githubAllowMutations}; worktree.enabled=${status.staticGates.worktreeEnabled}; ` +
       `worktree.allow_mutations=${status.staticGates.worktreeAllowMutations}.`,
-    "Note: /publish toggles authorization policy only. It is not caller authentication, it does not prove a human invoked it, and it never mutates Git or GitHub.",
+    "Note: /publish toggles authorization policy only. It is not caller authentication, it does not prove a human invoked it, and it never mutates Git or GitHub. Session-level narrowing is handled separately by /gates.",
+  ].join("\n")
+}
+
+/**
+ * `/gates [status|reset|<gate>=on|off]` — inspects or narrows the per-session
+ * orchestrator gates.
+ *
+ * A session can only narrow the project/config ceiling: turning a gate off is
+ * always honored; turning one on only removes the session narrowing and still
+ * requires the ceiling (durable project publish capability, or the static
+ * `github.allow_mutations` / `worktree.allow_mutations` switches) to allow it.
+ * The command never mutates Git or GitHub and never widens a ceiling.
+ */
+async function runGatesCommand(
+  context: Context,
+  sessionID: string,
+  args: string,
+  options: OrchestratorOptions,
+): Promise<void> {
+  await withSessionLock(context.location, sessionID, () => mutateGatesCommand(context, sessionID, args, options))
+}
+
+async function mutateGatesCommand(
+  context: Context,
+  sessionID: string,
+  args: string,
+  options: OrchestratorOptions,
+): Promise<void> {
+  const value = args.trim()
+
+  if (!value || value === "show" || value === "status") {
+    const statuses = await gateStatuses(context.storage, context.location, sessionID, options)
+    await emitStatus(context, sessionID, formatGatesStatus(sessionID, statuses))
+    return
+  }
+
+  if (value === "reset") {
+    await clearGates(context.storage, sessionID)
+    const statuses = await gateStatuses(context.storage, context.location, sessionID, options)
+    await emitStatus(context, sessionID, `Session gates reset to the project ceiling.\n\n${formatGatesStatus(sessionID, statuses)}`)
+    return
+  }
+
+  const separator = value.indexOf("=")
+  const gate = separator > 0 ? value.slice(0, separator).trim() : ""
+  const verb = separator > 0 ? value.slice(separator + 1).trim().toLowerCase() : ""
+  if (!gate || !isSessionGate(gate) || (verb !== "on" && verb !== "off")) {
+    await emitStatus(context, sessionID, `Usage: /gates [status|reset|<gate>=on|off]\nGates: ${SESSION_GATES.join(", ")}`)
+    return
+  }
+
+  const disabled = verb === "off"
+  await setGateDisabled(context.storage, sessionID, gate, disabled)
+  const statuses = await gateStatuses(context.storage, context.location, sessionID, options)
+  const status = statuses.find((candidate) => candidate.gate === gate)
+  const confirmation = status ? gateChangeMessage(status) : `'${gate}' updated for this session`
+  await emitStatus(context, sessionID, `${confirmation}\n\n${formatGatesStatus(sessionID, statuses)}`)
+}
+
+function formatGatesStatus(sessionID: string, statuses: readonly GateStatus[]): string {
+  const lines = statuses.map((status) => {
+    if (status.enabled) {
+      const source = status.ceilingSource === "project" ? "project capability" : "config"
+      return `[on ] ${status.gate} — allowed by the ${source}`
+    }
+    if (status.sessionDisabled) {
+      return `[off] ${status.gate} — disabled for this session; re-enable with /gates ${status.gate}=on`
+    }
+    return `[off] ${status.gate} — unavailable: ${status.ceilingReason ?? "the ceiling is off"}`
+  })
+  return [
+    `Session gates — ${sessionID}`,
+    ...lines,
+    "Session gates can only narrow the project/config ceiling and can never widen it; they do not survive into other sessions.",
   ].join("\n")
 }
 

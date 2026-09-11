@@ -196,7 +196,7 @@ describe("publish tools", () => {
     expect(parsed.config).toEqual({ enabled: true })
     expect((parsed.staticGates as { githubEnabled: boolean }).githubEnabled).toBe(false)
     expect((parsed.limitations as string[]).join(" ")).toContain("not caller authentication")
-    expect((parsed.limitations as string[]).join(" ")).toContain("never authorizes issue creation or PR merge")
+    expect((parsed.limitations as string[]).join(" ")).toContain("never authorizes issue creation")
 
     // Read-only: no storage keys changed or added by the call.
     expect(values.size).toBe(1)

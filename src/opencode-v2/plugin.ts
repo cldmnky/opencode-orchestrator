@@ -1,13 +1,16 @@
-import { Plugin } from "@opencode-ai/plugin"
-import type { Context } from "@opencode-ai/plugin/promise/plugin"
+import { Plugin } from "@opencode/plugin"
+import type { Context } from "@opencode/plugin/promise/plugin"
 import { parseOptions } from "../core/config.js"
 import { delegationGraphSummary } from "../core/roles.js"
-import { PEER_DISCOVERY_GUIDANCE, PUBLICATION_POLICY_GUIDANCE } from "../core/policy.js"
+import { PEER_DISCOVERY_GUIDANCE, PUBLICATION_POLICY_GUIDANCE, terminalDriveGuidance } from "../core/policy.js"
 import { applyAgentTransform, validateAgentSet, type AgentInfoLike } from "./agents.js"
 import { applyCommandTransform } from "./commands/index.js"
 import { runCommand } from "./commands/runtime.js"
 import { startGoalContinuation } from "./goal/continuation.js"
 import { addGoalTools } from "./goal/tools.js"
+import { addGatesTools } from "./gates/tools.js"
+import { gatesRpcDefinition, parseGatesGetInput, parseGatesSetInput } from "./gates/rpc.js"
+import { gateChangeMessage, gateStatuses, setGateDisabled } from "./gates/state.js"
 import { addGhTools } from "./gh/tools.js"
 import { addWorktreeTools } from "./worktree/tools.js"
 import { addOrchestrationTools } from "./orchestration/tools.js"
@@ -105,6 +108,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
       registrations.push(
         await ctx.tool.transform((draft) => {
           addGoalTools(draft, ctx.storage, ctx.location, options)
+          addGatesTools(draft, { storage: ctx.storage, location: ctx.location, options })
           addGhTools(draft, { storage: ctx.storage, runner, location: ctx.location, options })
           addWorktreeTools(draft, {
             storage: ctx.storage,
@@ -132,6 +136,28 @@ export const orchestratorPlugin = (Plugin.define as any)({
       )
 
       registrations.push(
+        await ctx.rpc.register(gatesRpcDefinition, {
+          get: async (input) => {
+            const parsed = parseGatesGetInput(input)
+            if (!parsed) return { sessionID: "", gates: [], message: "sessionID is required" }
+            return { sessionID: parsed.sessionID, gates: await gateStatuses(ctx.storage, ctx.location, parsed.sessionID, options) }
+          },
+          set: async (input) => {
+            const parsed = parseGatesSetInput(input)
+            if (!parsed) return { sessionID: "", gates: [], message: "sessionID, gate, and disabled are required" }
+            await setGateDisabled(ctx.storage, parsed.sessionID, parsed.gate, parsed.disabled)
+            const gates = await gateStatuses(ctx.storage, ctx.location, parsed.sessionID, options)
+            const status = gates.find((candidate) => candidate.gate === parsed.gate)
+            return {
+              sessionID: parsed.sessionID,
+              gates,
+              ...(status ? { message: gateChangeMessage(status) } : {}),
+            }
+          },
+        }),
+      )
+
+      registrations.push(
         await ctx.session.hook("context", (event) => {
           if (event.agent !== options.orchestrator) return
           event.system.push({
@@ -144,6 +170,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
               "Parallel writes require an exact disjoint write scope from every child; separate established facts from assumptions.",
               "Use orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update for session goal state.",
               "Inspect or toggle the durable project-scoped publication capability with /publish (status|enable|disable): it is a capability toggle, not caller authentication, it never mutates Git or GitHub, and it never weakens the static github/worktree gates.",
+              "The user can narrow or disable individual gates for the current session with /gates or the TUI gate picker; inspect the effective per-session gates with orchestrator_gates_get. A gate disabled for this session is final: never re-enable it yourself, never work around it, and report the refusing step truthfully.",
               PEER_DISCOVERY_GUIDANCE,
               ...(options.worktree.enabled
                 ? [
@@ -153,10 +180,12 @@ export const orchestratorPlugin = (Plugin.define as any)({
                 : []),
               ...(options.github.enabled
                 ? [
-                    "GitHub lifecycle is enabled and orchestrator-owned: preflight with orchestrator_github_capabilities; implementers never push branches or create/merge pull requests. The orchestrator pushes the branch and creates the pull request only after validated maker/checker review and direct verification, and merges only after a separate explicit user request: a fresh orchestrator_github_pr_view with the exact expected head SHA, a literal confirm: true, and post-merge verification. confirm: true and checker approval are never user authorization; stale, refused, or failed merges stop truthfully.",
+                    "GitHub lifecycle is enabled and orchestrator-owned: preflight with orchestrator_github_capabilities; implementers never push branches or create/merge pull requests. The orchestrator pushes the branch and creates the pull request only after validated maker/checker review and direct verification.",
+                    "Pushing, draft PR creation, the ready transition, approval, and merge are autonomous when the durable publish capability and the per-session gates allow them: no separate user merge instruction is required. Merge still runs the full fail-closed chain (fresh exact-SHA conflict-free view, exact-revision approved internal review, base ancestry, post-merge verification) and stops truthfully on stale, refused, conflicted, or branch-protected states. A gate disabled for this session or a missing capability stops the chain truthfully.",
                   ]
                 : []),
               ...(options.publish.enabled ? [PUBLICATION_POLICY_GUIDANCE] : []),
+              ...(options.github.enabled || options.publish.enabled ? [terminalDriveGuidance(options)] : []),
               "Use orchestrator_task_complexity_classify (advisory, user-overridable), orchestrator_handoff_validate (callable, not an automatic gate), and orchestrator_admission_transition (stateless) to classify complexity, validate worker handoffs before downstream use, and track admission state.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
               ...(options.review.mode === "bounded"

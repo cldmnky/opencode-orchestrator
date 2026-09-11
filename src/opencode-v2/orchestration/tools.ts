@@ -4,7 +4,7 @@ import { ORCHESTRATION_TOOL_PERMISSION } from "../../core/permissions.js"
 import { ADMISSION_ACTIONS, ADMISSION_INPUT_SCHEMA, ADMISSION_STATES, transitionAdmission } from "../../core/admission.js"
 import { D4_PARALLELISM_VALUES, classifyTaskComplexity } from "../../core/d4.js"
 import { D2_LIMITS, RELATIVE_REPO_PATH_PATTERN } from "../../core/contracts.js"
-import type { Info as ToolInfo } from "@opencode-ai/plugin/promise/tool"
+import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 import { resolveRealpath } from "../worktree/git.js"
 import { validateHandoff, type SessionLocation, type ValidationDeps } from "./validation.js"
 

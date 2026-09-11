@@ -10,14 +10,15 @@
  * The tool is orchestrator-only via the shared `orchestrator_publish`
  * permission action plus the runtime agent check, and it never mutates
  * storage, Git, or GitHub. Every result states the policy limitations:
- * authorization bookkeeping, not caller authentication; issue creation and
- * PR merge are never authorized by this capability; existing static gates
- * are never weakened.
+ * authorization bookkeeping, not caller authentication; issue creation is
+ * never authorized by this capability; existing static gates are never
+ * weakened. Per-session narrowing (including of merge) is a separate
+ * `orchestrator_gates_get` surface.
  */
 import type { OrchestratorOptions } from "../../core/config.js"
 import { PUBLISH_TOOL_PERMISSION } from "../../core/permissions.js"
 import { publicationStatus, type LocationLike, type StorageLike } from "./state.js"
-import type { Info as ToolInfo } from "@opencode-ai/plugin/promise/tool"
+import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 
 type ToolDraftLike = {
   add(tool: ToolInfo<any, undefined>): void
@@ -33,7 +34,8 @@ export type PublishToolsDeps = {
 
 export const PUBLISH_POLICY_LIMITATIONS = [
   "authorization policy only, not caller authentication: nothing in this record proves a human invoked /publish",
-  "never authorizes issue creation or PR merge",
+  "never authorizes issue creation (still requires github.allow_mutations plus confirm: true)",
+  "never widens or bypasses a per-session gate narrowing; /gates can disable push, PR steps, merge, or mutations for the current session only",
   "never weakens the static github.enabled, github.allow_mutations, worktree.enabled, or worktree.allow_mutations gates",
   "does not itself mutate Git or GitHub",
 ]

@@ -20,7 +20,7 @@ import { OBSERVABILITY_TOOL_PERMISSION } from "../../core/permissions.js"
 import { REVIEW_V1_CHECK_KEYS, REVIEW_V1_SIGNAL_SCHEMA, transitionReviewV1 } from "./review.js"
 import { readReviewRecord, setReviewRecord } from "./runtime.js"
 import { withSessionLock, type LocationLike, type StorageLike } from "../goal/state.js"
-import type { Info as ToolInfo } from "@opencode-ai/plugin/promise/tool"
+import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 
 type ToolDraftLike = {
   add(tool: ToolInfo<any, undefined>): void

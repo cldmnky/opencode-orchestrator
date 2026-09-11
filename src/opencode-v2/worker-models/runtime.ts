@@ -1,4 +1,4 @@
-import type { ModelInfo } from "@opencode-ai/client"
+import type { ModelInfo } from "@opencode/client"
 import type { OrchestratorOptions } from "../../core/config.js"
 import { formatModelReference, parseModelReference, type ModelReference } from "../../core/model-reference.js"
 import { workerAgentIds, workerAgentRoles as coreWorkerAgentRoles } from "../../core/roles.js"

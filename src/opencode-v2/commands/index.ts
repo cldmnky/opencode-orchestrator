@@ -1,5 +1,5 @@
 import { COMMAND_NAMES, isCommandEnabled, type CommandName, type OrchestratorOptions } from "../../core/config.js"
-import type { CommandInvocation } from "@opencode-ai/plugin/promise/command"
+import type { CommandInvocation } from "@opencode/plugin/promise/command"
 
 export { COMMAND_NAMES }
 export type { CommandName } from "../../core/config.js"
@@ -66,6 +66,7 @@ const descriptions: Record<CommandName, string> = {
   polish: "Make narrowly scoped quality improvements and review the result",
   "stress-plan": "Draft and independently critique a multi-agent execution plan",
   publish: "Inspect or toggle the durable project-scoped publication capability (status|enable|disable)",
+  gates: "Show or narrow the per-session orchestrator gates (status|reset|<gate>=on|off)",
 }
 
 const requiredRoles: Record<CommandName, CommandSpec["requiredRoles"]> = {
@@ -79,6 +80,7 @@ const requiredRoles: Record<CommandName, CommandSpec["requiredRoles"]> = {
   polish: ["orchestrator", "research", "implementation", "review"],
   "stress-plan": ["orchestrator", "planning", "research", "review"],
   publish: ["orchestrator"],
+  gates: ["orchestrator"],
 }
 
 const requiresArgument = new Set<CommandName>(["orchestrate", "restructure", "stress-plan"])

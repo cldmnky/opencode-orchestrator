@@ -1,6 +1,6 @@
 import type { OrchestratorOptions } from "../../core/config.js"
 import { WORKTREE_TOOL_PERMISSION } from "../../core/permissions.js"
-import type { Info as ToolInfo } from "@opencode-ai/plugin/promise/tool"
+import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 import { liveEvidence } from "../orchestration/evidence.js"
 import { createRedactor } from "../process/redact.js"
 import type { ProcessRunner } from "../process/runner.js"
@@ -37,7 +37,7 @@ import {
   type WorktreeRecord,
   type WorktreeSyncReceipt,
 } from "./state.js"
-import { isPublishCapabilityAuthorized } from "../publish/state.js"
+import { requireGateEnabled } from "../gates/state.js"
 import { readReviewRecord } from "../observability/runtime.js"
 import { validateApprovedReviewRevision } from "../observability/review.js"
 import { moveSessionToDirectory } from "../session/move.js"
@@ -157,6 +157,8 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
       requireMutations(deps.options)
+      const mutation = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "worktree-mutations")
+      if (!mutation.ok) return result(`worktree_create refused: ${mutation.message}`)
       if (inputConfirm(input) !== true) return result("worktree_create requires confirm: true")
 
       const repoRoot = stringField(input, "repoRoot")
@@ -286,6 +288,8 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
       requireMutations(deps.options)
+      const mutation = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "worktree-mutations")
+      if (!mutation.ok) return result(`worktree_sync refused: ${mutation.message}`)
       if (inputConfirm(input) !== true) return result("worktree_sync requires confirm: true")
 
       const record = await readWorktree(deps.storage, deps.location.project.id, tool.sessionID)
@@ -419,6 +423,8 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
       requireMutations(deps.options)
+      const mutation = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "worktree-mutations")
+      if (!mutation.ok) return result(`worktree_push refused: ${mutation.message}`)
       if (inputConfirm(input) !== true) return result("worktree_push requires confirm: true")
 
       const record = await readWorktree(deps.storage, deps.location.project.id, tool.sessionID)
@@ -439,13 +445,12 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
       const cwd = record.dir
 
       try {
-        // Durable publication authorization: policy only (never caller
-        // identity proof) and never a substitute for the static gates above.
-        const grant = await isPublishCapabilityAuthorized(deps.storage, deps.location, tool.sessionID, "push")
-        if (!grant.authorized) {
-          return result(
-            `worktree_push refused: publication capability 'push' is not authorized for project ${grant.projectID}; enable it with /publish enable`,
-          )
+        // Durable publication authorization plus the per-session narrowing:
+        // policy only (never caller identity proof) and never a substitute for
+        // the static gates above.
+        const capability = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "push")
+        if (!capability.ok) {
+          return result(`worktree_push refused: ${capability.message}`)
         }
         // Exact-revision approved review receipt: the current bounded review
         // record must be APPROVED and carry the exact synced base/head pair.
@@ -545,6 +550,8 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
       requireMutations(deps.options)
+      const mutation = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "worktree-mutations")
+      if (!mutation.ok) return result(`worktree_cleanup refused: ${mutation.message}`)
       if (inputConfirm(input) !== true) return result("worktree_cleanup requires confirm: true")
 
       const record = await readWorktree(deps.storage, deps.location.project.id, tool.sessionID)

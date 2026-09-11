@@ -7,6 +7,7 @@ import { inspectConfig, mergeStatus, runtimeChecks, type DoctorRunner } from "..
 import { configRelativePluginReference, installConfig, isLocalPluginReference, pluginEntryForRuntimeFile } from "../../src/cli/install.js"
 import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../../src/core/package-identity.js"
 import {
+  GATES_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
   OBSERVABILITY_TOOL_PERMISSION,
   ORCHESTRATION_TOOL_PERMISSION,
@@ -514,14 +515,14 @@ describe("installer", () => {
     ])
   })
 
-  test("allows the publish and peer permissions for the orchestrator and denies them to workers", () => {
+  test("allows the publish, peer, and gates permissions for the orchestrator and denies them to workers", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     const path = join(directory, "opencode.jsonc")
     installConfig(path, {})
     const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
 
     const orchestratorPermissions = document.agents.orchestrator.permissions as Rule[]
-    for (const action of [PUBLISH_TOOL_PERMISSION, PEER_TOOL_PERMISSION]) {
+    for (const action of [PUBLISH_TOOL_PERMISSION, PEER_TOOL_PERMISSION, GATES_TOOL_PERMISSION]) {
       expect(orchestratorPermissions.filter((rule) => rule.action === action)).toEqual([
         { action, resource: "*", effect: "allow" },
       ])
@@ -533,7 +534,7 @@ describe("installer", () => {
 
     for (const id of ["planner", "explore", "implementer", "reviewer"]) {
       const workerPermissions = document.agents[id].permissions as Rule[]
-      for (const action of [PUBLISH_TOOL_PERMISSION, PEER_TOOL_PERMISSION]) {
+      for (const action of [PUBLISH_TOOL_PERMISSION, PEER_TOOL_PERMISSION, GATES_TOOL_PERMISSION]) {
         expect(workerPermissions.filter((rule) => rule.action === action)).toEqual([
           { action, resource: "*", effect: "deny" },
         ])
@@ -544,14 +545,14 @@ describe("installer", () => {
     }
   })
 
-  test("reinstall never duplicates the publish or peer permission rules", () => {
+  test("reinstall never duplicates the publish, peer, or gates permission rules", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     const path = join(directory, "opencode.jsonc")
     installConfig(path, {})
     installConfig(path, {})
     const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
 
-    for (const action of [PUBLISH_TOOL_PERMISSION, PEER_TOOL_PERMISSION]) {
+    for (const action of [PUBLISH_TOOL_PERMISSION, PEER_TOOL_PERMISSION, GATES_TOOL_PERMISSION]) {
       const orchestratorPermissions = document.agents.orchestrator.permissions as Rule[]
       expect(orchestratorPermissions.filter((rule) => rule.action === action)).toHaveLength(1)
       const workerPermissions = document.agents.explore.permissions as Rule[]
@@ -559,7 +560,7 @@ describe("installer", () => {
     }
   })
 
-  test("preserves user-authored publish and peer permission rules across installs", () => {
+  test("preserves user-authored publish, peer, and gates permission rules across installs", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     const path = join(directory, "opencode.jsonc")
     installConfig(path, {})
@@ -568,6 +569,7 @@ describe("installer", () => {
     for (const [index, rule] of permissions.entries()) {
       if (rule.action === PUBLISH_TOOL_PERMISSION) permissions[index] = { action: PUBLISH_TOOL_PERMISSION, resource: "*", effect: "ask" }
       if (rule.action === PEER_TOOL_PERMISSION) permissions[index] = { action: PEER_TOOL_PERMISSION, resource: "*", effect: "deny" }
+      if (rule.action === GATES_TOOL_PERMISSION) permissions[index] = { action: GATES_TOOL_PERMISSION, resource: "*", effect: "ask" }
     }
     writeFileSync(path, JSON.stringify(first))
 
@@ -580,6 +582,9 @@ describe("installer", () => {
     ])
     expect(rules.filter((rule) => rule.action === PEER_TOOL_PERMISSION)).toEqual([
       { action: PEER_TOOL_PERMISSION, resource: "*", effect: "deny" },
+    ])
+    expect(rules.filter((rule) => rule.action === GATES_TOOL_PERMISSION)).toEqual([
+      { action: GATES_TOOL_PERMISSION, resource: "*", effect: "ask" },
     ])
   })
 
@@ -800,10 +805,16 @@ describe("installer", () => {
     expect(orchestratorSystem).toContain("orchestrator_github_pr_merge")
     expect(orchestratorSystem).toContain("implementers never push branches or create or merge pull requests")
     expect(orchestratorSystem).toContain("the orchestrator MUST run orchestrator_worktree_create -> orchestrator_worktree_enter")
-    expect(orchestratorSystem).toContain("is never user authorization")
+    // Merge is autonomous under the publish capability and the per-session
+    // gates; the old "separate explicit user request" framing is gone.
+    expect(orchestratorSystem).toContain("Merge is autonomous when the durable publish capability 'merge' and the per-session gates allow it")
+    expect(orchestratorSystem).not.toContain("separate explicit user request")
     const implementerSystem = document.agents.implementer.system as string
     expect(implementerSystem).toContain("never delegate implementation from the main checkout")
-    expect(implementerSystem).toContain("is never user authorization")
+    expect(implementerSystem).toContain("no separate user merge instruction is required")
+    // Worker feature guidance also carries the terminal-drive Definition of Done.
+    expect(implementerSystem).toContain("Definition of Done (terminal drive)")
+    expect(implementerSystem).toContain("Run the terminal chain in order as soon as the work is verified")
 
     const plain = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     const plainPath = join(plain, "opencode.jsonc")
@@ -812,6 +823,10 @@ describe("installer", () => {
     const plainSystem = plainDocument.agents.orchestrator.system as string
     expect(plainSystem).not.toContain("orchestrator_github_pr_merge")
     expect(plainSystem).not.toContain("Worktree lifecycle is mandatory")
+    expect(plainSystem).not.toContain("Merge is autonomous")
+    const plainImplementer = plainDocument.agents.implementer.system as string
+    expect(plainImplementer).not.toContain("Definition of Done (terminal drive)")
+    expect(plainImplementer).not.toContain("no separate user merge instruction is required")
     // The universal boundary and catalog-preflight guidance stay installed.
     expect(plainSystem).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
     expect(plainSystem).toContain("inspect the tool catalog")

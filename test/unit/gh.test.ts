@@ -2418,4 +2418,134 @@ describe("github tools", () => {
       expect(calls).toHaveLength(5)
     })
   })
+
+  describe("single-collaborator best-effort approval", () => {
+    const HEAD_SHA_7_40 = "abc1234def567890123456789012345678901234"
+    const MERGE_SHA = "9f8e7d6c5b4a39281726354b6a7c8d9e0f1a2b3c4"
+    const OPEN_PULL = {
+      ...PULL,
+      state: "open",
+      merged: false,
+      draft: false,
+      mergeable: true,
+      mergeable_state: "clean",
+      head: { ref: "feature", sha: HEAD_SHA_7_40 },
+      base: { ref: "main", sha: BASE_SHA },
+    }
+    const MERGED_PULL = { ...OPEN_PULL, state: "closed", merged: true, merged_at: "2026-08-31T00:00:00Z" }
+    const MERGE_REVIEW: ReviewV1Record = { ...APPROVED_REVIEW, headSha: HEAD_SHA_7_40, baseSha: BASE_SHA }
+    const approveInput = {
+      owner: "acme",
+      repo: "widgets",
+      number: 7,
+      expectedHeadSha: HEAD_SHA_7_40,
+      expectedBaseSha: BASE_SHA,
+      confirm: true,
+    }
+    const mergeInput = {
+      owner: "acme",
+      repo: "widgets",
+      number: 7,
+      expectedHeadSha: HEAD_SHA_7_40,
+      expectedBaseSha: BASE_SHA,
+    }
+
+    /**
+     * The single-collaborator reality: the authenticated viewer is the pull
+     * author ("octocat"), so every APPROVE attempt is refused truthfully as
+     * self-approval. The scripted runner serves the approve pre-view and the
+     * merge pre-view as the same open, non-draft pull and the merge post-view
+     * as merged.
+     */
+    function singleCollaboratorGh(options: { put?: () => ProcessResult } = {}) {
+      const put =
+        options.put ??
+        ((): ProcessResult =>
+          ok(JSON.stringify({ sha: MERGE_SHA, merged: true, message: "Pull Request successfully merged" })))
+      return scriptedGh((call, calls) => {
+        if (call.args.includes("user")) return ok(JSON.stringify({ login: "octocat" }))
+        if (call.args.includes("repos/acme/widgets/branches/feature")) return ok(branchJson("feature", HEAD_SHA_7_40))
+        if (call.args.includes("repos/acme/widgets/branches/main")) return ok(branchJson("main", BASE_SHA))
+        if (call.args.includes("repos/acme/widgets/compare/main...feature")) {
+          return ok(compareJson("ahead", 1, 0, BASE_SHA))
+        }
+        if (call.args.includes("repos/acme/widgets/pulls/7/merge")) return put()
+        if (call.args.includes("repos/acme/widgets/pulls/7")) {
+          const views = calls.filter((c) => c.args[0] === "api" && c.args.includes("repos/acme/widgets/pulls/7"))
+          return ok(JSON.stringify(views.length <= 2 ? OPEN_PULL : MERGED_PULL))
+        }
+        return undefined
+      })
+    }
+
+    async function attemptSelfApproval(runner: ProcessRunner): Promise<{ content: string }> {
+      const { tools } = collectGhTools({
+        runner,
+        storage: lifecycleStorage({ capabilities: ["approve-after-review"], record: MERGE_REVIEW }),
+      })
+      return tools.get("github_pr_approve")!.execute(approveInput, toolContext("session-1", "orchestrator"))
+    }
+
+    test("a refused self-approval does not block the autonomous merge with only the merge capability", async () => {
+      const { runner, calls } = singleCollaboratorGh()
+      const approval = await attemptSelfApproval(runner)
+      // The refusal is truthful, carries no success evidence, and performs no
+      // review mutation.
+      expect(approval.content).toContain("github pr approve refused")
+      expect(approval.content).toContain("self-approval")
+      expect(approval.content).toContain("octocat")
+      expect(approval.content).not.toContain("evidence")
+      expect(() => JSON.parse(approval.content)).toThrow()
+      expect(calls.some((call) => call.args.includes("reviews"))).toBe(false)
+
+      // Merge is authorized by the durable 'merge' capability alone (no
+      // approve-after-review), and it never requires a GitHub APPROVE review.
+      const { tools } = collectGhTools({
+        runner,
+        storage: lifecycleStorage({ capabilities: ["merge"], record: MERGE_REVIEW }),
+      })
+      const output = await tools
+        .get("github_pr_merge")!
+        .execute(mergeInput, toolContext("session-1", "orchestrator"))
+      const parsed = JSON.parse(output.content) as PullInfo & {
+        mergeSha: string
+        verified: boolean
+        evidence: unknown
+      }
+      expect(parsed.verified).toBe(true)
+      expect(parsed.merged).toBe(true)
+      expect(parsed.mergeSha).toBe(MERGE_SHA)
+      expect(parsed.evidence).toMatchObject({
+        marker: "EVIDENCE_MUTATION",
+        source: "opencode-orchestrator.gh.pr.merge",
+        sessionID: "session-1",
+      })
+      expect(evidenceSchema.safeParse(parsed.evidence).success).toBe(true)
+      // No GitHub review was ever created or consulted.
+      expect(calls.some((call) => call.args.includes("reviews"))).toBe(false)
+    })
+
+    test("branch protection still fails the merge truthfully after a refused approval", async () => {
+      const { runner, calls } = singleCollaboratorGh({
+        put: () => fail("Merge blocked: branch protection requires an approving review\nclient_secret: leaked-leak"),
+      })
+      const approval = await attemptSelfApproval(runner)
+      expect(approval.content).toContain("self-approval")
+      expect(approval.content).not.toContain("evidence")
+
+      const { tools } = collectGhTools({
+        runner,
+        storage: lifecycleStorage({ capabilities: ["merge"], record: MERGE_REVIEW }),
+      })
+      const output = await tools
+        .get("github_pr_merge")!
+        .execute(mergeInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("github pr merge failed")
+      expect(output.content).toContain("branch protection")
+      expect(output.content).not.toContain("leaked-leak")
+      expect(output.content).not.toContain("evidence")
+      expect(() => JSON.parse(output.content)).toThrow()
+      expect(calls.some((call) => call.args.includes("PUT"))).toBe(true)
+    })
+  })
 })

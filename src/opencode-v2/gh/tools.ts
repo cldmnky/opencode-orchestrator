@@ -54,17 +54,24 @@ import {
  * before the mutation, then verifies the transition with a fresh post-view
  * (open, unmerged, `draft: false`, exact head revision).
  *
- * `github_pr_approve` submits an APPROVE review pinned to the exact commit
- * after the durable capability `approve-after-review`, an exact-revision
- * approved internal receipt, a fresh non-draft conflict-free view, current
- * remote base ancestry, and an authenticated viewer different from the pull
- * author all pass, and verifies the durable review listing shows the created
- * review with matching id/state/commit/viewer/https URL. It never counts
- * branch-protection required checks or claims any blocked state is clean.
+ * `github_pr_approve` submits an OPTIONAL, best-effort APPROVE review pinned to
+ * the exact commit after the durable capability `approve-after-review`, an
+ * exact-revision approved internal receipt, a fresh non-draft conflict-free
+ * view, current remote base ancestry, and an authenticated viewer different
+ * from the pull author all pass, and verifies the durable review listing shows
+ * the created review with matching id/state/commit/viewer/https URL. It never
+ * counts branch-protection required checks or claims any blocked state is
+ * clean. A truthful refusal — self-approval in a single-collaborator repo, an
+ * unknown author, a missing approval capability, or an API failure — returns a
+ * refusal/failure string with no success evidence and never blocks
+ * `github_pr_merge`.
  *
  * `github_pr_merge` is the autonomous merge: it never trusts the caller's SHA
  * or a `confirm: true` flag as user authorization, and no separate user merge
- * request is required. It requires the durable publish capability `merge`
+ * request is required. It does NOT require a GitHub APPROVE review: the review
+ * authority is the exact-revision approved internal review receipt, so a
+ * refused or skipped best-effort approval is not a merge precondition. It
+ * requires the durable publish capability `merge`
  * (plus the per-session gate) and the exact-revision approved internal review
  * receipt, runs a fresh PR view requiring an open, unmerged, NON-draft pull
  * with `mergeable: true`, no dirty/unknown conflict state, and the exact
@@ -458,7 +465,7 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
   draft.add({
     name: "github_pr_approve",
     description:
-      "Approve a pull request with an APPROVE review pinned to the exact commit, only after the durable publish capability 'approve-after-review', an exact-revision approved internal review receipt, a fresh non-draft conflict-free view, current remote base ancestry, and an authenticated viewer different from the pull author all pass, and after the durable review listing verifies the created review's id/state/commit/viewer/https URL. Requires confirm: true.",
+      "Optionally, best-effort approve a pull request with an APPROVE review pinned to the exact commit, only after the durable publish capability 'approve-after-review', an exact-revision approved internal review receipt, a fresh non-draft conflict-free view, current remote base ancestry, and an authenticated viewer different from the pull author all pass, and after the durable review listing verifies the created review's id/state/commit/viewer/https URL. Requires confirm: true. Approval is optional and never a merge precondition: a truthful refusal (self-approval, unknown author, missing capability, or API failure) returns no success evidence and never blocks orchestrator_github_pr_merge, which does not require a GitHub APPROVE review.",
     input: prApproveInput,
     options: { namespace: "orchestrator", permission: GH_TOOL_PERMISSION },
     execute: async (input, tool) => {
@@ -596,7 +603,7 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
   draft.add({
     name: "github_pr_merge",
     description:
-      "Merge a GitHub pull request autonomously when the durable publish capability 'merge' and the per-session gates allow it, after an exact-revision approved internal review, a fresh conflict-free view at the exact expected head/base SHA, current remote base ancestry, and post-merge verification. No separate user merge instruction is required; every precondition fails closed.",
+      "Merge a GitHub pull request autonomously when the durable publish capability 'merge' and the per-session gates allow it, after an exact-revision approved internal review, a fresh conflict-free view at the exact expected head/base SHA, current remote base ancestry, and post-merge verification. No GitHub APPROVE review is required (the exact-revision approved internal review receipt is the review authority), so a refused or skipped best-effort approval never blocks the merge; a failed merge still never claims success. No separate user merge instruction is required; every precondition fails closed.",
     input: prMergeInput,
     options: { namespace: "orchestrator", permission: GH_TOOL_PERMISSION },
     execute: async (input, tool) => {

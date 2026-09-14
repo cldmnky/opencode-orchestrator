@@ -13,8 +13,9 @@ Give the orchestrator a task in plain English — it breaks the work down, deleg
 - **Describe what you want, not how to do it.** `“Add validation to the checkout form and cover it with tests”` Just ask — the orchestrator creates a plan, assigns work, and verifies the result.
 - **Parallel where safe, serialized where it matters.** Read-only research runs in parallel. Non-overlapping file scopes coordinate edits so agents avoid working on the same files.
 - **Built-in review.** Every implementation is audited by a dedicated reviewer before you see the final result.
-- **Asks before it guesses.** When a request is ambiguous, the orchestrator asks you a few targeted questions — with answer options — before breaking the work down. Disable with `"clarify": { "mode": "off" }`.
+- **Asks before it guesses.** When a request is ambiguous, the orchestrator asks you a few targeted questions — with answer options — before breaking the work down. It explores repository facts first and workers never ask on your behalf; this is prompt guidance, not a hard runtime gate. Disable with `"clarify": { "mode": "off" }`.
 - **Goals that survive idle.** Start a long-running objective and let it continue during idle periods in the same OpenCode session.
+- **A read-only Orchestrator sessions sidebar.** When the host exposes session tabs, the TUI sidebar lists the sessions running your configured orchestrator with each session’s live status (`busy` / `running` / `idle`, or `unknown` when no state is known) and cost. It reads reactive client caches only — no storage, git, or GitHub writes — and hosts without session tabs skip it entirely.
 - **Optional power features** when you need them: GitHub and git worktree integration, budgets and review gates, a durable `/publish` publication capability with per-session `/gates` narrowing, and same-project peer-orchestrator discovery.
 
 ### The team
@@ -78,6 +79,7 @@ cd your-project
 npm install --save-dev opencode-v2-agent-orchestrator
 
 # Add the plugin + agents to your opencode.jsonc
+# (add --global to target OpenCode's global config instead)
 ./node_modules/.bin/opencode-v2-agent-orchestrator install \
   --model orchestrator=openai/gpt-5#high \
   --model explore=opencode-go/mimo-v2.5
@@ -88,6 +90,7 @@ npm install --save-dev opencode-v2-agent-orchestrator
 
 What the installer does:
 - Adds the plugin to `opencode.jsonc` (as a local file reference like `./node_modules/.../dist/index.js`)
+- Accepts `--global` to write to OpenCode’s global config instead of a project’s `opencode.jsonc` — `$XDG_CONFIG_HOME/opencode/opencode.jsonc`, or `~/.config/opencode/opencode.jsonc` when `XDG_CONFIG_HOME` is unset
 - Adds the five agents (`orchestrator`, `planner`, `explore`, `implementer`, `reviewer`) if they’re missing
 - Sets `experimental.subagent_depth: 3` (only when the key is absent) so OpenCode’s native subagent depth limit — which defaults to 1 — doesn’t block the deepest approved chain `orchestrator → implementer → planner → explore`
 - Gives new agents permission defaults that allow exactly the bounded nested-delegation graph (see [Bounded nested delegation](#bounded-nested-delegation)): a broad `subagent` deny followed by exact target-specific allows, with `webfetch`/`websearch` granted directly to `explore`
@@ -281,8 +284,8 @@ You configure baseline **models** with OpenCode’s native `agents.<id>.model`; 
         "review": "reviewer"
       },
       "max_parallel": 4,        // how many subagents at once (1..8)
-      "require_review": true,   // always run reviewer before finishing
-      "strict_agents": true,    // fail if a required agent is missing
+      "require_review": true,   // ask a reviewer before finishing (prompt policy; exact-revision review receipts require bounded mode)
+      "strict_agents": true,    // throw when a required agent is confirmed missing or has the wrong mode; false warns and continues
       "commands": {},           // disable a command, e.g. { "polish": false }
       "goal": { "auto_continue": true, "max_continuations": 50, "cooldown_ms": 1000 },
       "github": { "enabled": false, "allow_mutations": false },
@@ -291,7 +294,7 @@ You configure baseline **models** with OpenCode’s native `agents.<id>.model`; 
       "trace": { "mode": "off" },                  // off | memory | snapshot
       "budget": { "mode": "advisory" },            // advisory | stop-between-steps
       "review": { "mode": "prompt", "max_rounds": 2 }, // prompt | bounded
-      "clarify": { "mode": "auto" }                // auto | off — ask targeted clarifying questions when a task is ambiguous
+      "clarify": { "mode": "auto" }                // auto | off — explore repo facts first, then ask targeted questions when a task is ambiguous
     }
   }],
   // If worktree.root lives outside your project, allow it:
@@ -306,6 +309,8 @@ You configure baseline **models** with OpenCode’s native `agents.<id>.model`; 
   }
 }
 ```
+
+`require_review` and `clarify` are prompt policy, not hard runtime gates: they shape what the orchestrator is instructed to do, and the orchestrator explores repository facts before asking anything — workers never ask on your behalf. `strict_agents` is different: `true` throws at startup for a confirmed missing or wrong-mode required agent, while `false` downgrades that to a warning and continues. OpenCode’s beta startup can materialize config-backed agents after external plugins load, so an early missing-agent or empty-list result is treated as pending — validation is deferred and re-checked when the agents arrive instead of failing setup.
 
 ### Choosing models
 
@@ -442,6 +447,8 @@ Verify the current policy inside OpenCode with `/publish status` or `orchestrato
 
 This tells you concurrent orchestration exists and what its goal state is — it is not a live directory of sessions.
 
+For a closer look, `orchestrator_session_status` (orchestrator-only, read-only) returns per-session summaries under the same stable project: pass a `sessionID` for that session’s goal/worktree/review summary (`summary: null` when no readable goal record exists), or omit it for a bounded, cursor-paginated session list with the same ordering, scan cap, and cursor semantics as `orchestrator_peer_list`. Objective hints, branch names, and worktree paths are known-pattern-redacted and length-truncated; SHAs, task IDs, repos, bases, evidence, transcripts, and credentials never leave the query, and nothing is mutated. Like peer discovery, it returns durable metadata that is never live-complete — `complete: false` means `storage.scan` is unavailable or the bounded scan cap was hit.
+
 ### Budgets, tracing & review gates (observability)
 
 For teams that want cost/usage limits or a stricter review gate:
@@ -526,7 +533,7 @@ Want the formal contracts? `docs/phase-1/` has them (D2 handoff, D4 gate, etc.) 
 - The publication capability is authorization bookkeeping, not caller identity: it does not prove a human invoked `/publish`, and it never bypasses the static gates or issue creation. Merge still requires the durable `merge` capability, the per-session `merge` gate, and every fail-closed precondition — never a bare user ask.
 - Session gates (`/gates`, `/gates <gate>=on|off`, `/gates reset`) are a per-session narrowing only: they can turn a ceiling-allowed step off, but never widen the project/config ceiling, and they do not carry over to another session. The model has a read-only `orchestrator_gates_get` view; only `/gates` and the TUI gate picker write the narrowing record.
 - Draft/ready/approval have hard limits by design: PRs are always created as drafts; a ready transition requires fresh conflict-free evidence at the exact revision (unknown mergeability stays draft — no polling); automated approval is never claimed or relied on to satisfy branch protection, and same-author or API failures are reported truthfully, never as successes.
-- Peer discovery covers the same stable project only, and only sessions with readable goal records — it is durable metadata with a redacted objective hint, never a live or complete directory of sessions.
+- Peer discovery and `orchestrator_session_status` cover the same stable project only, and only sessions with readable goal records appear — they return read-only, durable, redacted/truncated metadata, never a live or complete directory of sessions.
 
 </details>
 
@@ -537,6 +544,7 @@ Want the formal contracts? `docs/phase-1/` has them (D2 handoff, D4 gate, etc.) 
 ```sh
 bun install
 bun run dev:setup        # writes gitignored dev/project/opencode.jsonc from template
+bun run dev:reset        # removes only generated dev/state/ and dev/project/opencode.jsonc
 bun run dev:v2           # standalone opencode2 with XDG dirs under dev/state
 bun run dev:v2:dist      # loads ../../dist/index.js (run bun run build first)
 bun run typecheck
@@ -544,7 +552,7 @@ bun test
 bun run build            # emits dist/index.js, dist/tui.js, dist/commands.js, dist/installer.js, dist/cli/index.js
 ```
 
-`dev/project/opencode.jsonc` and `dev/state/*` are gitignored — they never touch global `~/.config/opencode`.
+`dev/project/opencode.jsonc` and `dev/state/*` are gitignored — they never touch global `~/.config/opencode`. `bun run dev:reset` deletes only those generated local files; your source checkout and global config are left untouched.
 
 ## Compatibility
 

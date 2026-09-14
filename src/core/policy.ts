@@ -107,7 +107,7 @@ export const WORKTREE_LIFECYCLE_GUIDANCE = [
 /**
  * Feature-specific GitHub lifecycle guidance, embedded only when
  * `github.enabled`. The orchestrator owns the branch push -> PR create ->
- * ready -> approve -> merge -> cleanup lifecycle; implementers never push or
+ * ready -> best-effort approve -> merge -> cleanup lifecycle; implementers never push or
  * create/merge PRs, and merge is autonomous once the durable publish
  * capability and the per-session gates allow it, always behind the full
  * fail-closed precondition chain.
@@ -136,20 +136,21 @@ export const PEER_DISCOVERY_GUIDANCE = [
  * (the config master gate). States the capability-not-authentication
  * semantics, the exact authorized steps (including merge), the never-authorized
  * step, the per-session narrowing boundary, the mandatory commit -> sync ->
- * verify -> exact-revision review -> push -> ready -> approve -> merge ->
- * cleanup sequence with the conflict-delegation recovery flow, the draft-first
- * PR lifecycle with its ready/approval limitations, and the merge
- * preconditions.
+ * verify -> exact-revision review -> push -> ready -> best-effort approve ->
+ * merge -> cleanup sequence with the conflict-delegation recovery flow, the
+ * draft-first PR lifecycle with its ready transition, its optional best-effort
+ * approval, and the merge preconditions that never depend on a GitHub APPROVE
+ * review.
  */
 export const PUBLICATION_POLICY_GUIDANCE = [
   "Durable publication authorization is capability policy, never caller authentication: /publish toggles a project-scoped durable authorization record; nothing in it proves which human invoked it, it never weakens the static github/worktree gates, and it never mutates Git or GitHub itself.",
-  "When the durable capability is enabled it authorizes the orchestrator to pass confirm:true without re-prompting for exactly: worktree push, draft PR creation, the draft-to-ready transition, the verified post-ready approval, and merge after the full merge precondition chain. It never authorizes issue creation. /gates (or the TUI gate picker) can narrow any of these steps — including merge — for the current session only; a session-disabled gate is final.",
-  "Mandatory publication sequence: commit clean changes first, then synchronize against the latest remote base (orchestrator_worktree_sync, which records an exact-revision receipt), verify/test the synced result, run the exact-revision bounded review, and only then push (orchestrator_worktree_push) and create the always-draft pull request (orchestrator_github_pr_create), mark it ready (orchestrator_github_pr_ready), approve at the exact revision (orchestrator_github_pr_approve), merge (orchestrator_github_pr_merge), verify the merge, and clean up the tracked worktree (orchestrator_worktree_cleanup).",
+  "When the durable capability is enabled it authorizes the orchestrator to pass confirm:true without re-prompting for exactly: worktree push, draft PR creation, the draft-to-ready transition, the verified post-ready approval, and merge after the full merge precondition chain. The verified post-ready approval is best-effort and optional: 'approve-after-review' gates only that approval attempt, and a truthful refusal (self-approval, a missing approval capability, or an API failure) never blocks the merge, which is independently authorized by the durable 'merge' capability plus the per-session merge gate and every merge precondition. It never authorizes issue creation. /gates (or the TUI gate picker) can narrow any of these steps — including merge — for the current session only; a session-disabled gate is final.",
+  "Mandatory publication sequence: commit clean changes first, then synchronize against the latest remote base (orchestrator_worktree_sync, which records an exact-revision receipt), verify/test the synced result, run the exact-revision bounded review, and only then push (orchestrator_worktree_push) and create the always-draft pull request (orchestrator_github_pr_create), mark it ready (orchestrator_github_pr_ready), attempt the optional best-effort approval at the exact revision (orchestrator_github_pr_approve) without letting a refusal block the next step, then merge (orchestrator_github_pr_merge), verify the merge, and clean up the tracked worktree (orchestrator_worktree_cleanup).",
   "When a sync reports conflicts after aborting, autonomously delegate an implementer to perform the merge/resolution inside the tracked worktree, rerun verification and sync, commit, and restart the exact-revision review; stop only when conflicts cannot safely be resolved, and never push from an unresolved or unsynced state.",
   "If the base or head changes after the exact-revision review, re-sync and re-review before any push or merge; stale base/head, dirty trees, missing sync receipts, and missing or mismatched approved review receipts all fail closed.",
   "Pull requests are always created as drafts; fresh views must directly show the conflict-free exact revision (draft:true, mergeable:true, no dirty/unknown conflict state, remote base ancestry) before a ready transition, an unknown mergeability stays draft and is truthfully deferred without polling, and a draft that reports conflict state is never forced ready.",
-  "Auto-approve happens only after the ready transition and the exact internal review, with an authenticated non-author viewer and fresh conflict-free evidence; same-author attempts and API failures are refused and reported truthfully, and an automated approval is never claimed to satisfy branch protection.",
-  "Merge preconditions (all required, checked against fresh reads): an open, unmerged, non-draft pull whose head SHA equals the exact expected revision; mergeable:true with no dirty or unknown conflict state; an exact-revision approved internal review receipt for the same head/base; the current remote base is an ancestor of the exact head; and the durable 'merge' capability plus the per-session gate allow it. Merge with the exact SHA, verify merged:true with a fresh view, log the merge SHA, then clean up. Branch protection, required checks or reviews, permission failures, and merge queues are reported truthfully — never bypassed, never polled.",
+  "Auto-approve happens only after the ready transition and the exact internal review, with an authenticated non-author viewer and fresh conflict-free evidence, and it is best-effort and optional: same-author attempts, a missing approval capability, and API failures are refused and reported truthfully without success evidence, and a refused or skipped approval never blocks the independently authorized merge, which requires no GitHub APPROVE review. An automated approval is never claimed to satisfy branch protection.",
+  "Merge preconditions (all required, checked against fresh reads): an open, unmerged, non-draft pull whose head SHA equals the exact expected revision; mergeable:true with no dirty or unknown conflict state; an exact-revision approved internal review receipt for the same head/base; the current remote base is an ancestor of the exact head; and the durable 'merge' capability plus the per-session gate allow it. No GitHub APPROVE review is required — the exact-revision approved internal review receipt is the review authority, and a refused or skipped best-effort approval is not a merge precondition. Merge with the exact SHA, verify merged:true with a fresh view, log the merge SHA, then clean up. Branch protection, required checks or reviews, permission failures, and merge queues are reported truthfully — never bypassed, never polled.",
 ].join("\n")
 
 /**
@@ -171,7 +172,7 @@ export function terminalDriveGuidance(options: {
     "Definition of Done (terminal drive): a ship-shaped task is finished only when it is merged and the tracked worktree is cleaned up, or when a configured gate/capability refuses the next terminal step. Never stop at 'changes are ready' or 'the PR is open' and wait for the user to ask for the next step.",
     ...(options.github.enabled
       ? [
-          "Run the terminal chain in order as soon as the work is verified: verify/tests green -> commit -> sync against the latest remote base -> exact-revision review -> push -> draft PR -> ready -> approve -> merge -> post-merge verify -> worktree cleanup. The publish capability authorizes these steps; only the fail-closed preconditions can refuse them.",
+          "Run the terminal chain in order as soon as the work is verified: verify/tests green -> commit -> sync against the latest remote base -> exact-revision review -> push -> draft PR -> ready -> best-effort approve -> merge -> post-merge verify -> worktree cleanup. The publish capability authorizes these steps; only the fail-closed preconditions can refuse them.",
         ]
       : []),
     ...(options.publish.enabled

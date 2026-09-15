@@ -7,6 +7,7 @@ import {
   DELEGATION_GRAPH_GUIDANCE,
   GITHUB_LIFECYCLE_GUIDANCE,
   HANDOFF_FORMAT,
+  HANDOFF_SUMMARY_FIELDS,
   PEER_DISCOVERY_GUIDANCE,
   PROMPTING_POLICY_GUIDANCE,
   PUBLICATION_POLICY_GUIDANCE,
@@ -22,19 +23,72 @@ import type { OrchestratorOptions } from "./config.js"
 import { ROLE_GUIDANCE } from "./roles.js"
 import { buildOrchestrationPrompt } from "./prompt-builder.js"
 
+/**
+ * Orchestrator-only personality spec (G3 Phase 0, orchestrator-only).
+ *
+ * The orchestrator is the only user-facing voice in the delegation graph, so
+ * it gets a voice/tone/audience contract; worker prompts stay task-shaped and
+ * never embed these sections. The spec is plain-language pressure on the
+ * *rendering* of the model's own output, not on the model-facing contracts:
+ * D2 envelopes, evidence records, tool names, and fail-closed preconditions
+ * keep their exact wording. See docs/g3-communication-contract.md.
+ */
+const ORCHESTRATOR_COMMUNICATION_GUIDANCE = [
+  "Voice: friendly, concise, and proactive; explain the plan in one or two sentences before non-trivial work.",
+  "Talk to the user in plain language, and keep every sentence short: one instruction per sentence, 25 words or fewer.",
+  "Gloss jargon on first use: a gate is a safety step you can turn off for this session.",
+  "Never paste a policy string, admission state, SHA, gate name, or tool name into user output without a plain gloss.",
+  "Use the status template for anything the user reads: what happened, what it means, what's next.",
+  "Say what is uncertain instead of implying that unverified work passed.",
+].join("\n")
+
+const ORCHESTRATOR_RESTATEMENT_GUIDANCE = (clarifyEnabled: boolean): string =>
+  [
+    "Restatement: before starting multi-worker work, restate the request in two or three bullets.",
+    "List the assumptions you will proceed under, and label them as assumptions.",
+    ...(clarifyEnabled
+      ? [
+          "Ask through the native ask tool only when scope, success criteria, or verification is genuinely ambiguous.",
+          "Ask budget: at most three questions in one ask, each with concrete options; never re-ask an answered question.",
+          "Record the answers in the task ledger; when no answer blocks the work, state your assumptions and proceed.",
+        ]
+      : [
+          "Clarify mode is off: ask nothing, state your assumptions, and proceed.",
+          "Record those assumptions in the task ledger instead of stalling for input.",
+        ]),
+  ].join("\n")
+
+const ORCHESTRATOR_SUMMARY_GUIDANCE = [
+  "Phase transitions: announce each transition in one plain line, in order: plan, delegate, review, publish.",
+  "Say what is happening and why it matters; never present internal state without a gloss.",
+  "Finish summary: end every run with the same five fields as the D2 handoff.",
+  `Use exactly these field names, in order: ${HANDOFF_SUMMARY_FIELDS.join(", ")}.`,
+  "Outcome comes first in plain words: what was achieved and what it means for the user.",
+  "Verification states the commands run and their results; say 'not run' instead of implying a pass.",
+  "A refusal or blocker follows the status template: what happened, what it means, what the user can do.",
+].join("\n")
+
 export function buildOrchestratorSystem(options: OrchestratorOptions): string {
+  const clarifyEnabled = options.clarify.mode !== "off"
   const sections = [
     ROLE_GUIDANCE.orchestrator,
     "",
     "You are the conductor, not a worker of last resort. Understand the task, gather facts, then delegate focused work.",
     `Role map: planning=${options.roles.planning}; research=${options.roles.research}; implementation=${options.roles.implementation}; review=${options.roles.review}.`,
+    "",
+    ORCHESTRATOR_COMMUNICATION_GUIDANCE,
+    "",
+    ORCHESTRATOR_RESTATEMENT_GUIDANCE(clarifyEnabled),
+    "",
+    ORCHESTRATOR_SUMMARY_GUIDANCE,
+    "",
     orchestrationRules(options.max_parallel, options.require_review, orchestrationCapabilities(options), options.decomposition.strategy),
     "",
     STRUCTURED_HANDOFF_GUIDANCE,
   ]
   if (options.review.mode === "bounded") sections.push("", BOUNDED_REVIEW_GUIDANCE)
   if (options.budget.mode === "stop-between-steps") sections.push("", BUDGET_GUIDANCE)
-  if (options.clarify.mode !== "off") sections.push("", CLARIFY_GUIDANCE)
+  if (clarifyEnabled) sections.push("", CLARIFY_GUIDANCE)
   return sections.join("\n")
 }
 

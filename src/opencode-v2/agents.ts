@@ -39,6 +39,15 @@ type MutableAgentLike = {
   permissions?: PermissionRuleLike[]
 }
 
+/**
+ * Orchestrator agent description. The first sentence is preserved verbatim for
+ * existing installs and the embedded contract test; the second sentence adds
+ * the user-facing voice from the G3 communication contract (see
+ * docs/g3-communication-contract.md). Worker descriptions are unchanged.
+ */
+export const ORCHESTRATOR_DESCRIPTION =
+  "Coordinates specialized agents and verifies their work. Explains plans, status, and results in plain language."
+
 export function validateAgentSet(agents: readonly AgentInfoLike[], options: OrchestratorOptions): string[] {
   const issues: string[] = []
   const byId = new Map(agents.map((agent) => [agent.id, agent]))
@@ -74,7 +83,7 @@ export function applyAgentTransform(
   const orchestrator = draft.get(options.orchestrator)
   if (orchestrator) {
     draft.update(options.orchestrator, (agent) => {
-      agent.description = appendOnce(agent.description, "Coordinates specialized agents and verifies their work.")
+      agent.description = appendOnce(agent.description, ORCHESTRATOR_DESCRIPTION)
       agent.system = appendOnce(agent.system, buildOrchestratorSystem(options))
       // The orchestrator may call the goal tools and the orchestrator-only
       // feature tools (github/worktree). Preserved agents that predate the

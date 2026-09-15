@@ -18,6 +18,15 @@ export const DELEGATION_RULES: Record<RoleName, DelegationRule> = {
   review: { role: "review", mode: "foreground", writes: false, parallelSafe: true },
 }
 
+/**
+ * The five D2 handoff fields, as user-facing section names. Worker handoffs and
+ * user-facing finish summaries share one skeleton so a reader can move between
+ * them without relearning the structure. The names mirror `D2_PROSE_HEADINGS`
+ * in `core/contracts.ts` (asserted equal in the unit suite); the D2 envelope
+ * and its schema are unchanged.
+ */
+export const HANDOFF_SUMMARY_FIELDS = ["Outcome", "Files", "Verification", "Risks", "Follow-up"] as const
+
 export const HANDOFF_FORMAT = [
   "Outcome: what was achieved or discovered",
   "Files: files read or changed, with scope",
@@ -30,12 +39,14 @@ export const CHILD_TASK_CONTRACT = [
   "Every child prompt must be explicit and self-contained, covering:",
   "Task: the concrete work to perform.",
   "Expected outcome: the definition of done for this child.",
-  "Scope/file ownership: the exact files or areas the child may touch, disjoint from other children; files that must change together for one outcome stay with one owner in the same child.",
+  "Scope/file ownership: the exact files or areas the child may touch, disjoint from other children.",
+  "Ownership rule: files that must change together for one outcome stay with one owner in the same child.",
   "Must do: the required steps, constraints, and verification commands.",
   "Must not do: forbidden actions, including editing out-of-scope files or delegating outside the child's own role graph.",
   "Verification: the checks and commands that prove the work.",
   "Handoff: the worker handoff format below.",
-  "The parent stays accountable for every delegated child: it composes the contract, keeps child scopes disjoint, verifies child claims directly, and owns the integrated result.",
+  "The parent stays accountable for every delegated child.",
+  "It composes each child contract, keeps child scopes disjoint, verifies child claims directly, and owns the integrated result.",
 ].join("\n")
 
 /**
@@ -43,11 +54,19 @@ export const CHILD_TASK_CONTRACT = [
  * embedded verbatim so every prompt kind states the same truthful policy
  * without duplicating text, exactly like the remote-orchestration guidance
  * below.
+ *
+ * Restructured for G3: one instruction per bullet, each line short. The pinned
+ * safety phrases (`stays accountable for its children`, `keep child write
+ * scopes disjoint`, `Delegating outside your role graph is forbidden`, `stop
+ * and report honestly`) are byte-identical.
  */
 export const DELEGATION_GRAPH_GUIDANCE = [
   `Bounded nested delegation graph: ${delegationGraphSummary()}.`,
-  "A worker that delegates stays accountable for its children: compose each child prompt from the child-task contract, keep child write scopes disjoint, verify child claims directly, and own the integrated result.",
-  "Delegating outside your role graph is forbidden even when the host would allow it; if a permitted delegation is refused or unavailable, stop and report honestly instead of substituting an unauthorized path.",
+  "A worker that delegates stays accountable for its children.",
+  "It composes each child prompt from the child-task contract.",
+  "Rules: keep child write scopes disjoint, verify child claims directly, and own the integrated result.",
+  "Delegating outside your role graph is forbidden even when the host would allow it.",
+  "If a permitted delegation is refused or unavailable, stop and report honestly instead of substituting an unauthorized path.",
 ].join("\n")
 
 /**
@@ -58,11 +77,17 @@ export const DELEGATION_GRAPH_GUIDANCE = [
  * unknown coupling are resolved by sequencing or serialization with integrated
  * parent verification, never by concurrent overlapping writes. A slice is a
  * coordination unit, never a permission or filesystem boundary.
+ *
+ * The two pinned safety sentences stay byte-identical; the rest is split into
+ * one instruction per bullet.
  */
 export const VERTICAL_SLICE_GUIDANCE = [
-  "Prefer the smallest coherent end-to-end implementation slice over the smallest file or layer: keep coupled code, tests, wiring, and requested docs under one owner, and split only at a verified boundary where every resulting slice has its own outcome, acceptance evidence, and no hidden dependency.",
+  "Prefer the smallest coherent end-to-end implementation slice over the smallest file or layer: keep coupled code, tests, wiring, and requested docs under one owner.",
+  "Split only at a verified boundary where every resulting slice has its own outcome, acceptance evidence, and no hidden dependency.",
   "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
-  "A slice is a coordination unit, never a permission or filesystem boundary; unknown coupling fails closed and serializes, and prompt-level scopes are advisory, not isolation.",
+  "A slice is a coordination unit, never a permission or filesystem boundary.",
+  "Fail closed on uncertainty: unknown coupling fails closed and serializes.",
+  "Prompt-level scopes are advisory, not isolation.",
 ].join("\n")
 
 /**
@@ -75,9 +100,14 @@ export const VERTICAL_SLICE_GUIDANCE = [
  * never bypassed or relaxed.
  */
 export const STRICT_DECOMPOSITION_GUIDANCE = [
-  "Strict decomposition strategy is configured: treat the smallest coherent end-to-end slice as the default unit of work and require a stated, verified reason before splitting it into file-by-file or layer-by-layer tasks.",
-  "A split is justified only when every resulting slice has its own outcome, acceptance evidence, ownership, and no hidden dependency; when that cannot be shown, keep the work in one slice or serialize it with an explicit edge.",
-  "This preference changes emphasis only and never overrides an explicit user decision: the exact disjoint-write-scope rule, fail-closed serialization for overlapping or unknown coupling, aggregate review, the worktree lifecycle, and the publication preconditions all remain unchanged and must never be bypassed or relaxed.",
+  "Strict decomposition strategy is configured.",
+  "Treat the smallest coherent end-to-end slice as the default unit of work.",
+  "Require a stated, verified reason before splitting it into file-by-file or layer-by-layer tasks.",
+  "A split is justified only when every resulting slice has its own outcome, acceptance evidence, ownership, and no hidden dependency.",
+  "When that cannot be shown, keep the work in one slice or serialize it with an explicit edge.",
+  "This preference changes emphasis only and never overrides an explicit user decision.",
+  "The exact disjoint-write-scope rule, fail-closed serialization for overlapping or unknown coupling, aggregate review, the worktree lifecycle, and the publication preconditions all remain unchanged.",
+  "They must never be bypassed or relaxed.",
 ].join("\n")
 
 /**
@@ -104,34 +134,59 @@ export function verticalSliceGuidance(strategy: DecompositionStrategy = "mvp"): 
  * publication behavior.
  */
 export const D4_V2_COHERENCE_GUIDANCE = [
-  "Additive D4 v2 coherence signal (advisory; D4 v1 and D2 v1 are unchanged): before splitting work, answer the explicit coherence question for the candidate slice — coupled-outcome, independent, overlap, or unknown.",
-  "Deterministic slice metadata: a coupled-outcome stays one cohesive-slice; an independent slice is only a parallel-candidate after the parent verifies exact disjoint write scopes from repository facts; overlapping or unknown coupling serializes. Unknown facts fail closed to collect-facts before any slice metadata is emitted.",
-  "D2 flow-through question (named upfront): does this signal add or change any D2 handoff field, reviewState value, or handoff validation? No — D2 v1 stays frozen, and slice metadata is never written into a D2 envelope field, never replaces reviewState, and never changes handoff validation.",
-  "Slice metadata is advisory coordination guidance only: it is not filesystem isolation, not a permission boundary, and it never changes how a task is executed or published.",
+  "Additive D4 v2 coherence signal (advisory; D4 v1 and D2 v1 are unchanged).",
+  "Before splitting work, answer the explicit coherence question for the candidate slice: coupled-outcome, independent, overlap, or unknown.",
+  "Deterministic slice metadata: a coupled-outcome stays one cohesive-slice.",
+  "An independent slice is only a parallel-candidate after the parent verifies exact disjoint write scopes from repository facts.",
+  "Overlapping or unknown coupling serializes.",
+  "Unknown facts fail closed to collect-facts before any slice metadata is emitted.",
+  "D2 flow-through question (named upfront): does this signal add or change any D2 handoff field, reviewState value, or handoff validation?",
+  "No — D2 v1 stays frozen.",
+  "Slice metadata is never written into a D2 envelope field, never replaces reviewState, and never changes handoff validation.",
+  "Slice metadata is advisory coordination guidance only.",
+  "It is not filesystem isolation and not a permission boundary.",
+  "It never changes how a task is executed or published.",
 ].join("\n")
 
 /**
  * Prompting policy for every orchestration participant: autonomous authorized
  * follow-through, explicit user-instruction precedence, legible inter-agent
  * messages, risk-proportionate verification, and concise evidence-led user
- * reporting.
+ * reporting. Each pinned behavior starts its own bullet.
  */
 export const PROMPTING_POLICY_GUIDANCE = [
-  "Follow through autonomously on exactly what the task authorizes: keep going until the authorized work is done or a genuine blocker requires the user, and never expand scope beyond the authorization.",
-  "The user's explicit instructions take precedence over skill guidance and general defaults whenever they conflict; surface an unsafe conflict instead of silently resolving it.",
-  "Inter-agent messages must be clear and legible: state the task, constraints, and expected result so another agent could act on them alone, and return results that are specific, structured, and free of process chatter.",
-  "Verify in proportion to risk: run the checks the task names, state exactly what was verified and how, and never present an unexecuted or borrowed check as your own pass.",
-  "Report to the user concisely with evidence: lead with the outcome, cite the verification that proves it, and name assumptions and risks instead of padding the answer.",
+  "Follow through autonomously on exactly what the task authorizes.",
+  "Keep going until the authorized work is done or a genuine blocker requires the user.",
+  "Never expand scope beyond the authorization.",
+  "The user's explicit instructions take precedence over skill guidance and general defaults whenever they conflict.",
+  "Surface an unsafe conflict instead of silently resolving it.",
+  "Inter-agent messages must be clear and legible.",
+  "State the task, constraints, and expected result so another agent could act on them alone.",
+  "Return results that are specific, structured, and free of process chatter.",
+  "Verify in proportion to risk.",
+  "Run the checks the task names and state exactly what was verified and how.",
+  "Never present an unexecuted or borrowed check as your own pass.",
+  "Report to the user concisely with evidence.",
+  "Lead with the outcome and cite the verification that proves it.",
+  "Name assumptions and risks instead of padding the answer.",
 ].join("\n")
 
 // Remote (GitHub) orchestration guidance lives here as the single source of
 // truth. Prompt generation embeds these constants verbatim so every prompt
 // kind states the same truthful policy without duplicating text.
 export const TOOL_AVAILABILITY_GUIDANCE = [
-  "Preflight: inspect the tool catalog the connected host actually exposes — that is, only tools already visible in this session plus the plugin probes orchestrator_github_capabilities and orchestrator_worktree_status — before using any GitHub tool; never infer availability from MCP server names or status.",
-  "Use only GitHub tools the host has already configured and exposed; never assume, register, or invent tools (there is no tool named search; do not call search).",
-  "For issue, branch, pull request, review, merge, or closure operations, require direct evidence from the tool result — the object, its identifier, and its URL — before reporting completion.",
-  "If the connected host does not expose the tools needed for issue or pull request automation, stop and ask the user; do not silently claim the work, fall back to unverified steps, or fabricate results.",
+  "Preflight: inspect the tool catalog the connected host actually exposes.",
+  "That means only tools already visible in this session, plus the plugin probes orchestrator_github_capabilities and orchestrator_worktree_status.",
+  "Do this before using any GitHub tool.",
+  "Availability rule: never infer availability from MCP server names or status.",
+  "Use only GitHub tools the host has already configured and exposed.",
+  "Host-configured tools only: never assume, register, or invent tools.",
+  "There is no tool named search; do not call search.",
+  "For issue, branch, pull request, review, merge, or closure operations, require direct evidence from the tool result.",
+  "Direct evidence is the object, its identifier, and its URL.",
+  "Require that evidence before reporting completion.",
+  "If the connected host does not expose the tools needed for issue or pull request automation, stop and ask the user.",
+  "Fail truthfully: do not silently claim the work, fall back to unverified steps, or fabricate results.",
 ].join("\n")
 
 export const SECRET_HANDLING_GUIDANCE = [
@@ -141,15 +196,23 @@ export const SECRET_HANDLING_GUIDANCE = [
 
 export const WORKTREE_BOUNDARY_GUIDANCE = [
   "Prompt-level rules are advisory and do not enforce filesystem isolation.",
-  "The native V2 subagent API does not expose a plugin-controlled atomic worktree or location boundary; prompt-level disjoint write scopes do not equal filesystem isolation.",
-  "Retain native role delegation; safe delegation is allowed whenever isolation is not required.",
+  "The native V2 subagent API does not expose a plugin-controlled atomic worktree or location boundary.",
+  "These prompt-level disjoint write scopes do not equal filesystem isolation.",
+  "Retain native role delegation: safe delegation is allowed whenever isolation is not required.",
 ].join("\n")
 
 export const MANAGED_WORKTREE_GUIDANCE = [
-  "Managed worktree tools (orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_enter, orchestrator_worktree_push, orchestrator_worktree_cleanup) create and track one git worktree owned by the current session, with durable records and git-verified results.",
-  "When managed worktrees are used for implementation, the required order is orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer. orchestrator_worktree_enter moves only the current session into its tracked worktree (session ID and history preserved); children delegated afterward inherit or start from that context, while no atomic child isolation is guaranteed.",
-  "A pending or failed orchestrator_worktree_enter result is not an entry receipt: stop, wait for the V2 session move safe boundary, retry, and delegate only after entered:true is returned.",
-  "That managed ownership covers the current session only; it is not atomic child isolation, and parallel children still share the parent filesystem.",
+  "Managed worktree tools create and track one git worktree owned by the current session.",
+  "Records are durable and results are verified with git.",
+  "The tools are orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_enter, orchestrator_worktree_push, and orchestrator_worktree_cleanup.",
+  "When managed worktrees are used for implementation, the required order is orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer.",
+  "orchestrator_worktree_enter moves only the current session into its tracked worktree; session ID and history are preserved.",
+  "Note: children delegated afterward inherit or start from that context.",
+  "Children still share the parent filesystem: this is not atomic child isolation, so none is guaranteed.",
+  "A pending or failed orchestrator_worktree_enter result is not an entry receipt.",
+  "Stop, wait for the V2 session move safe boundary, retry, and delegate only after entered:true is returned.",
+  "Managed ownership covers the current session only.",
+  "Parallel children still share the parent filesystem.",
 ].join("\n")
 
 /**
@@ -161,8 +224,16 @@ export const MANAGED_WORKTREE_GUIDANCE = [
  */
 export const WORKTREE_LIFECYCLE_GUIDANCE = [
   MANAGED_WORKTREE_GUIDANCE,
-  "Worktree lifecycle is mandatory for implementation when worktree support is enabled: before delegating to the implementer, the orchestrator MUST run orchestrator_worktree_create -> orchestrator_worktree_enter, and only the orchestrator creates, enters, pushes, and cleans up managed worktrees.",
-  "When the worktree tools, a whitelisted worktree.root, worktree.allow_mutations, a ready tracked worktree, or a successful orchestrator_worktree_enter result are unavailable, stop and ask the user; never delegate implementation from the main checkout instead.",
+  "Worktree lifecycle is mandatory for implementation when worktree support is enabled.",
+  "Before delegating to the implementer, the orchestrator MUST run orchestrator_worktree_create -> orchestrator_worktree_enter.",
+  "Lifecycle ownership: only the orchestrator creates, enters, pushes, and cleans up managed worktrees.",
+  "Stop and ask the user when any of these is unavailable:",
+  "the worktree tools;",
+  "a whitelisted worktree.root;",
+  "worktree.allow_mutations;",
+  "a ready tracked worktree;",
+  "a successful orchestrator_worktree_enter result.",
+  "Do not fall back: never delegate implementation from the main checkout.",
 ].join("\n")
 
 /**
@@ -174,10 +245,20 @@ export const WORKTREE_LIFECYCLE_GUIDANCE = [
  * fail-closed precondition chain.
  */
 export const GITHUB_LIFECYCLE_GUIDANCE = [
-  "GitHub lifecycle is orchestrator-owned: preflight with orchestrator_github_capabilities and use only the tools the host actually exposes; implementers never push branches or create or merge pull requests.",
-  "The orchestrator pushes the worktree branch (orchestrator_worktree_push) and creates the pull request (orchestrator_github_pr_create) only after validated maker/checker review and direct verification of the branch, changes, and commits.",
-  "Merge is autonomous when the durable publish capability 'merge' and the per-session gates allow it: no separate user merge instruction is required. Run orchestrator_github_pr_merge with a fresh conflict-free view at the exact approved revision, the exact head and base SHAs, and the exact-revision approved internal review receipt; verify merged:true again with a fresh orchestrator_github_pr_view, then clean up the tracked worktree.",
-  "Every publication step fails closed: stale base or head, a dirty tree, a missing sync or review receipt, a moved revision, unresolved conflicts, branch protection, required checks or reviews, permission failures, merge queues, merged:false, or a failed post-merge view stop truthfully; never retry, fall back to a different SHA, or report a step without direct evidence.",
+  "GitHub lifecycle is orchestrator-owned.",
+  "Always preflight with orchestrator_github_capabilities and use only the tools the host actually exposes.",
+  "Role boundary: implementers never push branches or create or merge pull requests.",
+  "The orchestrator pushes the worktree branch (orchestrator_worktree_push) and creates the pull request (orchestrator_github_pr_create).",
+  "Do that only after validated maker/checker review and direct verification of the branch, changes, and commits.",
+  "Merge is autonomous when the durable publish capability 'merge' and the per-session gates allow it.",
+  "That means no separate user merge instruction is required.",
+  "Run orchestrator_github_pr_merge with a fresh conflict-free view.",
+  "Use the exact approved revision, the exact head and base SHAs, and the exact-revision approved internal review receipt.",
+  "Then verify merged:true again with a fresh orchestrator_github_pr_view and clean up the tracked worktree.",
+  "Every publication step fails closed.",
+  "Refusals include stale base or head, a dirty tree, a missing sync or review receipt, a moved revision, and unresolved conflicts.",
+  "They also include branch protection, required checks or reviews, permission failures, merge queues, merged:false, and a failed post-merge view.",
+  "In every case, stop truthfully: never retry, fall back to a different SHA, or report a step without direct evidence.",
 ].join("\n")
 
 /**
@@ -188,8 +269,14 @@ export const GITHUB_LIFECYCLE_GUIDANCE = [
  * sessions.
  */
 export const PEER_DISCOVERY_GUIDANCE = [
-  "Same-project peer orchestration sessions are discoverable with orchestrator_peer_list (orchestrator-only): bounded, deterministically ordered metadata (sessionID, goal status, and a redacted/truncated objective hint) for the same stable project only.",
-  "The query is durable metadata only and never live-complete: sessions without a readable goal record do not appear, only known-pattern-redacted hints are returned, records of other projects are never read, and complete:false is reported truthfully when storage.scan is unavailable or the bounded scan cap is hit.",
+  "Same-project peer orchestration sessions are discoverable with orchestrator_peer_list (orchestrator-only).",
+  "The result is bounded, deterministically ordered metadata: sessionID, goal status, and a redacted/truncated objective hint.",
+  "Results cover the same stable project only.",
+  "The query is durable metadata only and is never live-complete.",
+  "Sessions without a readable goal record do not appear.",
+  "Only known-pattern-redacted hints are returned.",
+  "Records of other projects are never read.",
+  "Report complete:false truthfully when storage.scan is unavailable or the bounded scan cap is hit.",
 ].join("\n")
 
 /**
@@ -202,16 +289,64 @@ export const PEER_DISCOVERY_GUIDANCE = [
  * draft-first PR lifecycle with its ready transition, its optional best-effort
  * approval, and the merge preconditions that never depend on a GitHub APPROVE
  * review.
+ *
+ * Restructured for G3: one rule per bullet. Pinned safety phrases (for example
+ * `It never authorizes issue creation`, `A session-disabled gate is final`,
+ * `No GitHub APPROVE review is required`, `never bypassed, never polled`) stay
+ * byte-identical.
  */
 export const PUBLICATION_POLICY_GUIDANCE = [
-  "Durable publication authorization is capability policy, never caller authentication: /publish toggles a project-scoped durable authorization record; nothing in it proves which human invoked it, it never weakens the static github/worktree gates, and it never mutates Git or GitHub itself.",
-  "When the durable capability is enabled it authorizes the orchestrator to pass confirm:true without re-prompting for exactly: worktree push, draft PR creation, the draft-to-ready transition, the verified post-ready approval, and merge after the full merge precondition chain. The verified post-ready approval is best-effort and optional: 'approve-after-review' gates only that approval attempt, and a truthful refusal (self-approval, a missing approval capability, or an API failure) never blocks the merge, which is independently authorized by the durable 'merge' capability plus the per-session merge gate and every merge precondition. It never authorizes issue creation. /gates (or the TUI gate picker) can narrow any of these steps — including merge — for the current session only; a session-disabled gate is final.",
-  "Mandatory publication sequence: commit clean changes first, then synchronize against the latest remote base (orchestrator_worktree_sync, which records an exact-revision receipt), verify/test the synced result, run the exact-revision bounded review, and only then push (orchestrator_worktree_push) and create the always-draft pull request (orchestrator_github_pr_create), mark it ready (orchestrator_github_pr_ready), attempt the optional best-effort approval at the exact revision (orchestrator_github_pr_approve) without letting a refusal block the next step, then merge (orchestrator_github_pr_merge), verify the merge, and clean up the tracked worktree (orchestrator_worktree_cleanup).",
-  "When a sync reports conflicts after aborting, autonomously delegate an implementer to perform the merge/resolution inside the tracked worktree, rerun verification and sync, commit, and restart the exact-revision review; stop only when conflicts cannot safely be resolved, and never push from an unresolved or unsynced state.",
-  "If the base or head changes after the exact-revision review, re-sync and re-review before any push or merge; stale base/head, dirty trees, missing sync receipts, and missing or mismatched approved review receipts all fail closed.",
-  "Pull requests are always created as drafts; fresh views must directly show the conflict-free exact revision (draft:true, mergeable:true, no dirty/unknown conflict state, remote base ancestry) before a ready transition, an unknown mergeability stays draft and is truthfully deferred without polling, and a draft that reports conflict state is never forced ready.",
-  "Auto-approve happens only after the ready transition and the exact internal review, with an authenticated non-author viewer and fresh conflict-free evidence, and it is best-effort and optional: same-author attempts, a missing approval capability, and API failures are refused and reported truthfully without success evidence, and a refused or skipped approval never blocks the independently authorized merge, which requires no GitHub APPROVE review. An automated approval is never claimed to satisfy branch protection.",
-  "Merge preconditions (all required, checked against fresh reads): an open, unmerged, non-draft pull whose head SHA equals the exact expected revision; mergeable:true with no dirty or unknown conflict state; an exact-revision approved internal review receipt for the same head/base; the current remote base is an ancestor of the exact head; and the durable 'merge' capability plus the per-session gate allow it. No GitHub APPROVE review is required — the exact-revision approved internal review receipt is the review authority, and a refused or skipped best-effort approval is not a merge precondition. Merge with the exact SHA, verify merged:true with a fresh view, log the merge SHA, then clean up. Branch protection, required checks or reviews, permission failures, and merge queues are reported truthfully — never bypassed, never polled.",
+  "Durable publication authorization is capability policy, never caller authentication.",
+  "The /publish command toggles a project-scoped durable authorization record.",
+  "Nothing in that record proves which human invoked it.",
+  "It never weakens the static github/worktree gates.",
+  "It never mutates Git or GitHub by itself.",
+  "When the durable capability is enabled it authorizes the orchestrator to pass confirm:true",
+  "without re-prompting for exactly: worktree push, draft PR creation, the draft-to-ready transition, the verified post-ready approval, and merge after the full merge precondition chain.",
+  "The verified post-ready approval is best-effort and optional.",
+  "The 'approve-after-review' gate controls only that approval attempt.",
+  "A truthful refusal never blocks the merge.",
+  "Refusals include self-approval, a missing approval capability, or an API failure.",
+  "The merge is independently authorized by the durable 'merge' capability, the per-session merge gate, and every merge precondition.",
+  "It never authorizes issue creation.",
+  "/gates (or the TUI gate picker) can narrow any of these steps — including merge — for the current session only.",
+  "A session-disabled gate is final.",
+  "Mandatory publication sequence: commit clean changes first.",
+  "Then synchronize against the latest remote base (orchestrator_worktree_sync, which records an exact-revision receipt).",
+  "Verify/test the synced result and run the exact-revision bounded review.",
+  "Only then push (orchestrator_worktree_push) and create the always-draft pull request (orchestrator_github_pr_create).",
+  "Mark it ready (orchestrator_github_pr_ready).",
+  "Attempt the optional best-effort approval at the exact revision (orchestrator_github_pr_approve); a refusal never blocks the next step.",
+  "Then merge (orchestrator_github_pr_merge), verify the merge, and clean up the tracked worktree (orchestrator_worktree_cleanup).",
+  "When a sync reports conflicts after aborting, autonomously delegate an implementer to perform the merge/resolution inside the tracked worktree.",
+  "Then rerun verification and sync, commit, and restart the exact-revision review.",
+  "Stop only when conflicts cannot safely be resolved.",
+  "Never push from an unresolved or unsynced state.",
+  "If the base or head changes after the exact-revision review, re-sync and re-review before any push or merge.",
+  "Stale base or head, dirty trees, missing sync receipts, and missing or mismatched approved review receipts all fail closed.",
+  "Pull requests are always created as drafts.",
+  "Fresh views must directly show the conflict-free exact revision before a ready transition: draft:true, mergeable:true, no dirty or unknown conflict state, remote base ancestry.",
+  "An unknown mergeability stays draft and is truthfully deferred without polling.",
+  "A draft that reports conflict state is never forced ready.",
+  "Auto-approve happens only after the ready transition and the exact internal review.",
+  "It needs an authenticated non-author viewer and fresh conflict-free evidence.",
+  "It is best-effort and optional.",
+  "Refuse same-author attempts, a missing approval capability, and API failures; report them truthfully without success evidence.",
+  "A refused or skipped approval never blocks the independently authorized merge, which requires no GitHub APPROVE review.",
+  "An automated approval is never claimed to satisfy branch protection.",
+  "Merge preconditions (all required, checked against fresh reads):",
+  "The pull is open, unmerged, non-draft, and its head SHA equals the exact expected revision.",
+  "mergeable:true with no dirty or unknown conflict state.",
+  "An exact-revision approved internal review receipt for the same head/base.",
+  "The current remote base is an ancestor of the exact head.",
+  "The durable 'merge' capability and the per-session gate allow it.",
+  "No GitHub APPROVE review is required.",
+  "The exact-revision approved internal review receipt is the review authority.",
+  "A refused or skipped best-effort approval is not a merge precondition.",
+  "Merge with the exact SHA and verify merged:true with a fresh view.",
+  "Log the merge SHA, then clean up.",
+  "Branch protection, required checks or reviews, permission failures, and merge queues are reported truthfully.",
+  "They are never bypassed, never polled.",
 ].join("\n")
 
 /**
@@ -230,19 +365,28 @@ export function terminalDriveGuidance(options: {
   publish: { enabled: boolean }
 }): string {
   return [
-    "Definition of Done (terminal drive): a ship-shaped task is finished only when it is merged and the tracked worktree is cleaned up, or when a configured gate/capability refuses the next terminal step. Never stop at 'changes are ready' or 'the PR is open' and wait for the user to ask for the next step.",
+    "Definition of Done (terminal drive): a ship-shaped task is finished only when it is merged and the tracked worktree is cleaned up.",
+    "It is also finished when a configured gate or capability refuses the next terminal step.",
+    "Never stop at 'changes are ready' or 'the PR is open' and wait for the user to ask for the next step.",
     ...(options.github.enabled
       ? [
-          "Run the terminal chain in order as soon as the work is verified: verify/tests green -> commit -> sync against the latest remote base -> exact-revision review -> push -> draft PR -> ready -> best-effort approve -> merge -> post-merge verify -> worktree cleanup. The publish capability authorizes these steps; only the fail-closed preconditions can refuse them.",
+          "Run the terminal chain in order as soon as the work is verified.",
+          "verify/tests green -> commit -> sync against the latest remote base -> exact-revision review -> push -> draft PR -> ready.",
+          "Then best-effort approve -> merge -> post-merge verify -> worktree cleanup.",
+          "The publish capability authorizes these steps; only the fail-closed preconditions can refuse them.",
         ]
       : []),
     ...(options.publish.enabled
       ? [
-          "If a terminal step is refused by a session-disabled gate (/gates) or a missing durable capability, state exactly which step is unavailable and the one command that would change it; do not re-plan around the gate, do not re-enable it yourself, and do not claim completion.",
+          "If a terminal step is refused by a session-disabled gate (/gates) or a missing durable capability, state exactly which step is unavailable.",
+          "Give the one command that would change it.",
+          "Do not re-plan around the gate, do not re-enable it yourself, and do not claim completion.",
         ]
       : []),
-    "If a terminal step fails, attempt at most one targeted recovery with new evidence (for example re-sync and re-review after a moved base or head); never re-dispatch an identical failed step without new evidence.",
-    "Implementer handoffs must arrive with green tests for the delivered scope; do not start the terminal chain on unverified work.",
+    "If a terminal step fails, attempt at most one targeted recovery with new evidence (for example re-sync and re-review after a moved base or head).",
+    "Never re-dispatch an identical failed step without new evidence.",
+    "Implementer handoffs must arrive with green tests for the delivered scope.",
+    "Do not start the terminal chain on unverified work.",
   ].join("\n")
 }
 
@@ -304,14 +448,23 @@ export const BUDGET_GUIDANCE = [
  * facts are collected. The tools are callable/advisory primitives, not
  * automatic hooks: nothing intercepts worker output automatically, and no
  * completion gate is enforced by this plugin.
+ *
+ * The envelope field list is rewritten as bullets for one line per field
+ * group; the schema, field names, and advisory status are unchanged.
  */
 export const STRUCTURED_HANDOFF_GUIDANCE = [
   "Structured handoff envelope (version 1): include every worker result as this JSON envelope alongside the five-field prose:",
-  "version: 1; taskId: the exact task ID from the parent contract; status: in-progress, blocked, completed, or failed; outcome; facts (statement plus evidence refs); assumptions (id, statement, status, evidence); filesRead and filesChanged (path plus scope); verification (command, status not-run/blocked/fail/pass, result, evidence refs); risks (severity, statement); followUp; artifactRefs (kind file or url, reference, description); reviewState (not-requested, pending, approved, changes-requested, or blocked).",
+  "version: 1; taskId: the exact task ID from the parent contract; status: in-progress, blocked, completed, or failed.",
+  "outcome; facts (statement plus evidence refs); assumptions (id, statement, status, evidence).",
+  "filesRead and filesChanged (path plus scope); verification (command, status not-run/blocked/fail/pass, result, evidence refs).",
+  "risks (severity, statement); followUp; artifactRefs (kind file or url, reference, description); reviewState (not-requested, pending, approved, changes-requested, or blocked).",
   "Use the same relative repository paths and https-only URL refs as the handoff schema; never include credentials, raw transcripts, or secrets in the envelope.",
   "Parent: call orchestrator_handoff_validate (level worker or orchestrator, with the task contract) before using any worker handoff downstream.",
   "Parent: call orchestrator_task_complexity_classify only after collecting all eight structured facts (independent_subtasks, dependent_stages, files_modules, independent_review, external_side_effects, shared_mutable_state, security_compliance_risk, expected_parallelism_value).",
-  "These validation tools are callable/advisory, not automatic hooks: the orchestrator invokes them explicitly, results are advisory (D4) or deterministic fail-closed checks (D2/admission), and no automatic completion gate is enforced.",
+  "These validation tools are callable/advisory, not automatic hooks.",
+  "The orchestrator invokes them explicitly.",
+  "Results are advisory (D4) or deterministic fail-closed checks (D2/admission).",
+  "No automatic completion gate is enforced.",
 ].join("\n")
 
 export function orchestrationRules(
@@ -331,7 +484,8 @@ export function orchestrationRules(
     "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes.",
     verticalSliceGuidance(decompositionStrategy),
     D4_V2_COHERENCE_GUIDANCE,
-    "Separate established facts from assumptions: label every assumption explicitly and verify it before relying on it.",
+    "Separate established facts from assumptions.",
+    "Label every assumption explicitly and verify it before relying on it.",
     PROMPTING_POLICY_GUIDANCE,
     TOOL_AVAILABILITY_GUIDANCE,
     SECRET_HANDLING_GUIDANCE,
@@ -355,7 +509,8 @@ export function orchestrationRules(
     "Do not poll background tasks; consume native completion delivery.",
     "Keep a concise task ledger in the parent session.",
     requireReview ? "Implementation is incomplete until the review role audits the aggregate change." : "Review changed work before reporting completion.",
-    "Verify worker claims directly in the parent session before reporting completion; never present a worker's self-report as your own verification.",
+    "Verify worker claims directly in the parent session before reporting completion.",
+    "Never present a worker's self-report as your own verification.",
     "Own the final answer; do not concatenate raw worker responses.",
     "Return each worker result using the handoff format below.",
     HANDOFF_FORMAT,
@@ -381,10 +536,16 @@ export function orchestrationCapabilities(options: {
  * Ask-tool clarification guidance: ask targeted questions only when the
  * objective is genuinely ambiguous, resolve what the repository already
  * answers, and keep all clarification owned by the orchestrator.
+ *
+ * G3 pilot: the original single dense sentence is now a short bulleted
+ * sequence. The asked questions are bounded (see the orchestrator personality
+ * spec) and every pinned phrase is byte-identical.
  */
 export const CLARIFY_GUIDANCE = [
-  "Clarify mode is enabled: when the initial task is ambiguous (undefined scope, conflicting constraints, unclear success criteria, or a missing verification definition), use the native ask tool to ask the user a small number of targeted clarifying questions with concrete answer options before decomposing or delegating; skip asking when the objective is already precise.",
+  "Clarify mode is enabled: when the initial task is ambiguous, ask before decomposing or delegating; skip asking when the objective is already precise.",
+  "Ambiguity means undefined scope, conflicting constraints, unclear success criteria, or a missing verification definition.",
+  "Use the native ask tool to ask the user a small number of targeted clarifying questions with concrete answer options.",
   "Do not ask what repository facts can answer: explore first; ask only what cannot be resolved from the repository.",
   "Record the user's answers in the task ledger; state the resolved interpretation and proceed.",
-  "Workers never ask on the user's behalf; clarification is owned by the orchestrator.",
+  "Workers never ask on the user's behalf: clarification is owned by the orchestrator.",
 ].join("\n")

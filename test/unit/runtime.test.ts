@@ -4,8 +4,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { parseOptions } from "../../src/core/config.js"
+import { HANDOFF_SUMMARY_FIELDS } from "../../src/core/policy.js"
 import type { CommandInvocationLike } from "../../src/opencode-v2/commands/index.js"
-import { runCommand } from "../../src/opencode-v2/commands/runtime.js"
+import { formatHandoverSummary, runCommand, statusMessage } from "../../src/opencode-v2/commands/runtime.js"
 import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
 import { goalStorageKey, runStorageKey, stopStorageKey } from "../../src/opencode-v2/goal/state.js"
 import { publishStorageKey, type PublishRecord } from "../../src/opencode-v2/publish/state.js"
@@ -448,7 +449,7 @@ describe("runtime commands", () => {
     expect(output).toContain("Publication enabled for project \"project\"")
     expect(output).toContain("authorized capabilities: push, pr-draft-create, pr-ready-transition, approve-after-review, merge")
     expect(output).toContain("This is a capability toggle, not caller authentication")
-    expect(output).toContain("never issue creation")
+    expect(output).toContain("Issue creation is never authorized")
     expect(output).toContain("No Git or GitHub mutation happened")
 
     const record = fixture.values.get(publishStorageKey("project")) as PublishRecord
@@ -531,7 +532,9 @@ describe("runtime commands", () => {
     const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
     await runCommand(fixture.context, parseOptions({}), "publish", invocation("frobnicate"), undefined)
     expect(fixture.prompts).toHaveLength(0)
-    expect(fixture.statuses[0]).toBe("Usage: /publish [status|enable|disable]")
+    expect(fixture.statuses[0].startsWith("What happened: /publish did not run")).toBe(true)
+    expect(fixture.statuses[0]).toContain("What it means:")
+    expect(fixture.statuses[0]).toContain("Usage: /publish [status|enable|disable]")
   })
 })
 
@@ -607,6 +610,147 @@ describe("session gate command", () => {
     await runCommand(fixture.context, parseOptions({}), "gates", invocation("merge=off"), undefined)
     expect(fixture.statuses[0]).toContain("'merge' is now off for this session")
     expect((fixture.values.get(gatesStorageKey("session")) as GatesRecord).disabled).toEqual(["merge"])
+  })
+})
+
+describe("G3 plain-language status and handover", () => {
+  const SENTENCE_WORD_LIMIT = 25
+
+  const TEMPLATE_LABELS = ["What happened: ", "What it means: ", "What's next: ", "What you can do: "]
+
+  function sentences(text: string): string[] {
+    return text
+      .split("\n")
+      .flatMap((line) => {
+        const trimmed = line.trim()
+        const label = TEMPLATE_LABELS.find((candidate) => trimmed.startsWith(candidate))
+        return (label ? trimmed.slice(label.length) : trimmed).split(/(?<=[.!?])\s+/)
+      })
+      .map((sentence) => sentence.trim())
+      .filter(Boolean)
+  }
+
+  function assertShortSentences(text: string, label: string): void {
+    for (const sentence of sentences(text)) {
+      expect(sentence.split(/\s+/).filter(Boolean).length, `${label}: ${sentence}`).toBeLessThanOrEqual(SENTENCE_WORD_LIMIT)
+    }
+  }
+
+  test("statusMessage renders the what-happened/what-it-means/what's-next template", () => {
+    expect(statusMessage({ happened: "The command ran.", means: "It changed one file.", next: "Review the diff." })).toBe(
+      "What happened: The command ran.\nWhat it means: It changed one file.\nWhat's next: Review the diff.",
+    )
+    expect(statusMessage({ happened: "The command ran.", means: "It changed one file." })).toBe(
+      "What happened: The command ran.\nWhat it means: It changed one file.",
+    )
+    assertShortSentences(
+      statusMessage({ happened: "The command ran.", means: "It changed one file.", next: "Review the diff." }),
+      "status template",
+    )
+  })
+
+  test("emitted command statuses use the template and short sentences", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    const options = parseOptions({ publish: { enabled: true } })
+    const workerModels: WorkerModelRuntime = {
+      overrides: new Map(),
+      workerIDs: ["planner", "explore", "implementer", "reviewer"],
+      scope: "project-project",
+      set: async () => undefined,
+      clear: async () => undefined,
+      reset: async () => undefined,
+      list: async () => [{ agentID: "planner", effective: { providerID: "configured", id: "planner" } }],
+    }
+
+    await runCommand(fixture.context, options, "goal", invocation("ship the release"), undefined)
+    await runCommand(fixture.context, options, "halt", invocation("all"), undefined)
+    await runCommand(fixture.context, options, "publish", invocation("enable"), undefined)
+    await runCommand(fixture.context, options, "gates", invocation("merge=off"), undefined)
+    await runCommand(fixture.context, options, "worker-models", invocation("planner=provider/model"), undefined, undefined, workerModels)
+
+    expect(fixture.statuses.length).toBeGreaterThanOrEqual(5)
+    for (const status of fixture.statuses) {
+      const lines = status.split("\n")
+      expect(lines[0].startsWith("What happened:")).toBe(true)
+      expect(lines[1].startsWith("What it means:")).toBe(true)
+      assertShortSentences(status, "command status")
+    }
+  })
+
+  test("a blocked dispatch keeps the raw reason and frames it plainly", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    const gate: DispatchGate = {
+      allowDispatch: async () => ({
+        allow: false,
+        reason: "stop-between-steps: max_steps exceeded (observed 12, configured 10)",
+        evaluation: { version: 1, mode: "stop-between-steps", verdict: "exceeded", limits: [] },
+      }),
+    }
+
+    await runCommand(fixture.context, parseOptions({}), "orchestrate", invocation("fix the bug"), undefined, gate)
+
+    const status = fixture.statuses[0]
+    expect(status.startsWith("What happened: Dispatch blocked by configured controls")).toBe(true)
+    expect(status).toContain("stop-between-steps: max_steps exceeded (observed 12, configured 10)")
+    expect(status).toContain("What it means:")
+    assertShortSentences(status, "blocked dispatch")
+  })
+
+  test("handover summary follows the D2 five-field skeleton and stays readable", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    const fixture = runtimeFixture(directory)
+    ;(fixture.context as any).session.context = async () => [
+      { type: "user", text: "keep the API stable" },
+      { type: "assistant", content: [{ type: "text", text: "Implemented the change." }] },
+    ]
+    ;(fixture.context as any).vcs.status = async () => []
+    ;(fixture.context as any).vcs.diff = async () => []
+
+    await runCommand(fixture.context, parseOptions({}), "handover", invocation("continue API work"), undefined)
+
+    const output = fixture.statuses[0]
+    expect(output).toContain("keep the API stable")
+    expect(output).toContain("Working copy is clean.")
+    let cursor = -1
+    for (const field of HANDOFF_SUMMARY_FIELDS) {
+      const index = output.indexOf(`${field} —`)
+      expect(index, field).toBeGreaterThan(cursor)
+      cursor = index
+    }
+    assertShortSentences(output, "handover summary")
+  })
+
+  test("handover summary reports unavailable reads instead of omitting them", () => {
+    const summary = formatHandoverSummary({
+      focus: "wrap up",
+      contextError: "session context unavailable",
+      filesError: "vcs status unavailable",
+      diffError: "vcs diff unavailable",
+    })
+    expect(summary).toContain("Unavailable: session context unavailable")
+    expect(summary).toContain("Unavailable: vcs status unavailable")
+    expect(summary).toContain("Unavailable: vcs diff unavailable")
+    assertShortSentences(summary, "handover errors")
+  })
+
+  test("report-style statuses keep a short template header before their details", async () => {
+    const fixture = runtimeFixture(mkdtempSync(join(tmpdir(), "orchestrator-runtime-")))
+    const options = parseOptions({
+      publish: { enabled: true },
+      github: { enabled: true, allow_mutations: true },
+      worktree: { enabled: true, allow_mutations: true, root: "/srv/worktrees" },
+    })
+
+    await runCommand(fixture.context, options, "publish", invocation("status"), undefined)
+    await runCommand(fixture.context, options, "gates", invocation("status"), undefined)
+
+    expect(fixture.statuses).toHaveLength(2)
+    for (const status of fixture.statuses) {
+      expect(status).toContain("What happened:")
+      expect(status).toContain("What it means:")
+      expect(status).toContain("What's next:")
+      assertShortSentences(status, "report status")
+    }
   })
 })
 

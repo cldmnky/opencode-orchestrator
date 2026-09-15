@@ -390,12 +390,17 @@ Write the plain-language template and personality spec as a short design note; p
 
 ## Next Steps
 
-### Phase 0 — Conversation Quality (G3, quick win)
+### Phase 0 — Conversation Quality (G3, quick win) — COMPLETE (2026-09-15)
 
-- Write the plain-language template (what happened / what it means / what's next) and the personality, restatement, and finish-summary spec as a short design note.
-- Pilot on status messages and the end-of-run summary; add readability assertions to the existing status-text tests.
-- Restructure the dense `policy.ts`/runtime-injection strings into short bulleted sentences with test-enforced semantic equivalence for every fail-closed precondition.
-- Exit evidence: readability fixtures green; before/after examples page; user summary derived from the D2 handoff fields.
+Delivered as one slice on `feat/g3-phase-0-plain-language`; no gate, tool, schema, config, or fail-closed behavior changed.
+
+- [x] **Design note:** `docs/g3-communication-contract.md` records the layered contract (plain language for user-facing output; precise, unchanged contracts for the model), the ≤ 25-word one-instruction-per-sentence rule, the first-use jargon glossary, the status template (what happened / what it means / what's next), the restatement + ask-budget rule, phase-transition announcements, and the finish-summary skeleton shared with the D2 handoff fields.
+- [x] **Pilot:** `statusMessage()` in `src/opencode-v2/commands/runtime.ts` renders command statuses through the template, and `/handover` renders the shared D2 five-field skeleton (Outcome / Files / Verification / Risks / Follow-up) through `formatHandoverSummary()`, which states unavailable reads instead of omitting them.
+- [x] **Personality spec:** orchestrator-only voice, restatement, ask budget, phase announcements, and finish-summary sections in `buildOrchestratorSystem`; worker prompts are unchanged, and `clarify: off` still suppresses the ask-tool instruction. The orchestrator description adds a plain-language sentence after its preserved contract prefix.
+- [x] **Dense strings restructured:** `src/core/policy.ts` and the `src/opencode-v2/plugin.ts` runtime context injection are now short bulleted lines (publication policy: 127 → 24 max words per line, 70.4 → 11.2 average); every pinned safety phrase stays byte-identical.
+- [x] **Readability + semantic-equivalence fixtures:** `test/unit/core.test.ts` asserts ≤ 25 words per line for every restructured constant plus a fail-closed precondition table (23 universal, 2 orchestrator dispatch, 3 plugin-owned control preconditions); `test/unit/runtime.test.ts` asserts the status template, short sentences, and the D2 handover skeleton; `test/unit/prompt-builder.test.ts` pins the one remaining dense line (out-of-scope `prompt-builder.ts`) and proves the personality spec does not leak into command prompts.
+- [x] **Examples page:** `docs/g3-before-after.md` with measured before/after readability numbers and per-surface examples.
+- **Exit evidence:** `bun run typecheck`, `bun test` (839 pass, 1 skip, 0 fail), and `bun run build` green on the slice; readability fixtures green; the before/after page recorded; `/handover` user summary derived from the D2 handoff fields; disclosed deviation: the `prompt-builder.ts` coordination line remains dense and is tracked by a fixture.
 
 ### Phase A — Runtime Authority (N1, N2)
 

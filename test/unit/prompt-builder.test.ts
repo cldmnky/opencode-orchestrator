@@ -23,6 +23,8 @@ const FORBIDDEN_STRINGS = [
   "/cd",
 ]
 
+const SENTENCE_WORD_LIMIT = 25
+
 function countOccurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1
 }
@@ -127,5 +129,37 @@ describe("buildOrchestrationPrompt", () => {
     expect(prompt).toContain(SERIALIZATION_PHRASE)
     expect(prompt).not.toContain("Strict decomposition strategy is configured")
     expect(prompt).not.toContain("Strict decomposition strategy")
+  })
+
+  test("the clarification section keeps one short instruction per sentence", () => {
+    const prompt = buildOrchestrationPrompt({ objective: "audit the auth flow", clarifyEnabled: true })
+    const clarification = prompt.slice(prompt.indexOf("Clarify ambiguous objectives before decomposing:"))
+    for (const line of clarification.split("\n")) {
+      for (const sentence of line.split(/(?<=[.!?])\s+/)) {
+        const words = sentence.trim().split(/\s+/).filter(Boolean)
+        if (words.length === 0) continue
+        expect(words.length, sentence).toBeLessThanOrEqual(SENTENCE_WORD_LIMIT)
+      }
+    }
+  })
+
+  test("every authored line except the tracked coordination line is within the sentence budget", () => {
+    const prompt = buildOrchestrationPrompt({ objective: "fix the login flow", clarifyEnabled: true })
+    const overBudget = prompt
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.split(/\s+/).filter(Boolean).length > SENTENCE_WORD_LIMIT)
+    // The coordination sentence predates G3 Phase 0 (src/core/prompt-builder.ts
+    // is outside the Phase 0 file set) and remains the one dense string. Any
+    // new over-budget line fails this fixture, so the deviation stays visible.
+    expect(overBudget).toEqual([COORDINATION_SENTENCE])
+  })
+
+  test("the orchestration prompt stays task-shaped without the orchestrator personality spec", () => {
+    const prompt = buildOrchestrationPrompt({ objective: "ship it", clarifyEnabled: true })
+    expect(prompt).not.toContain("Voice: friendly, concise, and proactive")
+    expect(prompt).not.toContain("Restatement: before starting multi-worker work")
+    expect(prompt).not.toContain("Phase transitions: announce each transition")
+    expect(prompt).not.toContain("Finish summary: end every run")
   })
 })

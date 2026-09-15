@@ -19,6 +19,7 @@ const FORBIDDEN_STRINGS = [
   "Never request, resolve, log, paste, or copy",
   "automatically create",
   "callable/advisory, not automatic hooks",
+  "Strict decomposition strategy is configured",
   "/cd",
 ]
 
@@ -114,5 +115,17 @@ describe("buildOrchestrationPrompt", () => {
         expect(prompt).not.toContain(forbidden)
       }
     }
+  })
+
+  test("stays strategy-agnostic: the policy layer owns the strict decomposition emphasis", () => {
+    const prompt = buildOrchestrationPrompt({ objective: "split the work" })
+    // The builder always states the MVP slice preference and the serialization
+    // rule. The optional strict decomposition emphasis is layered onto the
+    // orchestrator/worker/continuation prompts by src/core/policy.ts, so the
+    // orchestration command prompt never duplicates it.
+    expect(prompt).toContain(SLICE_PREFERENCE_PHRASE)
+    expect(prompt).toContain(SERIALIZATION_PHRASE)
+    expect(prompt).not.toContain("Strict decomposition strategy is configured")
+    expect(prompt).not.toContain("Strict decomposition strategy")
   })
 })

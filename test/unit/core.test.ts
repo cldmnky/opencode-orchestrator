@@ -18,6 +18,7 @@ import {
   PUBLICATION_POLICY_GUIDANCE,
   REMOTE_ORCHESTRATION_GUIDANCE,
   SECRET_HANDLING_GUIDANCE,
+  STRICT_DECOMPOSITION_GUIDANCE,
   STRUCTURED_HANDOFF_GUIDANCE,
   TOOL_AVAILABILITY_GUIDANCE,
   VERTICAL_SLICE_GUIDANCE,
@@ -26,6 +27,7 @@ import {
   orchestrationCapabilities,
   orchestrationRules,
   terminalDriveGuidance,
+  verticalSliceGuidance,
 } from "../../src/core/policy.js"
 import { ROLE_DELEGATION, ROLE_GUIDANCE, delegationGraphSummary } from "../../src/core/roles.js"
 
@@ -138,6 +140,45 @@ describe("configuration", () => {
     expect(parseOptions({ clarify: { mode: "off" } }).clarify).toEqual({ mode: "off" })
     expect(() => parseOptions({ clarify: { mode: "maybe" } })).toThrow()
     expect(() => parseOptions({ clarify: { extra: true } })).toThrow()
+  })
+
+  test("decomposition defaults to the current MVP strategy and validates strictly", () => {
+    expect(parseOptions({}).decomposition).toEqual({ strategy: "mvp" })
+    expect(parseOptions({ decomposition: {} }).decomposition).toEqual({ strategy: "mvp" })
+    expect(parseOptions({ decomposition: { strategy: "strict" } }).decomposition).toEqual({ strategy: "strict" })
+    // Typos at both levels and unknown keys are rejected by the strict schema.
+    expect(() => parseOptions({ decomposition: { strategy: "stric" } })).toThrow()
+    expect(() => parseOptions({ decomposition: { strategy: "MVP" } })).toThrow()
+    expect(() => parseOptions({ decomposition: { strateg: "strict" } })).toThrow()
+    expect(() => parseOptions({ decomposition: { strategy: "strict", mode: "strict" } })).toThrow()
+    expect(() => parseOptions({ decompositon: { strategy: "strict" } })).toThrow()
+    expect(() => parseOptions({ decomposition: { strategy: true } })).toThrow()
+  })
+
+  test("existing configs parse unchanged without a decomposition key", () => {
+    const prePhase2 = parseOptions({
+      orchestrator: "orchestrator",
+      roles: { planning: "planner", research: "explore", implementation: "implementer", review: "reviewer" },
+      max_parallel: 4,
+      require_review: true,
+      strict_agents: true,
+      commands: { polish: false, cd: true },
+      goal: { auto_continue: false, max_continuations: 10, cooldown_ms: 250 },
+      github: { enabled: true, allow_mutations: false },
+      worktree: { enabled: true, allow_mutations: false, root: "/srv/worktrees" },
+      publish: { enabled: true },
+      trace: { mode: "snapshot" },
+      budget: { mode: "advisory", max_steps: 5 },
+      review: { mode: "bounded", max_rounds: 3 },
+      clarify: { mode: "off" },
+    })
+    expect(prePhase2.decomposition).toEqual({ strategy: "mvp" })
+    expect(prePhase2.max_parallel).toBe(4)
+    expect(prePhase2.review).toEqual({ mode: "bounded", max_rounds: 3 })
+    expect(prePhase2.commands.polish).toBe(false)
+    expect(prePhase2.commands.cd).toBe(true)
+    // An explicit MVP value is byte-for-byte the same parse as omitting the key.
+    expect(parseOptions({ decomposition: { strategy: "mvp" } })).toEqual(parseOptions({}))
   })
 })
 
@@ -261,6 +302,89 @@ describe("prompts", () => {
       expect(prompt).toContain("never by concurrent overlapping writes")
       expect(prompt).toContain("unknown coupling fails closed and serializes")
     }
+  })
+
+  test("vertical slice guidance helper is byte-stable for the default strategy", () => {
+    expect(verticalSliceGuidance()).toBe(VERTICAL_SLICE_GUIDANCE)
+    expect(verticalSliceGuidance("mvp")).toBe(VERTICAL_SLICE_GUIDANCE)
+    expect(verticalSliceGuidance("strict")).toBe(`${VERTICAL_SLICE_GUIDANCE}\n${STRICT_DECOMPOSITION_GUIDANCE}`)
+  })
+
+  test("decomposition defaults to the current MVP prompt text", () => {
+    const builders: Array<[string, (options: OrchestratorOptions) => string]> = [
+      ["orchestrator system", (options) => buildOrchestratorSystem(options)],
+      ["worker system", (options) => buildWorkerSystem("implementation", options)],
+      ["continuation", (options) => buildContinuationPrompt("objective", 1, options)],
+    ]
+    for (const [name, build] of builders) {
+      const mvp = build(parseOptions({}))
+      const explicitMvp = build(parseOptions({ decomposition: { strategy: "mvp" } }))
+      expect(mvp, name).toContain(VERTICAL_SLICE_GUIDANCE)
+      expect(mvp, name).not.toContain(STRICT_DECOMPOSITION_GUIDANCE)
+      expect(explicitMvp, name).toBe(mvp)
+    }
+  })
+
+  test("strict decomposition raises slice emphasis without changing the safety wording", () => {
+    const mvp = parseOptions({})
+    const strict = parseOptions({ decomposition: { strategy: "strict" } })
+    const kinds: Array<[string, string, string]> = [
+      ["orchestrator system", buildOrchestratorSystem(mvp), buildOrchestratorSystem(strict)],
+      ["worker system", buildWorkerSystem("implementation", mvp), buildWorkerSystem("implementation", strict)],
+      ["continuation", buildContinuationPrompt("objective", 1, mvp), buildContinuationPrompt("objective", 1, strict)],
+    ]
+    for (const [name, before, after] of kinds) {
+      expect(after, name).toContain(VERTICAL_SLICE_GUIDANCE)
+      expect(after, name).toContain(STRICT_DECOMPOSITION_GUIDANCE)
+      // The strict block is appended after the verbatim MVP guidance, never
+      // replacing it, so every pinned safety sentence survives unchanged.
+      expect(after.indexOf(STRICT_DECOMPOSITION_GUIDANCE), name).toBe(
+        after.indexOf(VERTICAL_SLICE_GUIDANCE) + VERTICAL_SLICE_GUIDANCE.length + 1,
+      )
+      expect(after, name).toContain(
+        "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
+      )
+      expect(after, name).toContain("A slice is a coordination unit, never a permission or filesystem boundary")
+      expect(after, name).toContain("unknown coupling fails closed and serializes")
+      expect(after.length, name).toBeGreaterThan(before.length)
+      // Prompt-preference only: no isolation or scheduling claim is added.
+      expect(after, name).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
+      expect(after, name).not.toMatch(/scheduler|semaphore/i)
+    }
+  })
+
+  test("strict decomposition stays prompt-preference only and leaves feature gates unchanged", () => {
+    const mvp = parseOptions({})
+    const strict = parseOptions({ decomposition: { strategy: "strict" } })
+    // Command prompts do not embed slice guidance, strict or not: the strategy
+    // changes emphasis only in the orchestrator, worker, and continuation
+    // prompt kinds and never taxes every dispatch.
+    expect(buildCommandPrompt("goal", "pause", strict)).toBe(buildCommandPrompt("goal", "pause", mvp))
+    const strictSystem = buildOrchestratorSystem(strict)
+    expect(strictSystem).not.toContain("Worktree lifecycle is mandatory")
+    expect(strictSystem).not.toContain("GitHub lifecycle is orchestrator-owned")
+    expect(strictSystem).not.toContain("Durable publication authorization is capability policy")
+    // With every feature enabled the full lifecycle and publication guidance is
+    // still embedded verbatim: strict never bypasses a configured gate.
+    const strictFeatures = parseOptions({
+      decomposition: { strategy: "strict" },
+      worktree: { enabled: true },
+      github: { enabled: true },
+      publish: { enabled: true },
+      review: { mode: "bounded" },
+      budget: { mode: "stop-between-steps" },
+    })
+    const featureSystem = buildOrchestratorSystem(strictFeatures)
+    expect(featureSystem).toContain(STRICT_DECOMPOSITION_GUIDANCE)
+    expect(featureSystem).toContain("Worktree lifecycle is mandatory for implementation")
+    expect(featureSystem).toContain("orchestrator_github_pr_merge")
+    expect(featureSystem).toContain("Durable publication authorization is capability policy")
+    expect(featureSystem).toContain("Definition of Done (terminal drive)")
+    expect(featureSystem).toContain("Bounded review mode is configured")
+    expect(featureSystem).toContain("stop-between-steps budget mode is configured")
+    // The disjoint-scope and fail-closed serialization rules stay verbatim.
+    expect(featureSystem).toContain("Require an exact disjoint write scope from every child before any parallel write")
+    expect(featureSystem).toContain("Serialize implementation tasks when file ownership overlaps")
   })
 
   test("slice guidance never claims isolation or runtime concurrency enforcement", () => {
@@ -440,6 +564,7 @@ describe("remote orchestration policy", () => {
   const WORKTREE = parseOptions({ worktree: { enabled: true } })
   const GITHUB = parseOptions({ github: { enabled: true } })
   const BOTH = parseOptions({ github: { enabled: true }, worktree: { enabled: true } })
+  const STRICT = parseOptions({ decomposition: { strategy: "strict" } })
 
   function promptKinds(options: OrchestratorOptions): Array<[string, string]> {
     const prompts: Array<[string, string]> = [
@@ -745,7 +870,7 @@ describe("remote orchestration policy", () => {
   })
 
   test("the guidance appears exactly once per prompt, not duplicated per section", () => {
-    for (const options of [DEFAULT, WORKTREE, GITHUB, BOTH]) {
+    for (const options of [DEFAULT, WORKTREE, GITHUB, BOTH, STRICT]) {
       for (const [name, prompt] of promptKinds(options)) {
         expect(prompt.split("inspect the tool catalog").length - 1).toBe(1)
         expect(prompt.split("Never request, resolve, log, paste, or copy").length - 1).toBe(1)

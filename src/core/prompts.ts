@@ -11,11 +11,11 @@ import {
   PUBLICATION_POLICY_GUIDANCE,
   REMOTE_ORCHESTRATION_GUIDANCE,
   STRUCTURED_HANDOFF_GUIDANCE,
-  VERTICAL_SLICE_GUIDANCE,
   WORKTREE_LIFECYCLE_GUIDANCE,
   orchestrationCapabilities,
   orchestrationRules,
   terminalDriveGuidance,
+  verticalSliceGuidance,
 } from "./policy.js"
 import type { OrchestratorOptions } from "./config.js"
 import { ROLE_GUIDANCE } from "./roles.js"
@@ -27,7 +27,7 @@ export function buildOrchestratorSystem(options: OrchestratorOptions): string {
     "",
     "You are the conductor, not a worker of last resort. Understand the task, gather facts, then delegate focused work.",
     `Role map: planning=${options.roles.planning}; research=${options.roles.research}; implementation=${options.roles.implementation}; review=${options.roles.review}.`,
-    orchestrationRules(options.max_parallel, options.require_review, orchestrationCapabilities(options)),
+    orchestrationRules(options.max_parallel, options.require_review, orchestrationCapabilities(options), options.decomposition.strategy),
     "",
     STRUCTURED_HANDOFF_GUIDANCE,
   ]
@@ -45,7 +45,7 @@ export function buildWorkerSystem(role: keyof typeof ROLE_GUIDANCE, options?: Or
     "",
     PROMPTING_POLICY_GUIDANCE,
     "",
-    VERTICAL_SLICE_GUIDANCE,
+    verticalSliceGuidance(options?.decomposition?.strategy),
     "",
     CHILD_TASK_CONTRACT,
     REMOTE_ORCHESTRATION_GUIDANCE,
@@ -111,7 +111,7 @@ export function buildContinuationPrompt(
     "Completion requires a direct verification result and an evidence string through orchestrator_goal_update.",
     DELEGATION_GRAPH_GUIDANCE,
     PROMPTING_POLICY_GUIDANCE,
-    VERTICAL_SLICE_GUIDANCE,
+    verticalSliceGuidance(options?.decomposition?.strategy),
     REMOTE_ORCHESTRATION_GUIDANCE,
     featureGuidance(options),
     STRUCTURED_HANDOFF_GUIDANCE,

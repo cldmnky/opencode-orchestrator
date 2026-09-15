@@ -11,6 +11,8 @@ import {
   WORKTREE_TOOL_PERMISSION,
 } from "../../src/core/permissions.js"
 import { orchestratorPlugin } from "../../src/index.js"
+import { COMMAND_NAMES } from "../../src/core/config.js"
+import { STRICT_DECOMPOSITION_GUIDANCE } from "../../src/core/policy.js"
 
 describe("server plugin contract", () => {
   type FakeAgent = {
@@ -419,6 +421,109 @@ describe("server plugin contract", () => {
     // the session hook, the gates rpc, the tool/command/agent transforms, and
     // the observability runtime last (which disposes its before/after hooks).
     expect(disposed).toEqual(["execute.after", "session-hook", "rpc", "tool", "command", "agent", "execute.before", "execute.after"])
+    expect(stream.closed).toBe(true)
+  })
+
+  test("strict decomposition changes prompt emphasis only, never the registered surface", async () => {
+    const agents = seedAgents()
+    const commands: Array<{ name: string }> = []
+    const tools: Array<{ name: string; options?: { namespace?: string; permission?: string } }> = []
+    const rpcRegistrations: unknown[] = []
+    const stream = eventStream()
+    const draft = {
+      list: () => [...agents.values()],
+      get: (id: string) => agents.get(id),
+      update: (id: string, update: (agent: any) => void) => {
+        const agent = agents.get(id)
+        if (agent) update(agent)
+      },
+    }
+    const storage = new Map<string, unknown>()
+    const registration = () => ({
+      dispose: async () => {},
+    })
+    const context = {
+      // The optional decomposition strategy is prompt-preference only; every
+      // feature gate stays at its default (off).
+      options: { decomposition: { strategy: "strict" } },
+      location: { directory: "/workspace", project: { id: "project" } },
+      agent: {
+        list: async () => [...agents.values()],
+        get: async ({ agentID }: { agentID: string }) => agents.get(agentID),
+        transform: async (callback: (draft: any) => void) => {
+          callback(draft)
+          return registration()
+        },
+      },
+      command: {
+        list: async () => [],
+        transform: async (callback: (draft: { add(definition: unknown): void }) => void) => {
+          callback({ add: (definition) => commands.push(definition as { name: string }) })
+          return registration()
+        },
+      },
+      tool: {
+        transform: async (callback: (draft: { add(tool: unknown): void }) => void) => {
+          callback({ add: (tool) => tools.push(tool as { name: string }) })
+          return registration()
+        },
+        hook: async () => registration(),
+      },
+      rpc: {
+        register: async (definition: unknown, handlers: unknown) => {
+          rpcRegistrations.push({ definition, handlers })
+          return registration()
+        },
+      },
+      event: {
+        subscribe: () => stream,
+      },
+      storage: {
+        get: async (key: string) => storage.get(key),
+        set: async (key: string, value: unknown) => void storage.set(key, value),
+        remove: async (key: string) => void storage.delete(key),
+      },
+      session: {
+        hook: async () => registration(),
+        switchAgent: async () => {},
+        switchModel: async () => {},
+        prompt: async () => {},
+      },
+    } as unknown as Context
+
+    const cleanup = await orchestratorPlugin.setup(context)
+
+    // No new command, tool, permission action, or rpc surface is registered:
+    // with every feature gate at its default, the registered tool family is
+    // exactly the pre-Phase-2 set.
+    expect(commands.map((command) => command.name)).toEqual([...COMMAND_NAMES])
+    expect(tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)).toEqual([
+      "orchestrator_goal_get",
+      "orchestrator_goal_set",
+      "orchestrator_goal_update",
+      "orchestrator_gates_get",
+      "orchestrator_task_complexity_classify",
+      "orchestrator_handoff_validate",
+      "orchestrator_admission_transition",
+      "orchestrator_publish_policy_get",
+      "orchestrator_peer_list",
+      "orchestrator_session_status",
+    ])
+    expect(rpcRegistrations).toHaveLength(1)
+
+    // The strict emphasis reaches the orchestrator and worker systems with the
+    // pinned safety wording still intact, while disabled feature gates stay
+    // disabled.
+    const orchestratorSystem = agents.get("orchestrator")?.system ?? ""
+    expect(orchestratorSystem).toContain(STRICT_DECOMPOSITION_GUIDANCE)
+    expect(orchestratorSystem).toContain("Unavoidable coupling between files is resolved by sequencing or serialization")
+    expect(orchestratorSystem).toContain("A slice is a coordination unit, never a permission or filesystem boundary")
+    expect(orchestratorSystem).not.toContain("orchestrator_worktree_create")
+    expect(orchestratorSystem).not.toContain("orchestrator_github_pr_merge")
+    expect(agents.get("implementer")?.system).toContain(STRICT_DECOMPOSITION_GUIDANCE)
+    expect(agents.get("implementer")?.system).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
+
+    await cleanup?.()
     expect(stream.closed).toBe(true)
   })
 })

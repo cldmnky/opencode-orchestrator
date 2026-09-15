@@ -55,7 +55,13 @@
         // clarify: auto | off (auto = the orchestrator uses the native ask
         // tool for targeted clarifying questions before decomposing an
         // ambiguous task; off = previous behavior)
-        "clarify": { "mode": "auto" }
+        "clarify": { "mode": "auto" },
+        // decomposition: mvp | strict — strict adds extra prompt-level
+        // emphasis on preferring the smallest coherent end-to-end slice.
+        // Prompt-preference only: it never disables serialization, scope
+        // validation, review, worktree lifecycle, or publication
+        // preconditions. Defaults to the unchanged MVP behavior.
+        "decomposition": { "strategy": "mvp" }
       }
     }
   ],

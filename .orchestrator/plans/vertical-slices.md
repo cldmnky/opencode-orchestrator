@@ -288,23 +288,74 @@ guidance-level comparison itself is directionally positive and no rollback of
 the MVP is indicated. Phases 2–4 remain gated, unstarted, and unauthorized; the
 overall plan remains in-progress and NOT complete.
 
+**Human override (recorded 2026-09-15).** After reviewing this no-go the user
+explicitly instructed "I approve, go ahead" for the next phases. That decision
+authorizes Phase 2 (optional decomposition configuration) on top of the
+prompt-only MVP as a prompt-preference-only change; it does not revise any
+evidence above, does not convert the fail-closed threshold 4 result into a
+pass, and does not close the telemetry gap. The override is a recorded human
+authorization, not a met go criterion. Phases 3–4 remain gated on their own
+preconditions and are not authorized by it.
+
 Revisit only if: a live-host executed run collects real baseline/after
 transcripts and runtime verification (closing threshold 4 and the telemetry
 gap); recorded user requests demonstrate a need for an explicit decomposition
 override; or repeated live runs show rubric repeatability and any proposed D4
 coherence signal demonstrably improves classification.
 
-## Phase 2 — Optional decomposition configuration (gated)
+## Phase 2 — Optional decomposition configuration (complete, human override)
+
+**Status: complete (2026-09-15) under an explicit human override of the
+Checkpoint A no-go.** The user reviewed the recorded no-go and instructed
+"I approve, go ahead" for the next phases; that explicit override authorizes
+this Phase 2 work while every recorded limitation stands. The override is a
+recorded human authorization, not a met go criterion: threshold 4 remains
+fail-closed (no executed run evidences runtime completion or verification),
+the live-host telemetry probe has still not run, and the runtime efficacy of
+the strict strategy remains unproven. Phases 3–4 are not authorized by this
+override and remain gated on their own preconditions.
 
 Only if Checkpoint A shows users need an explicit strategy override.
 Optional strict config (e.g. a strategy key defaulting to current MVP
 behavior), prompt-preference only; must never disable serialization,
 scope validation, review, worktree lifecycle, or publication
 preconditions. Existing configs parse unchanged; typos rejected.
-Candidate files: `src/core/config.ts`, `src/core/policy.ts`,
-`src/core/prompts.ts`, `README.md`, `dev/project/opencode.example.jsonc`,
-plus strict-schema/default-preservation tests. Verification: focused
-config/prompt/contract/installer tests, then full suite and build.
+
+**Implementation.** New optional strict block
+`decomposition: { strategy }` in `src/core/config.ts`: `mvp` (default, the
+current behavior) or `strict`, `.strict()` at both levels so typos are
+rejected; an omitted key parses to `{ strategy: "mvp" }` and every existing
+config parses unchanged. The strategy is wired as prompt-preference only via
+`src/core/policy.ts` (`STRICT_DECOMPOSITION_GUIDANCE` plus
+`verticalSliceGuidance(strategy)`), embedded by `src/core/prompts.ts` in the
+orchestrator system, worker system, and continuation prompts. In strict mode
+the block is appended after the verbatim Phase 1 `VERTICAL_SLICE_GUIDANCE`, so
+every pinned anti-overlap and slice-not-isolation sentence survives unchanged.
+No D2/D4 schema, validation/tools schema, observability, worktree/GitHub,
+command, installer, doctor, or TUI behavior changed; no new tool, command,
+permission action, or runtime gate is registered (locked in by the contract
+suite).
+
+**Files:** `src/core/config.ts`, `src/core/policy.ts`, `src/core/prompts.ts`,
+`README.md`, `dev/project/opencode.example.jsonc`,
+`test/unit/core.test.ts`, `test/unit/prompt-builder.test.ts`,
+`test/unit/agents.test.ts`, `test/contract/plugin.test.ts`,
+`test/unit/installer.test.ts`, and this plan ledger.
+
+**Required tests:** strict-schema acceptance (both levels), default
+preservation (omission and explicit `mvp` produce byte-identical prompts),
+typo rejection (bad values, bad keys, wrong case, unknown keys), prompt-
+preference effect (strict emphasis reaches the three prompt kinds, agent
+systems, and installed agent systems; command prompts stay unaffected), and
+unchanged existing-config parsing (a pre-Phase-2 option object parses with the
+new key defaulting). All suites green.
+
+**Verification (2026-09-15):** see the Phase 2 evidence ledger below.
+
+**Limitations:** runtime efficacy is unproven — no live-host run occurred, the
+tokens/cost/latency/steps metrics remain `not-collected`, and this phase adds
+prompt text only. The strict strategy never bypasses serialization, scope
+validation, review, worktree lifecycle, or publication preconditions.
 
 ## Phase 3 — Optional D4 coherence signal (gated, versioned)
 
@@ -329,15 +380,22 @@ declined optionals recorded as declined.
 ## Rollback and compatibility
 
 - Phase 1 is additive prompt text; revert without state or config impact.
+- Phase 2 adds an optional `decomposition` config key plus prompt text;
+  reverting the commit (or removing the key) restores the exact Phase 1
+  behavior with no state or schema migration — no D2/D4 field changed.
 - D2 handoffs, plan files, review receipts, worktree records, and
   publication flows unchanged by every phase until its gate passes.
 - No phase claims filesystem isolation or runtime concurrency enforcement.
 
 ## Status
 
-**Phases 0 and 1 complete; Checkpoint A recorded 2026-09-15 as no-go for
-Phases 2–4 (stop at the prompt-only MVP); the overall plan is NOT complete.**
-Phases 2–4 remain gated, unstarted, and unauthorized.
+**Phases 0–2 complete; Checkpoint A recorded 2026-09-15 as no-go for
+Phases 2–4 (stop at the prompt-only MVP); the user explicitly overrode that
+gate for the next phases ("I approve, go ahead", recorded 2026-09-15), and
+Phase 2 is complete as a prompt-preference-only change. Phases 3–4 remain
+gated, unstarted, and unauthorized, and the overall plan is NOT complete.**
+Threshold 4 stays fail-closed, the live-host telemetry probe has still not
+run, and the runtime efficacy of the strict strategy is unproven.
 
 ### Phase 0/1 evidence ledger (recorded 2026-09-15)
 
@@ -396,9 +454,76 @@ Checkpoint A state (recorded 2026-09-15):
 - The live-host telemetry probe for tokens / cost / latency / steps has still
   not run; those metrics remain `not-collected` and are never estimated.
 - Checkpoint A's decision is recorded above: no-go for Phases 2–4 (stop at the
-  prompt-only MVP). No Phase 2–4 work is authorized.
+  prompt-only MVP). No Phase 2–4 work is authorized by Checkpoint A itself;
+  Phase 2 later proceeded only under the recorded explicit human override.
 
-No implementation beyond Phases 0–1 is authorized by this plan alone; each
-later phase must execute through the standard implementer → review →
-publication chain after Checkpoint A passes. Checkpoint A did not pass (no-go
-recorded 2026-09-15), so no later phase is authorized by this revision.
+### Phase 2 evidence ledger (recorded 2026-09-15)
+
+Environment: this slice's worktree on top of `main` `64eb35f` (the Checkpoint A
+merge); pinned `@opencode/plugin` / `@opencode/sdk` `0.0.0-beta-19507`;
+`bun install` run in the worktree before verification. All commands were run
+from the worktree root.
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `bun test test/unit/core.test.ts` | 57 pass / 0 fail |
+| 2 | `bun test test/unit/prompt-builder.test.ts` | 11 pass / 0 fail |
+| 3 | `bun test test/unit/agents.test.ts` | 14 pass / 0 fail |
+| 4 | `bun test test/contract/plugin.test.ts` | 3 pass / 0 fail |
+| 5 | `bun test test/unit/installer.test.ts` | 57 pass / 1 skip / 0 fail |
+| 6 | `bun run typecheck` | pass (`tsc --noEmit`, exit 0) |
+| 7 | `bun test` | 801 pass / 1 skip / 0 fail (802 tests, 29 files) |
+| 8 | `bun run build` | pass; emitted `dist/index.js`, `dist/tui.js`, `dist/commands.js`, `dist/installer.js`, `dist/cli/index.js` |
+| 9 | `git diff --check` | clean (no whitespace errors) |
+| 10 | `git status --short` | exactly the Phase 2 scope files are modified; no out-of-scope file changed |
+| 11 | `bun -e` (JSONC-parse `dev/project/opencode.example.jsonc`, then `parseOptions` its plugin options) | `example jsonc valid; decomposition = {"strategy":"mvp"}` |
+| 12 | `bun -e` (UTF-8 byte-size of the three prompt kinds in both strategies) | MVP columns reproduce the Phase 1 ledger bytes exactly; see the delta table below |
+
+Strict-mode prompt byte-size delta (UTF-8, deterministic; prompts are pure
+functions of options; the default column for the three prompt kinds reproduces
+the Phase 1 "After" bytes exactly, which evidences default preservation):
+
+| Prompt | MVP (default) | Strict | Delta |
+|---|---|---|---|
+| orchestrator system | 9074 | 9839 | +765 |
+| worker system (implementation) | 6799 | 7564 | +765 |
+| continuation | 6052 | 6817 | +765 |
+| command `orchestrate` (single case) | 5870 | 5870 | +0 |
+| `STRICT_DECOMPOSITION_GUIDANCE` block | 0 (absent) | 764 | +764 |
+
+Coverage in this slice:
+
+- Strict-schema acceptance: both `mvp` and `strict` parse; `{}` inside the
+  block defaults to `{ "strategy": "mvp" }` (`test/unit/core.test.ts`).
+- Default preservation: omission and an explicit `mvp` produce byte-identical
+  orchestrator, worker, continuation, agent-system, and installed-agent
+  prompts (`test/unit/core.test.ts`, `test/unit/agents.test.ts`,
+  `test/unit/installer.test.ts`).
+- Typo rejection: bad values, wrong case, misspelled nested keys, unknown
+  keys, and a misspelled top-level block are all rejected
+  (`test/unit/core.test.ts`).
+- Prompt-preference effect: strict emphasis reaches the orchestrator system,
+  worker system, continuation prompt, agent systems, and installed agent
+  systems; command prompts and the raw orchestration builder are unaffected,
+  and the registry keeps the exact pre-Phase-2 tool/command surface
+  (`test/unit/core.test.ts`, `test/unit/prompt-builder.test.ts`,
+  `test/unit/agents.test.ts`, `test/contract/plugin.test.ts`).
+- Unchanged existing-config parsing: a full pre-Phase-2 option object parses
+  with the new key defaulting, and a config authored without the key installs
+  with its options preserved (`test/unit/core.test.ts`,
+  `test/unit/installer.test.ts`).
+- Safety wording: the pinned anti-overlap and slice-not-isolation sentences
+  stay verbatim in strict mode; strict never enables worktree/GitHub/
+  publication guidance or review/budget behavior on its own
+  (`test/unit/core.test.ts`, `test/contract/plugin.test.ts`).
+- Limitations: no live-host run occurred; tokens / cost / latency / steps
+  remain `not-collected` and are never estimated, so the strict strategy's
+  runtime efficacy is unproven.
+
+Phase 2 was implemented only because the user explicitly overrode the
+Checkpoint A no-go ("I approve, go ahead", recorded 2026-09-15); each later
+phase still executes through the standard implementer → review → publication
+chain. Phases 3–4 remain unauthorized: their preconditions (rubric
+repeatability with a demonstrably improving machine-readable signal; the
+identical corpus executed under an approved configuration) are unmet, and the
+override does not substitute for them.

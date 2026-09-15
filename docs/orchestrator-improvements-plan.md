@@ -21,6 +21,7 @@ Constraints:
 - Beyond the original plan, the repo now ships an orchestrator-owned worktree lifecycle with safe-boundary session entry, a fail-closed autonomous publication chain (push → draft PR → ready → best-effort approve → merge → verify), per-session gates with a TUI picker and RPC, durable worker model selection, bounded nested delegation, and a read-only TUI orchestrator-sessions sidebar.
 - The dominant remaining weakness is unchanged in kind but now fixable in practice: most delegation constraints are still **prompt-only** or gated only at **plugin-owned dispatch surfaces**. The pinned beta-19507 contract now exposes `session.hook("prompt")`, `permission.hook("evaluate")`, `permission.rules` (inherited by child sessions at creation), and a native `ctx.worktree` domain — the host-side primitives needed for real runtime admission enforcement (N1), real worker containment (N2), and a documented worktree path (N3).
 - The orchestrator's **language is its weakest user-facing surface**: operational policy strings are 400–850-character single sentences, the agent has a functional description but no voice or tone contract, and clarification guidance covers only initial task ambiguity. User-visible output inherits this density. G3 targets plain-language communication, a helpful personality, and restatement/summary loops.
+- **Config drift defect (verified against the live schema):** the installer and dev template still write `experimental.subagent_depth`, but the current host schema defines **top-level** `subagent_depth` and `experimental` rejects additional properties — so installer-managed installs silently run at native depth 1 and nested delegation breaks. G4 plans the migration. `experimental.continue_loop_on_deny` and `experimental.batch_tool` are confirmed host keys the orchestrator experience needs but the installer does not set.
 - `max_parallel` is still prompted, not scheduled: no DAG scheduler or concurrency semaphore exists (A4 remains true).
 - Durable per-step checkpoints, append-only lifecycle logs, and materialized projections remain unimplemented (S1/S2); the TUI sidebar is a volatile projection only.
 
@@ -102,6 +103,7 @@ Per-session gates (`gates/`): the family `push`, `pr-draft-create`, `pr-ready-tr
 - The pinned Promise plugin API **does** expose runtime permission surfaces (`permission.hook("evaluate")`, `permission.list/get/reply/rules`) and the prompt-admission hook (`session.hook("prompt")`); the previous draft's "no interactive runtime approval in the public Promise API" trap is stale.
 - `bun run build` produces bundles but does not replace packed-package smoke testing; no lint or formatter is configured.
 - `dev:v2:dist` rewrites the generated config to load `dist/index.js`; `opencode2 api` inspection is location-sensitive (use the deep-object `location[directory]=` parameter on beta-19507).
+- The host config schema moved subagent nesting depth from `experimental.subagent_depth` to **top-level `subagent_depth`**; the current `experimental` block has `additionalProperties: false`, so the installer-written nested key is silently ignored and installs run at native depth 1 (G4 fixes the installer; A17 records the verification).
 
 ## Plugin Contract Conformance
 
@@ -162,6 +164,7 @@ Everything in this section shipped after the 2026-08-30 draft (issues #8/#10/#14
 | P0 | N2 | Runtime Authority | Worker containment via `permission.rules` | Child sessions inherit rules at creation — the first real host-enforced authority boundary; closes the V4 containment gap | M | High | Over-blocking legitimate work; rule drift |
 | P0 | N1 | Runtime Authority | Admission enforcement via `session.hook("prompt")` + `permission.hook("evaluate")` | Makes D4/V2/V1 enforceable at runtime on plugin-owned dispatch, opt-in and fail-closed | M | High | Prompt hooks are not exactly-once; false blocks |
 | P0 | G3 | DX & Governance | Plain-language communication, helpful personality, clarification/summary loop | Policy strings run 400–850 chars in single sentences; no voice/tone spec; clarify covers only initial ambiguity; user output inherits the density | M | High | Losing precision in safety-critical instructions |
+| P0 | G4 | DX & Governance | Installer schema migration: top-level `subagent_depth` + recommended experimental keys | Live schema moved depth to top-level; `experimental` rejects additional properties, so installer-written depth is dead and nested delegation silently breaks; `continue_loop_on_deny`/`batch_tool` are confirmed host keys the experience needs | S | High | Silent config drift on future pins |
 | P1 | N3 | Worktree & Isolation | Migrate managed worktrees onto native `ctx.worktree` (supersedes W1/W2) | Documented domain with ownership, refresh, `worktree.updated`, `Worktree.OperationError`; unlocks per-worker isolation on a supported path | L | High | Behavior drift during migration; canonical-config coupling |
 | P1 | N4 | Verification & Safety | Sessionless deterministic checks via `ctx.generate.text` | Semantic handoff lint, review-rubric parsing, complexity adjudication without child sessions | S | Medium | Nondeterministic model output; cost |
 | P1 | V4 | Verification & Safety | Redaction centralization + authority recording | One tested redactor; evidence marked safe/redacted/unavailable; effective authority = intersection (now expressible via N2 rules) | M | High | False security |
@@ -358,6 +361,47 @@ The orchestrator's language is hard to read (see [Conversation and Tone](#conver
 
 Write the plain-language template and personality spec as a short design note; pilot on status messages and the finish summary with readability assertions; then roll out to the agent prompt and runtime injection.
 
+#### G4 — Installer Schema Migration and Recommended Host Config
+
+**Problem**
+
+Verified 2026-09-15 against the live config schema (`https://opencode.ai/config.json`): subagent nesting depth is defined as **top-level** `subagent_depth` ("Maximum subagent nesting depth. Defaults to 1, which prevents subagents from launching subagents"), and the `experimental` block has `additionalProperties: false` with properties `disable_paste_summary`, `batch_tool`, `openTelemetry`, `primary_tools`, `continue_loop_on_deny`, `mcp_timeout`, and `policies` — **no `subagent_depth`**.
+
+The repo still writes the dead location:
+
+- `src/cli/install.ts` sets `experimental.subagent_depth: 3` (only when absent)
+- `dev/project/opencode.example.jsonc` uses the same nested form
+- `README.md` documents the nested form in four places
+
+On the current beta the nested key is therefore ignored, and installer-managed installs silently run at native depth 1 — the documented delegation chain `orchestrator → implementer → planner → explore` cannot happen. The user hit this in practice and had to set top-level `"subagent_depth": 3` manually.
+
+Two additional confirmed host keys are required/recommended for the orchestrator experience and are absent from installer output and docs:
+
+- `experimental.continue_loop_on_deny: true` — "Continue the agent loop when a tool call is denied". Without it, a denied tool call (orchestrator-only tools, permission refusals, and the future N1/N2 deny effects) terminates a worker's loop instead of letting the model react and take another path.
+- `experimental.batch_tool: true` — "Enable the batch tool". Parallel tool invocation per turn; materially helps orchestrator throughput.
+
+**Proposal**
+
+- Installer writes **top-level `subagent_depth: 3`** when the top-level key is absent (preserve-explicit-values philosophy unchanged). Migrate the legacy location: if `experimental.subagent_depth` exists and no top-level key does, move the value up and remove the stale nested key; never overwrite an explicit user value at either location.
+- Update `dev/project/opencode.example.jsonc` to the top-level form; add the two recommended `experimental` keys to the template.
+- Optionally (installer flag or interactive prompt) set `experimental.continue_loop_on_deny: true` and `experimental.batch_tool: true` when absent; strictly opt-in, never overwrite existing values.
+- Fix the four README references; document the recommended host-config block under Configuration and Troubleshooting ("nested delegation silently blocked" symptom).
+- Extend `test/unit/installer.test.ts`: new key placement, legacy-key migration, and no-overwrite cases.
+- Add a **pin-drift guard**: a contract test asserting every key the installer writes exists in the live schema (fetched at test time or a committed schema snapshot refreshed on pin bumps).
+
+**Files affected (candidate)**
+
+- `src/cli/install.ts`
+- `dev/project/opencode.example.jsonc`
+- `README.md`
+- `test/unit/installer.test.ts`
+
+**Effort:** S · **Impact:** High · **Risk:** the same drift recurs on the next schema move — mitigated by the schema-snapshot contract test and A17.
+
+**Next step**
+
+Identify the beta where the key moved (probe older pins or schema history), ship the installer migration + template/README updates, and add the schema-snapshot guard before the next pin bump.
+
 ## Non-Goals / Out of Scope
 
 - Replacing OpenCode's native V2 session or plugin architecture.
@@ -378,6 +422,7 @@ Write the plain-language template and personality spec as a short design note; p
 | Bad decomposition amplifies errors | Two-level validation (shipped, callable), bounded review (shipped), D1 DAG validation (planned) |
 | Runtime enforcement false-blocks legitimate work (N1/N2) | Opt-in modes, defaults byte-identical, truthful refusal messages, deny-is-final preserved, hook test matrix first |
 | Plain-language rewrite drops a safety precondition (G3) | Layered rendering; fail-closed strings restructured with test-enforced semantic equivalence; readability fixtures |
+| Installer-written config keys drift out of the host schema (G4) | Schema-snapshot contract test refreshed per pin bump; preserve-explicit-values migration; placement verified against the live schema (A17) |
 | Native worktree migration drift (N3) | Adapter with fallback, dual-record comparison, compatibility probe before cutover |
 | Child rule inheritance differs across hosts (N2) | Pin-level probe (A16), rules recorded and reported, never the only boundary |
 | Storage is not transactional or durable enough | Idempotency keys, no exactly-once claims, append/replay design (S1/S2), scan-cursor hydration |
@@ -401,6 +446,13 @@ Delivered as one slice on `feat/g3-phase-0-plain-language`; no gate, tool, schem
 - [x] **Readability + semantic-equivalence fixtures:** `test/unit/core.test.ts` asserts ≤ 25 words per line for every restructured constant plus a fail-closed precondition table (23 universal, 2 orchestrator dispatch, 3 plugin-owned control preconditions); `test/unit/runtime.test.ts` asserts the status template, short sentences, and the D2 handover skeleton; `test/unit/prompt-builder.test.ts` pins the one remaining dense line (out-of-scope `prompt-builder.ts`) and proves the personality spec does not leak into command prompts.
 - [x] **Examples page:** `docs/g3-before-after.md` with measured before/after readability numbers and per-surface examples.
 - **Exit evidence:** `bun run typecheck`, `bun test` (839 pass, 1 skip, 0 fail), and `bun run build` green on the slice; readability fixtures green; the before/after page recorded; `/handover` user summary derived from the D2 handoff fields; disclosed deviation: the `prompt-builder.ts` coordination line remains dense and is tracked by a fixture.
+
+### Quick Win — Installer Config Drift (G4)
+
+- Fix the installer to write top-level `subagent_depth: 3` (migrate the dead `experimental.subagent_depth` key), and update the dev template + the four README references to the nested form.
+- Document (and optionally install, only when absent) `experimental.continue_loop_on_deny: true` and `experimental.batch_tool: true` — both confirmed host keys; continue-on-deny keeps the shipped runtime-authority denials recoverable for workers instead of terminal.
+- Add the schema-snapshot contract test so installer-written keys are re-validated on every pin bump.
+- Exit evidence: installer tests green including migration/no-overwrite cases; a fresh install produces a schema-valid config in which the documented `orchestrator → implementer → planner → explore` chain is actually reachable.
 
 ### Phase A — Runtime Authority (N1, N2) — COMPLETE (2026-09-15)
 
@@ -478,6 +530,7 @@ Delivered as one cohesive runtime-authority slice (`phase-a-runtime-authority`);
 - **A13/A14 — S3/V1 semantics:** tracked in `docs/phase-1/assumptions.md` (partially verified; live shared-service probes outstanding).
 - **A15 — Undocumented catalog domain:** `ctx.catalog` is in the pinned `Context` type but not on the plugin guide; documented equivalent is `ctx.model.list()`. Track per pin; migrate if it breaks.
 - **A16 — `tui` flag and hook/worktree host behavior:** the pinned `Plugin` type lacks the `tui` field (cast in use, contract-tested); live-host behavior of `session.hook("prompt")`, `permission.hook("evaluate")`, child rule inheritance, and native worktree ops is unit-faked only and needs the Phase A/B probes.
+- **A17 — Host config key placement:** verified 2026-09-15 against the live schema (`https://opencode.ai/config.json`): `subagent_depth` is a top-level `Config` property (default 1); the `experimental` block has `additionalProperties: false` and defines `continue_loop_on_deny` and `batch_tool` but no `subagent_depth`. The installer's `experimental.subagent_depth` is therefore dead on current hosts (G4). Key placement is pin-dependent: treat every installer-written config key as pin-coupled and re-verify per bump (schema-snapshot contract test).
 
 ### Verification Checklist
 

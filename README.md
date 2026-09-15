@@ -189,6 +189,8 @@ flowchart LR
 
 All commands are available after installation. They appear inside OpenCode — no files to create manually.
 
+Three workflows, pick one: **one-shot** (`/orchestrate` — research, plan in-reply, implement, review, report), **durable plan** (`/stress-plan` writes `.orchestrator/plans/*.md`, `/run-plan` executes it phase by phase), **persistent objective** (`/goal` keeps working across idle continuations, and can drive a plan via `/goal implement the plan at .orchestrator/plans/checkout.md`).
+
 ### `/orchestrate <task>` — your main command
 
 One prompt that fans out, integrates, and verifies.
@@ -207,6 +209,7 @@ Set an objective keyed to the current OpenCode session. The orchestrator can kee
 
 ```
 /goal ship the checkout refactor without regressing payments
+/goal implement the plan at .orchestrator/plans/checkout.md
 /goal            # show current goal
 /goal pause      # pause without deleting
 /goal resume     # continue
@@ -226,9 +229,19 @@ Behavior must not change. The plugin maps references and tests first.
 
 Valid scopes are `--scope=file|module|project`; with project scope, target `.` or `project`.
 
+It writes the phased plan under `.orchestrator/plans/` before executing it, so the steps stay reviewable.
+
+### `/stress-plan` — write a reviewed plan file
+
+Drafts a plan for the given topic, critiques it from four angles (correctness, simplicity, security, feasibility), then finalizes it under `.orchestrator/plans/` for `/run-plan` to execute.
+
+```
+/stress-plan add rate limiting to the API with redis fallback
+```
+
 ### `/run-plan` — execute a written plan
 
-Put plans in `.orchestrator/plans/*.md`.
+Put plans in `.orchestrator/plans/*.md` (via `/stress-plan` or `/restructure`, or by hand).
 
 ```
 /run-plan                    # picks the only incomplete plan, or resumes
@@ -246,7 +259,6 @@ Mark a plan done with `status: complete` in frontmatter or a `## Status / comple
 /handover focus on payments regression
 /polish            # clean up only files changed in this branch
 /polish src/core/policy.ts src/core/prompts.ts
-/stress-plan add rate limiting to the API with redis fallback
 /publish status    # inspect the durable project-scoped publication policy
 /publish enable    # opt in per project (requires publish.enabled: true in config)
 /publish disable   # revoke the durable authorization
@@ -259,7 +271,7 @@ Mark a plan done with `status: complete` in frontmatter or a `## Status / comple
 /worker-models reset      # restore all workers to configured models
 ```
 
-`/stress-plan` drafts a plan, then critiques it from four angles (correctness, simplicity, security, feasibility) before finalizing.
+See [`/stress-plan`](#stress-plan--write-a-reviewed-plan-file) for writing plans and [`/run-plan`](#run-plan--execute-a-written-plan) for executing them.
 `/publish` toggles a durable, project-scoped **authorization policy** — see [Publication capability](#publication-capability-publish) for exactly what it does and does not authorize.
 `/gates` shows and narrows the per-session orchestrator gates (`push`, `pr-draft-create`, `pr-ready-transition`, `approve-after-review`, `merge`, `github-mutations`, `worktree-mutations`). Running it with no argument opens the TUI gate picker; `/gates <gate>=off` narrows one step for this session, `/gates <gate>=on` removes that narrowing, and `/gates reset` follows the project ceiling again. A session can only **narrow** the project/config ceiling and can never widen it — turning a gate on still requires the ceiling (the durable publication capability or the static `github`/`worktree` mutation switches) to allow it. Session gates apply to the current session only.
 `/worker-models` selects durable runtime models for `planner`, `explore`, `implementer`, and `reviewer` only. The TUI picker lists enabled, tool-capable models and their variants. Text form accepts `worker=provider/model[#variant]`, `worker=default`, `list`, and `reset`.

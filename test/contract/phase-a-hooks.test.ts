@@ -19,6 +19,10 @@ import { OpenCode } from "@opencode/sdk"
  *   4. A configured `deny` rule is final and bypasses the evaluation hook.
  *   5. Parent session `permission.rules` are inherited by a newly created child
  *      session and deny the tested action.
+ *   6. Opt-in child-only admission probe (N2 direction): during the
+ *      subagent-created child's own `session.hook("prompt")` admission, the
+ *      probe can install — or deliberately fail to install — a deny rule on
+ *      that child only, through the same awaited prompt hook.
  *
  * Harness facts:
  *   - Each test boots an isolated `OpenCode.create` host that directly loads the
@@ -34,11 +38,17 @@ import { OpenCode } from "@opencode/sdk"
  *     through the plugin `ToolEditor`. The probe aborts that tool at its first
  *     progress update: after `Session.create({ parentID })` and before any
  *     prompt admission or model dispatch.
+ *   - The child-admission cases then admit queued prompts on that child via the
+ *     public `session.prompt` surface; the child-only rule installer runs inside
+ *     the child's prompt hook and is observed through probe state, the child's
+ *     `session.get` rule set, and the final permission decision.
  */
 
 const PROBE_MARK = "[phase-a-probe]"
 const PROBE_MODEL = "phase-a-probe/none"
 const CHILD_AGENT = "phase-a-child"
+const CHILD_RULE_ACTION = "phase-a.child.admission"
+const CHILD_RULE_FAILURE = "phase-a child rule installer failed"
 const BUILT_ENTRY = fileURLToPath(new URL("../../dist/index.js", import.meta.url))
 
 type PromptCall = {
@@ -54,17 +64,56 @@ type EvaluateCall = {
   resources: readonly string[]
 }
 
+type ChildRuleMode = "install" | "fail"
+
+type ChildAdmissionState = {
+  /** Armed target; the installer runs only for this exact session ID. */
+  target: { childID: string; mode: ChildRuleMode } | null
+  installCalls: Array<{ sessionID: string; messageID: string }>
+  /** Ordered markers recorded inside the hook (installer start/done). */
+  sequence: string[]
+  installedRules: Array<{ action: string; resource: string; effect: "deny" }> | null
+  failure: string | null
+}
+
+/**
+ * Opt-in child-only admission probe. Arming it makes the prompt hook install a
+ * deny rule on exactly one session (the subagent-created child) and only while
+ * that child's own prompt admission is running. Nothing is armed by default, so
+ * the inheritance and hook-semantics cases are unaffected.
+ */
+function createChildAdmissionProbe() {
+  const state: ChildAdmissionState = {
+    target: null,
+    installCalls: [],
+    sequence: [],
+    installedRules: null,
+    failure: null,
+  }
+
+  return {
+    state,
+    arm(childID: string, mode: ChildRuleMode = "install"): void {
+      state.target = { childID, mode }
+    },
+    isTarget(sessionID: string): boolean {
+      return state.target !== null && state.target.childID === sessionID
+    },
+  }
+}
+
 function createProbe() {
   const promptCalls: PromptCall[] = []
   const evaluateCalls: EvaluateCall[] = []
   const modelRequests: string[] = []
   const httpRequests: string[] = []
+  const childAdmission = createChildAdmissionProbe()
   let toolEditor: any
 
   const plugin = Plugin.define({
     id: "phase-a-host-probe",
     async setup(ctx) {
-      await ctx.session.hook("prompt", (event) => {
+      await ctx.session.hook("prompt", async (event) => {
         promptCalls.push({
           sessionID: event.sessionID,
           messageID: event.messageID,
@@ -72,6 +121,24 @@ function createProbe() {
           delivery: event.delivery,
         })
         event.prompt.text = `${event.prompt.text} ${PROBE_MARK}`
+
+        // Child-only installation: an identical parent admission runs this same
+        // hook but never reaches the installer because only the armed child
+        // session ID matches.
+        if (!childAdmission.isTarget(event.sessionID)) return
+
+        const mode = childAdmission.state.target?.mode ?? "install"
+        childAdmission.state.installCalls.push({ sessionID: event.sessionID, messageID: event.messageID })
+        childAdmission.state.sequence.push("installer:start")
+        if (mode === "fail") {
+          childAdmission.state.failure = CHILD_RULE_FAILURE
+          throw new Error(CHILD_RULE_FAILURE)
+        }
+
+        const rules = [{ action: CHILD_RULE_ACTION, resource: "*", effect: "deny" as const }]
+        await ctx.permission.rules({ sessionID: event.sessionID, permissions: rules })
+        childAdmission.state.installedRules = [...rules]
+        childAdmission.state.sequence.push("installer:done")
       })
       await ctx.session.hook("model.request", (event) => {
         modelRequests.push(`${event.sessionID}:${event.kind}`)
@@ -100,6 +167,7 @@ function createProbe() {
     evaluateCalls,
     modelRequests,
     httpRequests,
+    childAdmission,
     getToolEditor: () => toolEditor,
   }
 }
@@ -174,6 +242,42 @@ async function waitFor(check: () => Promise<boolean>, timeout = 5000): Promise<v
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
   throw new Error("Timed out waiting for isolated host state")
+}
+
+/**
+ * Creates a child session through the host's own built-in `subagent` tool and
+ * aborts at the first progress update, after `Session.create({ parentID })` and
+ * before any prompt admission or model dispatch.
+ */
+async function createChildViaSubagent(
+  host: Awaited<ReturnType<typeof OpenCode.create>>,
+  probe: Probe,
+  parentID: string,
+  messageID: string,
+): Promise<string> {
+  const editor = probe.getToolEditor()
+  expect(editor).toBeDefined()
+  const subagentTool = editor.get("subagent")
+  expect(subagentTool).toBeDefined()
+
+  let childID: string | undefined
+  await expect(
+    subagentTool.execute(
+      { agent: CHILD_AGENT, description: "phase-a child", prompt: "measurement only", background: true },
+      {
+        sessionID: parentID,
+        agent: "build",
+        messageID,
+        id: `call_${messageID}`,
+        progress: async (update: { sessionID: string }) => {
+          childID = update.sessionID
+          throw new Error("phase-a probe aborts after child creation")
+        },
+      },
+    ),
+  ).rejects.toThrow("phase-a probe aborts after child creation")
+  expect(childID).toBeDefined()
+  return childID as string
 }
 
 describe("phase A pinned-host hook contract", () => {
@@ -385,6 +489,158 @@ describe("phase A pinned-host hook contract", () => {
 
       const children = await host.session.list({ parentID: parentID })
       expect(children.data.map((session: { id: string }) => session.id).sort()).toEqual([childBefore, childAfter].sort())
+
+      expect(probe.modelRequests).toEqual([])
+      expect(probe.httpRequests).toEqual([])
+    })
+  })
+
+  test("installs a child-only deny rule during the child's own prompt admission", async () => {
+    await withIsolatedHost(async ({ host, directory, probe }) => {
+      const parentID = await createSession(host, directory, "phase-a admission parent")
+      const childID = await createChildViaSubagent(host, probe, parentID, "msg_phase_a_admission_child")
+      const childBefore = await host.session.get({ sessionID: childID })
+      expect(childBefore.parentID).toBe(parentID)
+      expect(childBefore.permissions ?? []).toEqual([])
+
+      probe.childAdmission.arm(childID, "install")
+
+      // Child-only: an identical parent admission runs the same (armed) prompt
+      // hook, but the installer never runs because only the child session ID
+      // matches.
+      const parentAdmitted = await host.session.prompt({
+        sessionID: parentID,
+        text: "phase-a parent admission",
+        delivery: "queue",
+        resume: false,
+      })
+      expect(probe.promptCalls.filter((call) => call.sessionID === parentID)).toHaveLength(1)
+      expect(parentAdmitted.payload.text).toBe(`phase-a parent admission ${PROBE_MARK}`)
+      expect(probe.childAdmission.state.installCalls).toEqual([])
+      // ...and the parent's rule set stays empty.
+      expect((await host.session.get({ sessionID: parentID })).permissions ?? []).toEqual([])
+
+      // Baseline: with no rule on either session, the parent is allowed and the
+      // evaluation hook observes that decision.
+      const parentBefore = await host.permission.create({
+        sessionID: parentID,
+        action: CHILD_RULE_ACTION,
+        resources: ["target"],
+      })
+      expect(parentBefore.effect).toBe("allow")
+      const hookCallsBeforeChild = probe.evaluateCalls.filter((call) => call.action === CHILD_RULE_ACTION).length
+      expect(hookCallsBeforeChild).toBe(1)
+
+      // The child message admission runs the installer inside the child's prompt
+      // hook; the hook is awaited, so admission cannot complete before
+      // `permission.rules` has finished.
+      const admitted = await host.session.prompt({
+        sessionID: childID,
+        text: "phase-a child admission",
+        delivery: "queue",
+        resume: false,
+      })
+      probe.childAdmission.state.sequence.push("test:admission-resolved")
+
+      expect(probe.childAdmission.state.sequence).toEqual([
+        "installer:start",
+        "installer:done",
+        "test:admission-resolved",
+      ])
+      expect(probe.childAdmission.state.installCalls).toEqual([{ sessionID: childID, messageID: admitted.id }])
+      expect(probe.childAdmission.state.installedRules).toEqual([
+        { action: CHILD_RULE_ACTION, resource: "*", effect: "deny" },
+      ])
+      expect(admitted.payload.text).toBe(`phase-a child admission ${PROBE_MARK}`)
+
+      // The rule write is observable on the child immediately after admission,
+      // with no polling.
+      expect((await host.session.get({ sessionID: childID })).permissions).toEqual([
+        { action: CHILD_RULE_ACTION, resource: "*", effect: "deny" },
+      ])
+
+      // The installed rule is final for the child's tested action: deny with no
+      // new evaluation-hook event for that action.
+      const childDecision = await host.permission.create({
+        sessionID: childID,
+        action: CHILD_RULE_ACTION,
+        resources: ["target"],
+      })
+      expect(childDecision.effect).toBe("deny")
+      expect(probe.evaluateCalls.filter((call) => call.action === CHILD_RULE_ACTION)).toHaveLength(hookCallsBeforeChild)
+
+      // The parent remains allowed for the same action after the child's rule.
+      const parentAfter = await host.permission.create({
+        sessionID: parentID,
+        action: CHILD_RULE_ACTION,
+        resources: ["target"],
+      })
+      expect(parentAfter.effect).toBe("allow")
+      expect(probe.evaluateCalls.filter((call) => call.action === CHILD_RULE_ACTION)).toHaveLength(
+        hookCallsBeforeChild + 1,
+      )
+
+      // Resubmitting the same admitted child message ID returns the original
+      // admission, does not re-run the installer, and adds no inbox item.
+      const retry = await host.session.prompt({
+        sessionID: childID,
+        id: admitted.id,
+        text: "phase-a child retry",
+        delivery: "queue",
+        resume: false,
+      })
+      expect(retry.id).toBe(admitted.id)
+      expect(retry.payload.text).toBe(admitted.payload.text)
+      expect(probe.childAdmission.state.installCalls).toEqual([{ sessionID: childID, messageID: admitted.id }])
+      expect(probe.promptCalls.filter((call) => call.sessionID === childID)).toHaveLength(1)
+      expect(await host.session.inbox.list({ sessionID: childID })).toHaveLength(1)
+
+      expect(probe.modelRequests).toEqual([])
+      expect(probe.httpRequests).toEqual([])
+    })
+  })
+
+  test("blocks child admission and creates no inbox item when the child rule installer fails", async () => {
+    await withIsolatedHost(async ({ host, directory, probe }) => {
+      const parentID = await createSession(host, directory, "phase-a failure parent")
+      const childID = await createChildViaSubagent(host, probe, parentID, "msg_phase_a_failure_child")
+
+      probe.childAdmission.arm(childID, "fail")
+
+      // The host rejects the admission; the deliberate installer error is not
+      // propagated verbatim (the pinned host wraps hook failures as
+      // `UnexpectedStatus`), so the probe state below proves who failed.
+      const admissionError = await host.session
+        .prompt({
+          sessionID: childID,
+          text: "phase-a failing admission",
+          delivery: "queue",
+          resume: false,
+        })
+        .catch((error: unknown) => error as Error)
+      expect(admissionError).toBeInstanceOf(Error)
+      expect(admissionError.message).toBe("UnexpectedStatus")
+
+      // The installer was attempted exactly once for the child and failed before
+      // writing any rule.
+      expect(probe.childAdmission.state.installCalls).toEqual([
+        { sessionID: childID, messageID: expect.any(String) },
+      ])
+      expect(probe.childAdmission.state.failure).toBe(CHILD_RULE_FAILURE)
+      expect(probe.childAdmission.state.installedRules).toBeNull()
+      expect(probe.childAdmission.state.sequence).toEqual(["installer:start"])
+
+      // The failed hook prevented admission: no inbox item and no child rule.
+      expect(await host.session.inbox.list({ sessionID: childID })).toEqual([])
+      expect((await host.session.get({ sessionID: childID })).permissions ?? []).toEqual([])
+
+      // The failure is contained to the child; the parent stays allowed.
+      const parentDecision = await host.permission.create({
+        sessionID: parentID,
+        action: CHILD_RULE_ACTION,
+        resources: ["target"],
+      })
+      expect(parentDecision.effect).toBe("allow")
 
       expect(probe.modelRequests).toEqual([])
       expect(probe.httpRequests).toEqual([])

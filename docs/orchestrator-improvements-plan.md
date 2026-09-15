@@ -22,6 +22,7 @@ Constraints:
 - The dominant remaining weakness is unchanged in kind but now fixable in practice: most delegation constraints are still **prompt-only** or gated only at **plugin-owned dispatch surfaces**. The pinned beta-19507 contract now exposes `session.hook("prompt")`, `permission.hook("evaluate")`, `permission.rules` (inherited by child sessions at creation), and a native `ctx.worktree` domain — the host-side primitives needed for real runtime admission enforcement (N1), real worker containment (N2), and a documented worktree path (N3).
 - The orchestrator's **language is its weakest user-facing surface**: operational policy strings are 400–850-character single sentences, the agent has a functional description but no voice or tone contract, and clarification guidance covers only initial task ambiguity. User-visible output inherits this density. G3 targets plain-language communication, a helpful personality, and restatement/summary loops.
 - The **N3 native-worktree probe is complete (2026-09-15) and blocks cutover**: the pinned `ctx.worktree` domain cannot back the managed `worktree/v2` lifecycle (detached create, no ownership/dirty/moved/orphan states, `refresh` result dropped at the plugin surface, destructive `force`). The only permitted follow-up is a read-only inventory observation pilot with `worktree/v2` still authoritative. See [`docs/phase-1/n3-native-worktree-compatibility.md`](phase-1/n3-native-worktree-compatibility.md).
+- The **N4 sessionless-generate contract probe is complete (2026-09-15) and is pilot-only**: the pinned `ctx.generate.text` surface accepts exactly `{ prompt, model? }`, resolves to exactly `{ text }`, is sessionless (no session, inbox item, history, or tool call), and rejects with catchable `Generate.*` errors. Deterministic in-process verification exists only as a **test-only** provider override, no real provider call was measured, and the declared input has no timeout/abort control — so production advisory wiring is not authorized. See [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md).
 - **Config drift defect (verified against the live schema):** the installer and dev template still write `experimental.subagent_depth`, but the current host schema defines **top-level** `subagent_depth` and `experimental` rejects additional properties — so installer-managed installs silently run at native depth 1 and nested delegation breaks. G4 plans the migration. `experimental.continue_loop_on_deny` and `experimental.batch_tool` are confirmed host keys the orchestrator experience needs but the installer does not set.
 - `max_parallel` is still prompted, not scheduled: no DAG scheduler or concurrency semaphore exists (A4 remains true).
 - Durable per-step checkpoints, append-only lifecycle logs, and materialized projections remain unimplemented (S1/S2); the TUI sidebar is a volatile projection only.
@@ -136,7 +137,7 @@ Assessed 2026-09-15 against the current plugin guide and the pinned `@opencode/p
 - `permission.hook("evaluate")` — runs for `allow`/`ask` decisions after configured rules; an explicit configured `deny` is final; the hook may flip `effect` and set `message`.
 - `ctx.permission.rules` — session-scoped rules; **child sessions inherit the rules in effect when they are created** (real containment, not prompts).
 - Native `ctx.worktree` domain — `create`/`remove`/`list`/`refresh` + `transform`/`reload`, project ownership, `Worktree.OperationError` (force-required confirmations), `worktree.updated` events.
-- `ctx.generate.text` — sessionless model calls (no session, tools, or history).
+- `ctx.generate.text` — sessionless model calls (no session, tools, or history). **Probe complete 2026-09-15 (N4): exact `{ prompt, model? } -> { text }` shape measured, catchable `Generate.*` failures, test-only deterministic provider override; production wiring pilot-only.**
 - `session.hook("retry")` — retry decision/delay override with `attempt` number.
 - `ctx.reference.transform`, `ctx.skill.transform`, `ctx.shell.hook("create.before")`, `ctx.integration.*` — documented surfaces with no current use.
 
@@ -168,7 +169,7 @@ Everything in this section shipped after the 2026-08-30 draft (issues #8/#10/#14
 | P0 | G3 | DX & Governance | Plain-language communication, helpful personality, clarification/summary loop | Policy strings run 400–850 chars in single sentences; no voice/tone spec; clarify covers only initial ambiguity; user output inherits the density | M | High | Losing precision in safety-critical instructions |
 | P0 | G4 | DX & Governance | Installer schema migration: top-level `subagent_depth` + recommended experimental keys | Live schema moved depth to top-level; `experimental` rejects additional properties, so installer-written depth is dead and nested delegation silently breaks; `continue_loop_on_deny`/`batch_tool` are confirmed host keys the experience needs | S | High | Silent config drift on future pins |
 | P1 | N3 | Worktree & Isolation | Migrate managed worktrees onto native `ctx.worktree` (supersedes W1/W2) — **compatibility probe complete 2026-09-15: cutover blocked; no adapter implemented** | Documented domain with ownership, refresh, `worktree.updated`; the probe measured project-scoped inventory, detached create, `Git.WorktreeError.forceRequired` dirty refusal, and silent row drops — the native states do not match `worktree/v2` | L | High | Behavior drift during migration; canonical-config coupling; native `force` deletes dirty trees |
-| P1 | N4 | Verification & Safety | Sessionless deterministic checks via `ctx.generate.text` | Semantic handoff lint, review-rubric parsing, complexity adjudication without child sessions | S | Medium | Nondeterministic model output; cost |
+| P1 | N4 | Verification & Safety | Sessionless deterministic checks via `ctx.generate.text` — **contract probe complete 2026-09-15: surface sessionless; production wiring pilot-only, no wiring implemented** | Semantic handoff lint, review-rubric parsing, complexity adjudication without child sessions | S | Medium | Nondeterministic model output; cost |
 | P1 | V4 | Verification & Safety | Redaction centralization + authority recording | One tested redactor; evidence marked safe/redacted/unavailable; effective authority = intersection (now expressible via N2 rules) | M | High | False security |
 | P1 | S1 | State & Observability | Durable per-step checkpoints with backoff and cursor resume | Goal/run records still lack per-step receipts; `storage.scan` gives cursors; retry classes feed N5 | L | High | Duplicate side effects |
 | P1 | D1 | Delegation & Prompting | DAG scheduler with adaptive scaling | `max_parallel` still prompted only (A4 true); D4 now supplies the routing input | L | High | Over-decomposition |
@@ -295,6 +296,14 @@ Unchanged in goal from the previous draft — one tested redactor, adversarial f
 #### N4 — Sessionless Deterministic Checks via `ctx.generate.text`
 
 Use `ctx.generate.text` for checks that need judgment but not a session: semantic D2 lint (facts/assumptions coherence), review-rubric structuring for bounded review, and D4 adjudication of borderline classifications. Output must be parsed defensively and treated as advisory unless deterministic (schema/semantic) checks already pass; no transcripts or secrets in prompts; results recorded in the trace summary only as metadata.
+
+**Contract probe complete (2026-09-15) — production wiring is pilot-only.** The probe measured the pinned surface end to end in an embedded host and produced the decision record [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md):
+
+- Probe scope delivered: exact `{ prompt, model? } -> { text }` shape, sessionless behavior (no session, inbox item, history, or tool call; session-scoped `generate`/`model.request`/`http.request` hooks never fire), a deterministic in-process provider injected through `ctx.aisdk.hook("sdk")`/`("language")`, and two catchable failures (`Generate.ModelSelectionError` for an unknown model, `Generate.UnavailableError` for a provider failure) — with **no real-provider call** and zero external network attempts. The unknown-model case rejects before any provider call; the provider-failure case fails inside the injected in-process provider, which is the suite's only provider call (never a configured provider or the network).
+- Measured result: the injected language model received exactly one user text message with `tools: []`; an unknown model rejects before the injected provider is called; example prompts and outputs stayed non-sensitive fixtures.
+- Decision: **pilot-only, not authorized for production wiring.** A real provider call (network, credentials, cost, latency, model choice, output nondeterminism) was deliberately not measured, the declared input has **no timeout/abort control**, and the only deterministic seam is a test-only host-wide provider override; provider packaging is pin-coupled to the built-in dynamic npm loader.
+- Corrected plan assumption: N4 cannot be treated as a deterministic check by itself. Any future use remains advisory, with deterministic schema/semantic checks first, and needs a new explicit slice for at most one opt-in advisory post-step.
+- **Exit evidence:** `bun test test/contract/phase-c-generate.test.ts` → 6 pass, 0 fail, 67 expect() calls; `bun run build`, `bun run typecheck`, and `git diff --check` green; full-suite evidence recorded in the decision record's reproduction section.
 
 **Files affected (candidate):** `orchestration/validation.ts`, `observability/review.ts` (adapters), `core/d4.ts`.
 
@@ -528,8 +537,9 @@ Delivered as one cohesive runtime-authority slice (`phase-a-runtime-authority`);
 
 ### Phase C — Verification Hardening (N4, V4)
 
+- **N4 contract probe first slice complete (2026-09-15) — pilot-only, no wiring implemented.** `test/contract/phase-c-generate.test.ts` measures the pinned sessionless `ctx.generate.text` surface (exact `{ prompt, model? } -> { text }` shape, no session/inbox/history/tool side effects, catchable `Generate.*` failures, no external network traffic, and no host-reachable ambient credential — the `OPENCODE_API_KEY` variable is removed for each probe host's lifetime and its value is captured only so it can be restored on cleanup, never passed to the host, logged, or persisted) and the decision record is [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md). Production advisory wiring is **not authorized**; the surface has no timeout/abort control and only a test-only deterministic provider seam. Next N4 step, if wanted, is one opt-in advisory post-step in a new explicit slice.
 - Redaction/authority threat model; central redactor with adversarial fixtures.
-- Sessionless semantic checks wired as advisory post-steps of the existing validators.
+- Sessionless semantic checks wired as advisory post-steps of the existing validators (still not authorized; see the N4 decision record for the conditions).
 - Exit evidence: threat model; fixtures green; N4 outputs recorded as trace metadata only.
 
 ### Phase D — State and Scale (S1, S2, N5, D1, D3, G1, G2)
@@ -559,6 +569,7 @@ Delivered as one cohesive runtime-authority slice (`phase-a-runtime-authority`);
 - **A15 — Undocumented catalog domain:** `ctx.catalog` is in the pinned `Context` type but not on the plugin guide; documented equivalent is `ctx.model.list()`. Track per pin; migrate if it breaks.
 - **A16 — `tui` flag and hook/worktree host behavior:** the pinned `Plugin` type lacks the `tui` field (cast in use, contract-tested). Live-host behavior is now probed on the pinned host: `session.hook("prompt")`, `permission.hook("evaluate")`, and child rule inheritance by `test/contract/phase-a-hooks.test.ts` (Phase A, 13 pass); the native worktree domain by `test/contract/phase-b-worktree.test.ts` (Phase B, 6 pass — cutover blocked, see the N3 decision record). Measured harness facts: an embedded host's plugin boot `ctx.location` follows the process working directory, `ctx.worktree.*` routes a per-call `location` ref to a location-scoped service, and a directly-passed plugin object is instantiated once per active location (dedupe events by id).
 - **A17 — Host config key placement:** verified 2026-09-15 against the live schema (`https://opencode.ai/config.json`): `subagent_depth` is a top-level `Config` property (default 1); the `experimental` block has `additionalProperties: false` and defines `continue_loop_on_deny` and `batch_tool` but no `subagent_depth`. The installer's `experimental.subagent_depth` is therefore dead on current hosts (G4). Key placement is pin-dependent: treat every installer-written config key as pin-coupled and re-verify per bump (schema-snapshot contract test).
+- **A18 — Sessionless generate surface:** `ctx.generate.text({ prompt, model? })` is measured sessionless with exactly `{ text }` output and catchable `Generate.ModelSelectionError`/`Generate.UnavailableError` failures (Phase C probe, 6 pass). Deterministic verification is possible only through a **test-only** host-wide provider override (`ctx.aisdk.hook("sdk")`/`("language")`); the host's built-in dynamic provider plugin owns the first `sdk` hook and npm-loads `evt.package`, so config-declared provider packages are pin-coupled. No timeout/abort control exists on the declared input, and no real provider call (network, credentials, cost, latency, output nondeterminism) has been measured. Production advisory wiring stays **pilot-only** until a new slice measures those. See [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md).
 
 ### Verification Checklist
 
@@ -607,11 +618,11 @@ CLI:
 Verification surfaces:
 
 - `test/unit/` (admission, agents, clarify, continuation, contracts, core, d4, evidence, gates, gh, installer, observability, orchestration-tools, peers, process, prompt-builder, publish, review, runtime, session-move, session-state, session-status, tools, tui-sidebar, worker-models, worktree)
-- `test/contract/plugin.test.ts` · `embedded.test.ts` · `tui.test.ts` · `phase-a-hooks.test.ts` · `phase-b-worktree.test.ts`
+- `test/contract/plugin.test.ts` · `embedded.test.ts` · `tui.test.ts` · `phase-a-hooks.test.ts` · `phase-b-worktree.test.ts` · `phase-c-generate.test.ts`
 
 Design/records:
 
-- `docs/phase-1/` (assumptions, d2/d4/v2/v3/s3 artifacts, n3-native-worktree-compatibility)
+- `docs/phase-1/` (assumptions, d2/d4/v2/v3/s3 artifacts, n3-native-worktree-compatibility, n4-sessionless-generate-compatibility)
 
 ### Research Source Catalog
 

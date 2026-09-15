@@ -9,12 +9,18 @@ import { COMMAND_NAMES, parseOptions, type OrchestratorOptions } from "../../src
 import { commandDefinitions } from "../../src/opencode-v2/commands/index.js"
 import { PEER_TOOL_PERMISSION, PUBLISH_TOOL_PERMISSION } from "../../src/core/permissions.js"
 import {
+  BOUNDED_REVIEW_GUIDANCE,
+  BUDGET_GUIDANCE,
+  CHILD_TASK_CONTRACT,
+  CLARIFY_GUIDANCE,
   D4_V2_COHERENCE_GUIDANCE,
   DELEGATION_GRAPH_GUIDANCE,
   DELEGATION_RULES,
   GITHUB_LIFECYCLE_GUIDANCE,
   HANDOFF_FORMAT,
+  HANDOFF_SUMMARY_FIELDS,
   MANAGED_WORKTREE_GUIDANCE,
+  PEER_DISCOVERY_GUIDANCE,
   PROMPTING_POLICY_GUIDANCE,
   PUBLICATION_POLICY_GUIDANCE,
   REMOTE_ORCHESTRATION_GUIDANCE,
@@ -31,6 +37,8 @@ import {
   verticalSliceGuidance,
 } from "../../src/core/policy.js"
 import { ROLE_DELEGATION, ROLE_GUIDANCE, delegationGraphSummary } from "../../src/core/roles.js"
+import { D2_PROSE_HEADINGS } from "../../src/core/contracts.js"
+import { ORCHESTRATOR_DESCRIPTION } from "../../src/opencode-v2/agents.js"
 
 describe("configuration", () => {
   test("fills role defaults and preserves per-agent options", () => {
@@ -751,7 +759,7 @@ describe("remote orchestration policy", () => {
       expect(prompt).toContain("without re-prompting for exactly: worktree push, draft PR creation, the draft-to-ready transition, the verified post-ready approval, and merge after the full merge precondition chain")
       expect(prompt).toContain("It never authorizes issue creation")
       expect(prompt).toContain("/gates (or the TUI gate picker) can narrow any of these steps — including merge — for the current session only")
-      expect(prompt).toContain("a session-disabled gate is final")
+      expect(prompt).toContain("A session-disabled gate is final")
       expect(prompt).toContain("Mandatory publication sequence: commit clean changes first")
       expect(prompt).toContain("rerun verification and sync, commit, and restart the exact-revision review")
       expect(prompt).toContain("Pull requests are always created as drafts")
@@ -1041,5 +1049,188 @@ describe("nested delegation policy", () => {
     expect(prompt).not.toContain("or launching other agents.")
     expect(orchestrationRules(4, true)).toContain(DELEGATION_GRAPH_GUIDANCE)
     expect(orchestrationRules(4, true)).toContain(PROMPTING_POLICY_GUIDANCE)
+  })
+})
+
+/**
+ * G3 Phase 0 (docs/g3-communication-contract.md). The readability fixtures are
+ * structural: one idea per line and no line over the 25-word plain-language
+ * sentence budget, plus a precondition table proving the restructure kept
+ * every fail-closed rule with the same meaning.
+ */
+describe("G3 plain-language communication contract", () => {
+  const ALL_FEATURES = parseOptions({
+    worktree: { enabled: true },
+    github: { enabled: true },
+    publish: { enabled: true },
+    review: { mode: "bounded" },
+    budget: { mode: "stop-between-steps" },
+  })
+  const SENTENCE_WORD_LIMIT = 25
+
+  function lineWords(line: string): number {
+    return line.trim().split(/\s+/).filter(Boolean).length
+  }
+
+  // Every restructured policy constant reads as short bullets: one rule per
+  // line, and no line over the plain-language sentence budget. The pinned
+  // safety phrases are preserved byte-for-byte inside these lines.
+  const SHORT_BULLET_POLICY: Array<[string, string]> = [
+    ["CHILD_TASK_CONTRACT", CHILD_TASK_CONTRACT],
+    ["DELEGATION_GRAPH_GUIDANCE", DELEGATION_GRAPH_GUIDANCE],
+    ["VERTICAL_SLICE_GUIDANCE", VERTICAL_SLICE_GUIDANCE],
+    ["STRICT_DECOMPOSITION_GUIDANCE", STRICT_DECOMPOSITION_GUIDANCE],
+    ["D4_V2_COHERENCE_GUIDANCE", D4_V2_COHERENCE_GUIDANCE],
+    ["PROMPTING_POLICY_GUIDANCE", PROMPTING_POLICY_GUIDANCE],
+    ["TOOL_AVAILABILITY_GUIDANCE", TOOL_AVAILABILITY_GUIDANCE],
+    ["SECRET_HANDLING_GUIDANCE", SECRET_HANDLING_GUIDANCE],
+    ["WORKTREE_BOUNDARY_GUIDANCE", WORKTREE_BOUNDARY_GUIDANCE],
+    ["MANAGED_WORKTREE_GUIDANCE", MANAGED_WORKTREE_GUIDANCE],
+    ["WORKTREE_LIFECYCLE_GUIDANCE", WORKTREE_LIFECYCLE_GUIDANCE],
+    ["GITHUB_LIFECYCLE_GUIDANCE", GITHUB_LIFECYCLE_GUIDANCE],
+    ["PEER_DISCOVERY_GUIDANCE", PEER_DISCOVERY_GUIDANCE],
+    ["PUBLICATION_POLICY_GUIDANCE", PUBLICATION_POLICY_GUIDANCE],
+    ["BOUNDED_REVIEW_GUIDANCE", BOUNDED_REVIEW_GUIDANCE],
+    ["BUDGET_GUIDANCE", BUDGET_GUIDANCE],
+    ["STRUCTURED_HANDOFF_GUIDANCE", STRUCTURED_HANDOFF_GUIDANCE],
+    ["CLARIFY_GUIDANCE", CLARIFY_GUIDANCE],
+    ["HANDOFF_FORMAT", HANDOFF_FORMAT],
+    [
+      "terminalDriveGuidance",
+      terminalDriveGuidance({ github: { enabled: true }, worktree: { enabled: true }, publish: { enabled: true } }),
+    ],
+  ]
+
+  test("every restructured policy constant is a short-bullet list, not a dense sentence", () => {
+    for (const [name, text] of SHORT_BULLET_POLICY) {
+      for (const line of text.split("\n")) {
+        expect(lineWords(line), `${name}: ${line}`).toBeLessThanOrEqual(SENTENCE_WORD_LIMIT)
+      }
+    }
+    // The publication policy is the largest former offender: it used to be 8
+    // lines with a 127-word sentence, and it is now one rule per bullet.
+    expect(PUBLICATION_POLICY_GUIDANCE.split("\n").length).toBeGreaterThan(30)
+    const confirmLine = PUBLICATION_POLICY_GUIDANCE.split("\n").find((line) => line.startsWith("without re-prompting"))
+    expect(confirmLine).toBeDefined()
+    expect(lineWords(confirmLine ?? "")).toBeLessThanOrEqual(SENTENCE_WORD_LIMIT)
+  })
+
+  // Fail-closed preconditions that must reach every prompt kind with the same
+  // meaning. Phrases are the pinned safety wording; presence here is the
+  // test-enforced semantic-equivalence proof for the G3 restructure.
+  const UNIVERSAL_FAIL_CLOSED_PRECONDITIONS: Array<[string, string]> = [
+    ["unknown coupling fails closed", "unknown coupling fails closed and serializes"],
+    ["no concurrent overlapping writes", "never by concurrent overlapping writes"],
+    ["prompt scopes are advisory", "Prompt-level rules are advisory and do not enforce filesystem isolation"],
+    ["scopes are not isolation", "prompt-level disjoint write scopes do not equal filesystem isolation"],
+    ["nested delegation ban", "Delegating outside your role graph is forbidden"],
+    ["worktree entry order", "required order is orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer"],
+    ["worktree main-checkout ban", "never delegate implementation from the main checkout"],
+    ["review before push", "only after validated maker/checker review"],
+    ["publication fails closed", "Every publication step fails closed"],
+    ["merge preconditions", "Merge preconditions (all required, checked against fresh reads)"],
+    ["no GitHub APPROVE requirement", "No GitHub APPROVE review is required"],
+    ["merge states are never polled", "never polled"],
+    ["capability never authorizes issue creation", "It never authorizes issue creation"],
+    ["session gate narrowing is final", "A session-disabled gate is final"],
+    ["terminal drive no early stop", "Never stop at 'changes are ready' or 'the PR is open'"],
+    ["unverified terminal chain ban", "Do not start the terminal chain on unverified work"],
+    ["D2 contract frozen", "D2 v1 stays frozen"],
+    ["D2 validation unchanged", "never changes handoff validation"],
+    ["no atomic child isolation", "not atomic child isolation"],
+    ["evidence before completion", "before reporting completion"],
+    ["secret redaction", "Redact credentials from every ledger, handoff, and handover"],
+    ["tool preflight", "inspect the tool catalog"],
+    ["no invented tools", "never assume, register, or invent tools"],
+  ]
+
+  // The dispatch rules live in the orchestrator rules block: the orchestrator
+  // enforces them, while workers receive the child-task contract and the
+  // bounded graph instead.
+  const ORCHESTRATOR_RULE_PRECONDITIONS: Array<[string, string]> = [
+    [
+      "disjoint write scopes",
+      "Require an exact disjoint write scope from every child before any parallel write; no two children may claim the same file or area.",
+    ],
+    [
+      "serialize overlapping ownership",
+      "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes.",
+    ],
+  ]
+
+  // Plugin-owned dispatch controls reach the orchestrator system and the
+  // continuation prompt, but deliberately not the worker prompts.
+  const CONTROL_PRECONDITIONS: Array<[string, string]> = [
+    ["bounded review breaker", "do not keep dispatching the same run past a terminal breaker"],
+    ["budget in-flight safety", "in-flight provider and tool calls are never interrupted"],
+    ["budget unknown fails closed", "Unknown token or cost observations fail closed"],
+  ]
+
+  test("every fail-closed precondition survives the restructure with identical meaning", () => {
+    const kinds: Array<[string, string]> = [
+      ["orchestrator", buildOrchestratorSystem(ALL_FEATURES)],
+      ["worker", buildWorkerSystem("implementation", ALL_FEATURES)],
+      ["continuation", buildContinuationPrompt("objective", 1, ALL_FEATURES)],
+    ]
+    for (const [name, phrase] of UNIVERSAL_FAIL_CLOSED_PRECONDITIONS) {
+      for (const [kind, prompt] of kinds) {
+        expect(prompt, `${name} in ${kind}: ${phrase}`).toContain(phrase)
+      }
+    }
+    const orchestrator = buildOrchestratorSystem(ALL_FEATURES)
+    const continuation = buildContinuationPrompt("objective", 1, ALL_FEATURES)
+    for (const [name, phrase] of ORCHESTRATOR_RULE_PRECONDITIONS) {
+      expect(orchestrator, `${name} in orchestrator: ${phrase}`).toContain(phrase)
+    }
+    for (const [name, phrase] of CONTROL_PRECONDITIONS) {
+      expect(orchestrator, `${name} in orchestrator: ${phrase}`).toContain(phrase)
+      expect(continuation, `${name} in continuation: ${phrase}`).toContain(phrase)
+      expect(buildWorkerSystem("implementation", ALL_FEATURES), `${name} worker`).not.toContain(phrase)
+    }
+  })
+
+  test("the personality, restatement, and summary spec is orchestrator-only", () => {
+    const system = buildOrchestratorSystem(parseOptions({}))
+    for (const marker of [
+      "Voice: friendly, concise, and proactive",
+      "Talk to the user in plain language",
+      "Gloss jargon on first use",
+      "Restatement: before starting multi-worker work",
+      "Ask budget: at most three questions in one ask",
+      "Phase transitions: announce each transition in one plain line",
+      "Finish summary: end every run with the same five fields as the D2 handoff",
+    ]) {
+      expect(system, marker).toContain(marker)
+    }
+    for (const role of ["planning", "research", "implementation", "review"] as const) {
+      const worker = buildWorkerSystem(role)
+      expect(worker, role).not.toContain("Voice: friendly, concise, and proactive")
+      expect(worker, role).not.toContain("Restatement: before starting multi-worker work")
+      expect(worker, role).not.toContain("Phase transitions: announce each transition")
+    }
+    // The plain-language contract never weakens a refusal: the status template
+    // and the refusal wording stay explicit.
+    expect(system).toContain("A refusal or blocker follows the status template")
+  })
+
+  test("the personality spec respects clarify mode instead of opting itself back in", () => {
+    const off = buildOrchestratorSystem(parseOptions({ clarify: { mode: "off" } }))
+    expect(off).not.toContain("Ask through the native ask tool")
+    expect(off).toContain("Clarify mode is off")
+    const on = buildOrchestratorSystem(parseOptions({}))
+    expect(on).toContain("Ask through the native ask tool")
+    expect(on).not.toContain("Clarify mode is off")
+  })
+
+  test("the finish-summary skeleton is exactly the D2 handoff field set", () => {
+    expect([...HANDOFF_SUMMARY_FIELDS]).toEqual([...D2_PROSE_HEADINGS])
+    const system = buildOrchestratorSystem(parseOptions({}))
+    expect(system).toContain("Outcome, Files, Verification, Risks, Follow-up")
+  })
+
+  test("the orchestrator description keeps its contract prefix and adds a plain-language voice", () => {
+    expect(ORCHESTRATOR_DESCRIPTION.startsWith("Coordinates specialized agents and verifies their work.")).toBe(true)
+    expect(ORCHESTRATOR_DESCRIPTION).toContain("plain language")
+    expect(ORCHESTRATOR_DESCRIPTION.length).toBeLessThan(160)
   })
 })

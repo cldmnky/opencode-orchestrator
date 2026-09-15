@@ -6,6 +6,7 @@ import type { CommandName, CommandInvocationLike } from "./index.js"
 import { commandDefinitions } from "./index.js"
 import type { OrchestratorOptions } from "../../core/config.js"
 import { buildCommandPrompt } from "../../core/prompts.js"
+import { HANDOFF_SUMMARY_FIELDS } from "../../core/policy.js"
 import type { DispatchGate } from "../observability/runtime.js"
 import { redact } from "../process/redact.js"
 import { formatModelReference } from "../../core/model-reference.js"
@@ -38,6 +39,75 @@ type ModelRefLike = {
   variant?: string
 }
 
+/**
+ * User-facing plain-language template (G3 Phase 0; see
+ * docs/g3-communication-contract.md). Every prose status message answers what
+ * happened, what it means, and — when there is one — what happens next or what
+ * the user can do. The sentence budget is asserted in the unit suite.
+ *
+ * Model-facing detail is never softened here: raw refusal reasons stay in the
+ * "what happened" line so a gate/limit explanation is still verbatim.
+ */
+export function statusMessage(input: { happened: string; means: string; next?: string }): string {
+  return [
+    `What happened: ${input.happened}`,
+    `What it means: ${input.means}`,
+    ...(input.next ? [`What's next: ${input.next}`] : []),
+  ].join("\n")
+}
+
+/**
+ * Data collected for the readable `/handover` summary. Every field is
+ * optional so a failed read is reported truthfully instead of being omitted.
+ */
+export type HandoverSummaryInput = {
+  focus: string
+  context?: string
+  contextError?: string
+  files?: readonly string[]
+  filesError?: string
+  diff?: string
+  diffError?: string
+}
+
+/**
+ * Readable handover summary derived from the D2 handoff fields (see
+ * `HANDOFF_SUMMARY_FIELDS`): Outcome, Files, Verification, Risks, Follow-up.
+ * The same five-field skeleton is used by worker handoffs and the orchestrator
+ * finish summary, so a reader can move between them without relearning the
+ * structure. Rendering only: no D2 field, schema, or validation changes.
+ */
+export function formatHandoverSummary(input: HandoverSummaryInput): string {
+  const files = input.filesError
+    ? [`Unavailable: ${input.filesError}`]
+    : input.files && input.files.length > 0
+      ? input.files.map((file) => `- ${file}`)
+      : ["Working copy is clean."]
+  const sections: string[] = [
+    "# Handover summary",
+    `Focus: ${input.focus}`,
+    "",
+    `${HANDOFF_SUMMARY_FIELDS[0]} — what this session did and where it left the work:`,
+    input.context ?? `Unavailable: ${input.contextError ?? "no session context was returned."}`,
+    "",
+    `${HANDOFF_SUMMARY_FIELDS[1]} — what was read or changed, with scope:`,
+    ...files,
+    "",
+    `${HANDOFF_SUMMARY_FIELDS[2]} — the commands run and their results:`,
+    "Not captured in this handover; run the checks this work needs and record the results.",
+    "",
+    `${HANDOFF_SUMMARY_FIELDS[3]} — what is uncertain or unverified:`,
+    "This summary was assembled from session context and VCS state; it does not prove that any check passed.",
+    "",
+    `${HANDOFF_SUMMARY_FIELDS[4]} — the next concrete action:`,
+    `Continue with: ${input.focus}. Re-read the Outcome section and verify the working copy before changing it.`,
+  ]
+  if (input.diff || input.diffError) {
+    sections.push("", "Current diff (raw evidence):", input.diff ?? `Unavailable: ${input.diffError}`)
+  }
+  return sections.join("\n")
+}
+
 export async function runCommand(
   context: Context,
   options: Parameters<typeof commandDefinitions>[0],
@@ -52,7 +122,15 @@ export async function runCommand(
   if (!spec) return
 
   if (spec.requiresArgument && !args) {
-    await emitStatus(context, input.sessionID, `/${name} requires an argument.`)
+    await emitStatus(
+      context,
+      input.sessionID,
+      statusMessage({
+        happened: `/${name} needs an argument, so nothing ran.`,
+        means: "No work was started and nothing changed.",
+        next: `Run /${name} with the argument it needs.`,
+      }),
+    )
     return
   }
 
@@ -87,7 +165,15 @@ export async function runCommand(
   if (gate) {
     const decision = await gate.allowDispatch(input.sessionID, "command")
     if (!decision.allow) {
-      await emitStatus(context, input.sessionID, `Dispatch blocked by configured controls: ${decision.reason}`)
+      await emitStatus(
+        context,
+        input.sessionID,
+        statusMessage({
+          happened: `Dispatch blocked by configured controls: ${decision.reason}`,
+          means: "The command was not delivered, so no new work started.",
+          next: "Inspect the controls with /gates or orchestrator_observability_get, then retry.",
+        }),
+      )
       return
     }
   }
@@ -151,16 +237,16 @@ function rebuildSkills(skills: readonly SkillAttachmentLike[]): Array<{ id: stri
 }
 
 async function runHandover(context: Context, sessionID: string, focus: string): Promise<void> {
-  const sections: string[] = ["# OpenCode Orchestrator Handover", `Focus: ${redact(focus.trim() || "general continuation")}`]
+  const summary: HandoverSummaryInput = { focus: redact(focus.trim() || "general continuation") }
   try {
     const history = await context.session.context({ sessionID })
     const messages = arrayData(history)
       .map(messageText)
       .filter((text): text is string => Boolean(text))
       .slice(-8)
-    if (messages.length > 0) sections.push("## Recent session context", redact(messages.join("\n\n")).slice(0, 8_000))
+    if (messages.length > 0) summary.context = redact(messages.join("\n\n")).slice(0, 8_000)
   } catch (error) {
-    sections.push(`## Session context\nUnavailable: ${redact(errorMessage(error))}`)
+    summary.contextError = redact(errorMessage(error))
   }
 
   const vcs = context.vcs
@@ -168,13 +254,12 @@ async function runHandover(context: Context, sessionID: string, focus: string): 
   const location = { location: { directory: sessionRoot.directory, workspace: sessionRoot.workspaceID } }
   try {
     const status = await vcs.status(location)
-    const files = arrayData(status).map((item) => {
+    summary.files = arrayData(status).map((item) => {
       const value = asRecord(item)
       return value ? `${value.status ?? "changed"} ${value.file ?? "unknown"}` : undefined
-    }).filter((value): value is string => Boolean(value))
-    sections.push("## VCS status", files.length > 0 ? redact(files.join("\n")) : "Working copy is clean.")
+    }).filter((value): value is string => Boolean(value)).map((value) => redact(value))
   } catch (error) {
-    sections.push(`## VCS status\nUnavailable: ${redact(errorMessage(error))}`)
+    summary.filesError = redact(errorMessage(error))
   }
   try {
     const diff = await vcs.diff({ ...location, mode: "working", context: 3 })
@@ -182,11 +267,11 @@ async function runHandover(context: Context, sessionID: string, focus: string): 
       const value = asRecord(item)
       return value ? `${value.file ?? "unknown"}\n${value.patch ?? ""}` : undefined
     }).filter((value): value is string => Boolean(value))
-    if (patches.length > 0) sections.push("## Current diff", redact(patches.join("\n\n")).slice(0, 12_000))
+    if (patches.length > 0) summary.diff = redact(patches.join("\n\n")).slice(0, 12_000)
   } catch (error) {
-    sections.push(`## Current diff\nUnavailable: ${redact(errorMessage(error))}`)
+    summary.diffError = redact(errorMessage(error))
   }
-  await emitStatus(context, sessionID, redact(sections.join("\n\n")).slice(0, 24_000))
+  await emitStatus(context, sessionID, formatHandoverSummary(summary).slice(0, 24_000))
 }
 
 // Resolve the session's *current* location so post-move commands operate where
@@ -233,7 +318,15 @@ async function polishScope(context: Context, args: string, sessionID: string): P
       .filter(Boolean)
     const safeScopes = await Promise.all(scopes.map((scope) => isSafeProjectPath(sessionRoot.directory, scope)))
     if (scopes.length === 0 || scopes.some((scope, index) => scope.startsWith("--") || !safeScopes[index])) {
-      await emitStatus(context, sessionID, "Polish scope must contain only relative paths inside the current project.")
+      await emitStatus(
+        context,
+        sessionID,
+        statusMessage({
+          happened: "Polish scope must contain only relative paths inside the current project.",
+          means: "Nothing ran, so no file was changed.",
+          next: "Re-run /polish with one or more relative paths inside the project.",
+        }),
+      )
       return undefined
     }
     return `Explicit scope: ${scopes.join(", ")}`
@@ -245,7 +338,15 @@ async function polishScope(context: Context, args: string, sessionID: string): P
   } catch {
     // The model can still inspect the default working-copy scope.
   }
-  await emitStatus(context, sessionID, "No changed files were found for /polish.")
+  await emitStatus(
+    context,
+    sessionID,
+    statusMessage({
+      happened: "No changed files were found for /polish.",
+      means: "There is nothing to polish in the working copy.",
+      next: "Pass an explicit relative scope, or make a change first.",
+    }),
+  )
   return undefined
 }
 
@@ -287,7 +388,15 @@ async function validateRestructure(
       continue
     }
     if (token.startsWith("--")) {
-      await emitStatus(context, sessionID, "Usage: /restructure <target> [--scope=file|module|project] [--risk=conservative|broad]")
+      await emitStatus(
+        context,
+        sessionID,
+        statusMessage({
+          happened: "/restructure received an unknown option, so nothing ran.",
+          means: "No restructuring prompt was delivered and no file was changed.",
+          next: "Usage: /restructure <target> [--scope=file|module|project] [--risk=conservative|broad]",
+        }),
+      )
       return undefined
     }
     target.push(token)
@@ -295,27 +404,67 @@ async function validateRestructure(
 
   const targetText = target.join(" ")
   if (!targetText || !["file", "module", "project"].includes(scope) || !["conservative", "broad"].includes(risk)) {
-    await emitStatus(context, sessionID, "Usage: /restructure <target> [--scope=file|module|project] [--risk=conservative|broad]")
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: "/restructure received options that do not match the target, so nothing ran.",
+        means: "No restructuring prompt was delivered and no file was changed.",
+        next: "Usage: /restructure <target> [--scope=file|module|project] [--risk=conservative|broad]",
+      }),
+    )
     return undefined
   }
   if (targetText.includes("\0") || isAbsolute(targetText)) {
-    await emitStatus(context, sessionID, "Restructure target must be a relative path inside the current project.")
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: "Restructure target must be a relative path inside the current project.",
+        means: "Nothing ran, so no file was changed.",
+        next: "Re-run /restructure with a relative path inside the project.",
+      }),
+    )
     return undefined
   }
   const projectRootTarget = scope === "project" && (targetText === "." || targetText === "project")
   const resolvedTarget = resolve(sessionRoot.directory, projectRootTarget ? "." : targetText)
   const remainder = relative(sessionRoot.directory, resolvedTarget)
   if ((!remainder && !projectRootTarget) || remainder === ".." || remainder.startsWith(`..${pathSeparator()}`) || isAbsolute(remainder)) {
-    await emitStatus(context, sessionID, "Restructure target must be a relative path inside the current project.")
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: "Restructure target must be a relative path inside the current project.",
+        means: "Nothing ran, so no file was changed.",
+        next: "Re-run /restructure with a relative path inside the project.",
+      }),
+    )
     return undefined
   }
   const targetInfo = await stat(resolvedTarget).catch(() => undefined)
   if (!targetInfo || (scope === "file" && !targetInfo.isFile())) {
-    await emitStatus(context, sessionID, "Restructure target must exist and match the selected scope.")
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: "Restructure target must exist and match the selected scope.",
+        means: "Nothing ran, so no file was changed.",
+        next: "Check the path, then retry with --scope=file, --scope=module, or --scope=project.",
+      }),
+    )
     return undefined
   }
   if (!(await isSafeProjectPath(sessionRoot.directory, projectRootTarget ? "." : targetText))) {
-    await emitStatus(context, sessionID, "Restructure target must remain inside the current project.")
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: "Restructure target must remain inside the current project.",
+        means: "Nothing ran, so no file was changed.",
+        next: "Re-run /restructure with a target inside the project.",
+      }),
+    )
     return undefined
   }
   return `Target: ${targetText}\nScope: ${scope}\nRisk: ${risk}`
@@ -350,20 +499,56 @@ async function mutateGoalCommand(
   const current = await readGoal(context.storage, key)
 
   if (!args) {
-    await emitStatus(context, sessionID, current ? JSON.stringify(current, null, 2) : "No active orchestration goal.")
+    if (!current) {
+      await emitStatus(
+        context,
+        sessionID,
+        statusMessage({
+          happened: "No orchestration goal is set for this session.",
+          means: "Nothing is tracking an objective, so automatic continuation will not run.",
+          next: "Set one with /goal <objective>.",
+        }),
+      )
+      return
+    }
+    await emitStatus(
+      context,
+      sessionID,
+      `${statusMessage({
+        happened: "This is the current orchestration goal record.",
+        means: "It is the stored goal state for this session.",
+        next: "Pause it with /goal pause, or clear it with /goal clear.",
+      })}\n\nGoal record:\n${JSON.stringify(current, null, 2)}`,
+    )
     return
   }
 
   if (args === "clear") {
     await context.storage.remove(key)
     await context.storage.remove(stopStorageKey(context.location, sessionID))
-    await emitStatus(context, sessionID, "Orchestration goal cleared.")
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: "Orchestration goal cleared.",
+        means: "The goal and its stop flag were removed for this session.",
+        next: "Set a new goal with /goal <objective> when you are ready.",
+      }),
+    )
     return
   }
 
   if (args === "pause" || args === "resume") {
     if (!current) {
-      await emitStatus(context, sessionID, "No active orchestration goal.")
+      await emitStatus(
+        context,
+        sessionID,
+        statusMessage({
+          happened: "No orchestration goal is set for this session.",
+          means: "There is nothing to pause or resume.",
+          next: "Set one with /goal <objective>.",
+        }),
+      )
       return
     }
     const updated: GoalRecord = {
@@ -377,14 +562,32 @@ async function mutateGoalCommand(
     }
     await context.storage.set(key, updated)
     if (args === "resume") await context.storage.remove(stopStorageKey(context.location, sessionID))
-    await emitStatus(context, sessionID, `Orchestration goal ${args}d.`)
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: `Orchestration goal ${args}d.`,
+        means: args === "pause"
+          ? "Automatic continuation is stopped until you resume it."
+          : "Automatic continuation may continue the objective again.",
+        next: args === "pause" ? "Resume with /goal resume." : "Pause with /goal pause.",
+      }),
+    )
     return
   }
 
   const goal = newGoal(sessionID, args)
   await context.storage.set(key, goal)
   await context.storage.remove(stopStorageKey(context.location, sessionID))
-  await emitStatus(context, sessionID, `Orchestration goal set:\n${goal.objective}`)
+  await emitStatus(
+    context,
+    sessionID,
+    `${statusMessage({
+      happened: "Orchestration goal set.",
+      means: "The orchestrator will keep working toward this objective automatically.",
+      next: "Pause it with /goal pause, or clear it with /goal clear.",
+    })}\n\nObjective: ${goal.objective}`,
+  )
 }
 
 async function runHaltCommand(
@@ -402,7 +605,15 @@ async function mutateHaltCommand(
 ): Promise<void> {
   const target = args || "all"
   if (target !== "goal" && target !== "run" && target !== "all") {
-    await emitStatus(context, sessionID, "Usage: /halt [goal|run|all]")
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: "/halt did not run because the target was not recognized.",
+        means: "No goal, plan run, or automation state was changed.",
+        next: "Usage: /halt [goal|run|all]",
+      }),
+    )
     return
   }
 
@@ -437,7 +648,15 @@ async function mutateHaltCommand(
     })
     messages.push("automatic continuation stopped")
   }
-  await emitStatus(context, sessionID, `Automation halted (${messages.join(", ")}).`)
+  await emitStatus(
+    context,
+    sessionID,
+    statusMessage({
+      happened: `Automation halted (${messages.join(", ")}).`,
+      means: "Automatic continuation will not start new work for this session.",
+      next: "Resume with /goal resume or /run-plan when you are ready.",
+    }),
+  )
 }
 
 /**
@@ -469,7 +688,15 @@ async function mutatePublishCommand(
 ): Promise<void> {
   const verb = args.trim().split(/\s+/).filter(Boolean)[0] ?? "status"
   if (verb !== "status" && verb !== "enable" && verb !== "disable") {
-    await emitStatus(context, sessionID, "Usage: /publish [status|enable|disable]")
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: "/publish did not run because the action was not recognized.",
+        means: "The durable publication policy was not changed.",
+        next: "Usage: /publish [status|enable|disable]",
+      }),
+    )
     return
   }
 
@@ -484,8 +711,11 @@ async function mutatePublishCommand(
     await emitStatus(
       context,
       sessionID,
-      "/publish enable refused: the publication capability is disabled by plugin configuration (publish.enabled: false). " +
-        "An operator must set publish.enabled: true in the plugin options first; the durable project policy cannot be enabled while the capability is off.",
+      statusMessage({
+        happened: "/publish enable refused: the publication capability is disabled by plugin configuration (publish.enabled: false).",
+        means: "The durable project policy cannot be enabled while the capability is off, so nothing changed.",
+        next: "An operator must set publish.enabled: true in the plugin options first.",
+      }),
     )
     return
   }
@@ -493,31 +723,52 @@ async function mutatePublishCommand(
   const toggle = await setPublicationEnabled(context.storage, context.location, sessionID, enabling)
   if (!toggle.changed && !enabling && !toggle.record.enabled) {
     // Disabling an already-disabled record: still report the policy truth.
-    await emitStatus(context, sessionID, `Publication is already disabled for project "${toggle.record.projectID}"; no change written.`)
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: `Publication is already disabled for project "${toggle.record.projectID}"; no change written.`,
+        means: "The saved policy already matches your request.",
+        next: "Run /publish status to see the current policy.",
+      }),
+    )
     return
   }
   if (!toggle.changed) {
-    await emitStatus(context, sessionID, `Publication is already enabled for project "${toggle.record.projectID}"; no change written.`)
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: `Publication is already enabled for project "${toggle.record.projectID}"; no change written.`,
+        means: "The saved policy already authorizes the publication steps.",
+        next: "Run /publish status to see the exact capabilities.",
+      }),
+    )
     return
   }
   if (enabling) {
     await emitStatus(
       context,
       sessionID,
-      `Publication enabled for project "${toggle.record.projectID}" (durable policy updated; authorized capabilities: ${toggle.record.capabilities.join(", ")}). ` +
-        "This is a capability toggle, not caller authentication: it authorizes autonomous push, draft PR creation, ready transition, verified " +
-        "approval after internal review, and merge after a fresh conflict-free view at the exact approved revision — never issue creation, which " +
-        "still requires github.allow_mutations plus confirm: true. No Git or GitHub mutation happened, and the static github/worktree gates are unchanged. " +
-        "Use /gates to narrow any step for the current session only.",
+      `${statusMessage({
+        happened: `Publication enabled for project "${toggle.record.projectID}" (durable policy updated).`,
+        means: "The orchestrator may now push, open a draft PR, mark it ready, approve after internal review, and merge after every merge check passes.",
+        next: "Use /gates to narrow any step for this session only. Issue creation is never authorized.",
+      })}\n\nDetails:\n` +
+        `- authorized capabilities: ${toggle.record.capabilities.join(", ")}.\n` +
+        "- This is a capability toggle, not caller authentication.\n" +
+        "- No Git or GitHub mutation happened, and the static github/worktree gates are unchanged.",
     )
     return
   }
   await emitStatus(
     context,
     sessionID,
-    `Publication disabled for project "${toggle.record.projectID}" (durable policy updated; authorized capabilities: none). ` +
-      "Future autonomous push, draft PR creation, ready transition, approval, and merge steps are no longer authorized by this capability. " +
-      "No Git or GitHub mutation happened.",
+    `${statusMessage({
+      happened: `Publication disabled for project "${toggle.record.projectID}" (durable policy updated; authorized capabilities: none).`,
+      means: "Future push, draft PR creation, ready transition, approval, and merge steps are no longer authorized by this capability.",
+      next: "Run /publish enable to authorize them again.",
+    })}\n\nNo Git or GitHub mutation happened.`,
   )
 }
 
@@ -532,13 +783,20 @@ function formatPublicationStatus(status: PublicationStatusView): string {
     : "Authorized capabilities (when enabled): push, pr-draft-create, pr-ready-transition, approve-after-review, merge."
   return [
     `Publication capability — project "${status.projectID}"`,
-    `Durable policy: ${state}${changed}`,
-    capabilities,
-    "Never authorized: issue creation (still requires the static github gates plus confirm: true).",
-    `Static gates: publish.enabled=${status.config.enabled}; github.enabled=${status.staticGates.githubEnabled}; ` +
+    statusMessage({
+      happened: `Durable policy: ${state}${changed}.`,
+      means: durable.enabled
+        ? "The orchestrator may run the authorized publication steps without asking again."
+        : "The orchestrator may not run autonomous publication steps for this project.",
+      next: durable.enabled ? "Use /gates to narrow a step for this session." : "Run /publish enable to authorize those steps.",
+    }),
+    "Details:",
+    `- ${capabilities}`,
+    "- Never authorized: issue creation (still requires the static github gates plus confirm: true).",
+    `- Static gates: publish.enabled=${status.config.enabled}; github.enabled=${status.staticGates.githubEnabled}; ` +
       `github.allow_mutations=${status.staticGates.githubAllowMutations}; worktree.enabled=${status.staticGates.worktreeEnabled}; ` +
       `worktree.allow_mutations=${status.staticGates.worktreeAllowMutations}.`,
-    "Note: /publish toggles authorization policy only. It is not caller authentication, it does not prove a human invoked it, and it never mutates Git or GitHub. Session-level narrowing is handled separately by /gates.",
+    "- Note: /publish toggles authorization policy only. It is not caller authentication, it does not prove a human invoked it, and it never mutates Git or GitHub. Session-level narrowing is handled separately by /gates.",
   ].join("\n")
 }
 
@@ -578,7 +836,15 @@ async function mutateGatesCommand(
   if (value === "reset") {
     await clearGates(context.storage, sessionID)
     const statuses = await gateStatuses(context.storage, context.location, sessionID, options)
-    await emitStatus(context, sessionID, `Session gates reset to the project ceiling.\n\n${formatGatesStatus(sessionID, statuses)}`)
+    await emitStatus(
+      context,
+      sessionID,
+      `${statusMessage({
+        happened: "Session gates reset to the project ceiling.",
+        means: "Session-only narrowing was removed; the project ceiling still applies.",
+        next: "Run /gates <gate>=off to narrow a step again.",
+      })}\n\n${formatGatesStatus(sessionID, statuses)}`,
+    )
     return
   }
 
@@ -586,7 +852,15 @@ async function mutateGatesCommand(
   const gate = separator > 0 ? value.slice(0, separator).trim() : ""
   const verb = separator > 0 ? value.slice(separator + 1).trim().toLowerCase() : ""
   if (!gate || !isSessionGate(gate) || (verb !== "on" && verb !== "off")) {
-    await emitStatus(context, sessionID, `Usage: /gates [status|reset|<gate>=on|off]\nGates: ${SESSION_GATES.join(", ")}`)
+    await emitStatus(
+      context,
+      sessionID,
+      `${statusMessage({
+        happened: "/gates did not run because the request was not understood.",
+        means: "No session gate was changed.",
+        next: "Usage: /gates [status|reset|<gate>=on|off]",
+      })}\nGates: ${SESSION_GATES.join(", ")}`,
+    )
     return
   }
 
@@ -595,24 +869,40 @@ async function mutateGatesCommand(
   const statuses = await gateStatuses(context.storage, context.location, sessionID, options)
   const status = statuses.find((candidate) => candidate.gate === gate)
   const confirmation = status ? gateChangeMessage(status) : `'${gate}' updated for this session`
-  await emitStatus(context, sessionID, `${confirmation}\n\n${formatGatesStatus(sessionID, statuses)}`)
+  await emitStatus(
+    context,
+    sessionID,
+    `${statusMessage({
+      happened: `${confirmation}.`,
+      means: disabled
+        ? "That step is now off for this session only; the project ceiling is unchanged."
+        : "This session now follows the project ceiling for that step.",
+      next: "Run /gates to see every gate for this session.",
+    })}\n\n${formatGatesStatus(sessionID, statuses)}`,
+  )
 }
 
 function formatGatesStatus(sessionID: string, statuses: readonly GateStatus[]): string {
   const lines = statuses.map((status) => {
     if (status.enabled) {
       const source = status.ceilingSource === "project" ? "project capability" : "config"
-      return `[on ] ${status.gate} — allowed by the ${source}`
+      return `- [on ] ${status.gate} — allowed by the ${source}`
     }
     if (status.sessionDisabled) {
-      return `[off] ${status.gate} — disabled for this session; re-enable with /gates ${status.gate}=on`
+      return `- [off] ${status.gate} — disabled for this session; re-enable with /gates ${status.gate}=on`
     }
-    return `[off] ${status.gate} — unavailable: ${status.ceilingReason ?? "the ceiling is off"}`
+    return `- [off] ${status.gate} — unavailable: ${status.ceilingReason ?? "the ceiling is off"}`
   })
   return [
     `Session gates — ${sessionID}`,
+    statusMessage({
+      happened: "This is the effective gate state for this session.",
+      means: "Gates are safety steps, and each one can be narrowed for this session only.",
+      next: "Run /gates <gate>=off to narrow one, or /gates reset to follow the project ceiling.",
+    }),
+    "Steps:",
     ...lines,
-    "Session gates can only narrow the project/config ceiling and can never widen it; they do not survive into other sessions.",
+    "Gates can only narrow the project ceiling. They can never widen it, and they do not carry into other sessions.",
   ].join("\n")
 }
 
@@ -632,11 +922,17 @@ async function mutateStartPlanRun(context: Context, sessionID: string, plan: str
   const sessionRoot = await sessionLocation(context, sessionID)
   const selected = await selectPlan(sessionRoot.directory, plan || resumable)
   if (!selected) {
-    if (!plan && resumable) {
-      await emitStatus(context, sessionID, "The stored plan run could not be resumed; specify one plan from .orchestrator/plans/.")
-    } else {
-      await emitStatus(context, sessionID, "Specify one plan from .orchestrator/plans/; no sole incomplete plan was available.")
-    }
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: !plan && resumable
+          ? "The stored plan run could not be resumed; specify one plan from .orchestrator/plans/."
+          : "Specify one plan from .orchestrator/plans/; no sole incomplete plan was available.",
+        means: "No plan run was started or changed.",
+        next: "Run /run-plan <plan> with an explicit plan name.",
+      }),
+    )
     return undefined
   }
   const now = Date.now()
@@ -660,7 +956,15 @@ async function pausePlanRunOnFailure(context: Context, sessionID: string, select
     // have replaced or completed it since selection.
     if (!run || run.status !== "active" || run.plan !== selection.relativePath) return
     await context.storage.set(key, { ...run, status: "paused", updatedAt: Date.now() })
-    await emitStatus(context, sessionID, `Plan run paused; ${redact(reason)}`)
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: `Plan run paused; ${redact(reason)}`,
+        means: "The plan run will not continue automatically until it is resumed.",
+        next: "Fix the failure, then run /run-plan to resume it.",
+      }),
+    )
   })
 }
 
@@ -802,7 +1106,15 @@ async function runWorkerModelsCommand(
   workerModels: WorkerModelRuntime | undefined,
 ): Promise<void> {
   if (!workerModels) {
-    await emitStatus(context, sessionID, "Worker model selection is unavailable in this plugin instance.")
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: "Worker model selection is unavailable in this plugin instance.",
+        means: "No worker model override can be read or changed here.",
+        next: "Check the plugin configuration and reload the session.",
+      }),
+    )
     return
   }
 
@@ -816,13 +1128,29 @@ async function runWorkerModelsCommand(
         const effective = status.effective ? formatModelReference(status.effective) : configured
         return `- ${status.agentID}: ${selected} (configured: ${configured}; effective: ${effective})`
       })
-      await emitStatus(context, sessionID, `Worker models:\n${lines.join("\n")}`)
+      await emitStatus(
+        context,
+        sessionID,
+        `${statusMessage({
+          happened: `Worker models for ${statuses.length} roles.`,
+          means: "Each role uses its override, its configured model, or the OpenCode fallback.",
+          next: "Set one with /worker-models <agent>=<provider>/<model>.",
+        })}\n\n${lines.join("\n")}`,
+      )
       return
     }
 
     if (assignment.kind === "reset") {
       await workerModels.reset()
-      await emitStatus(context, sessionID, "Worker model overrides reset; configured agent models apply to future children.")
+      await emitStatus(
+        context,
+        sessionID,
+        statusMessage({
+          happened: "Worker model overrides reset; configured agent models apply to future children.",
+          means: "Children spawned from now on use their configured models.",
+          next: "Set an override again with /worker-models <agent>=<provider>/<model>.",
+        }),
+      )
       return
     }
 
@@ -831,17 +1159,43 @@ async function runWorkerModelsCommand(
       await emitStatus(
         context,
         sessionID,
-        `${assignment.agentID} → ${formatModelReference(assignment.model)}; applies to children spawned after this point.`,
+        statusMessage({
+          happened: `${assignment.agentID} → ${formatModelReference(assignment.model)}; applies to children spawned after this point.`,
+          means: "Children spawned after this point use the selected model.",
+          next: "Revert with /worker-models <agent>=default.",
+        }),
       )
     } else {
       await workerModels.clear(assignment.agentID)
-      await emitStatus(context, sessionID, `${assignment.agentID} reset to its configured model for future children.`)
+      await emitStatus(
+        context,
+        sessionID,
+        statusMessage({
+          happened: `${assignment.agentID} reset to its configured model for future children.`,
+          means: "Children spawned after this point use the configured model again.",
+          next: "Set an override again with /worker-models <agent>=<provider>/<model>.",
+        }),
+      )
     }
   } catch (error) {
-    await emitStatus(context, sessionID, `Worker model selection failed: ${errorMessage(error)}`)
+    await emitStatus(
+      context,
+      sessionID,
+      statusMessage({
+        happened: `Worker model selection failed: ${errorMessage(error)}`,
+        means: "No worker model override was changed.",
+        next: "Check the agent and model names, then retry.",
+      }),
+    )
   }
 }
 
+/**
+ * Transport for user-facing command output. Prose status messages must be
+ * rendered through `statusMessage` so the plain-language template holds;
+ * long-form reports (status listings, handover, model lists) pass their own
+ * structured text.
+ */
 async function emitStatus(context: Context, sessionID: string, text: string): Promise<void> {
   try {
     await context.session.synthetic({

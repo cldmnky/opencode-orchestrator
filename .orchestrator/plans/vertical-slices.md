@@ -294,8 +294,10 @@ authorizes Phase 2 (optional decomposition configuration) on top of the
 prompt-only MVP as a prompt-preference-only change; it does not revise any
 evidence above, does not convert the fail-closed threshold 4 result into a
 pass, and does not close the telemetry gap. The override is a recorded human
-authorization, not a met go criterion. Phases 3–4 remain gated on their own
-preconditions and are not authorized by it.
+authorization, not a met go criterion. The same recorded human authorization
+was later extended by explicit instruction to Phase 3 (recorded in the Phase 3
+section); Phase 4 remains gated on its own preconditions and is not authorized
+by it. No evidence above is revised.
 
 Revisit only if: a live-host executed run collects real baseline/after
 transcripts and runtime verification (closing threshold 4 and the telemetry
@@ -312,8 +314,9 @@ this Phase 2 work while every recorded limitation stands. The override is a
 recorded human authorization, not a met go criterion: threshold 4 remains
 fail-closed (no executed run evidences runtime completion or verification),
 the live-host telemetry probe has still not run, and the runtime efficacy of
-the strict strategy remains unproven. Phases 3–4 are not authorized by this
-override and remain gated on their own preconditions.
+the strict strategy remains unproven. Phase 3 later proceeded under the same
+recorded override extended by explicit instruction (Phase 3 section); Phase 4
+remains gated on its own preconditions and is not authorized by this override.
 
 Only if Checkpoint A shows users need an explicit strategy override.
 Optional strict config (e.g. a strategy key defaulting to current MVP
@@ -357,17 +360,152 @@ tokens/cost/latency/steps metrics remain `not-collected`, and this phase adds
 prompt text only. The strict strategy never bypasses serialization, scope
 validation, review, worktree lifecycle, or publication preconditions.
 
-## Phase 3 — Optional D4 coherence signal (gated, versioned)
+## Phase 3 — Optional D4 coherence signal (complete, additive v2, human override)
 
-Only if the rubric proves repeatable and a machine-readable signal
-demonstrably improves classification. Never mutate D4 v1: additive v2
-artifact + separate classifier/tool surface, coordinated updates to
-pinned guidance text and tests, D2 flow-through question named upfront.
-Verification: v1 corpus unchanged, v2 cases behave (cohesive ⇒ slice
+**Status: complete (2026-09-15) under the recorded explicit human override.**
+The user's recorded "I approve, go ahead" authorization was extended by
+explicit instruction to this phase; it is a recorded human authorization, not
+a met go criterion. Phase 3's own precondition — rubric repeatability plus a
+machine-readable signal that demonstrably improves classification — is **not**
+demonstrated by running evidence, the live-host telemetry probe has still not
+run, and the signal's runtime efficacy remains unproven. Checkpoint A evidence
+is unchanged, threshold 4 stays fail-closed, and Phase 4 remains gated and
+unauthorized (this phase does not start it).
+
+**D2 flow-through question (named upfront, required by this phase):** does the
+additive D4 v2 coherence signal add or change any D2 v1 handoff field,
+`reviewState` value, or handoff-validation behavior? **Answer: no.** D2 v1
+stays frozen (`src/core/contracts.ts`, `docs/phase-1/d2-handoff*` untouched):
+the signal adds no D2 field, never replaces or writes `reviewState`, and never
+changes handoff validation.
+
+**Implementation (additive v2 only; D4 v1 and D2 v1 behavior unchanged).** New
+separate classifier surface `src/core/d4v2.ts`:
+`classifyTaskComplexityV2` accepts the strict v1 eight-dimension input (the v1
+schema is imported and extended read-only, never edited) plus the explicit
+coherence question (`coupled-outcome | independent | overlap | unknown`); it
+calls the unchanged v1 `classifyTaskComplexity` and embeds its result verbatim
+under `v1`. Deterministic additive output: `cohesive-slice` (coupled outcome),
+`parallel-candidate` (independent — only after the parent verifies exact
+disjoint write scopes from repository facts), `serialized` (overlap).
+Fail-closed: any unknown v1 dimension or an omitted/`null`/`unknown` coherence
+answer yields the collect-facts-compatible result (`collect-facts` /
+`incomplete-facts` / `sliceMetadata: null` / `missingFacts`), and an
+`independent` answer that contradicts `shared_mutable_state=true` serializes.
+Invalid input is rejected with a deterministic error. No scheduler, no gate,
+no publication change, no isolation claim, and every result is `advisory:
+true`.
+
+**Wiring (prompt-preference only).** `D4_V2_COHERENCE_GUIDANCE`
+(`src/core/policy.ts`) is appended once after the byte-identical Phase 1
+`VERTICAL_SLICE_GUIDANCE` in the orchestrator system, worker system, and
+continuation prompts; command prompts are byte-identical (no per-dispatch
+tax). No new tool, command, config key, permission action, or runtime gate is
+registered — `src/core/config.ts` is deliberately unchanged because no config
+key was needed — and the pinned D2/slice safety lines stay verbatim.
+
+**Files:** `src/core/d4v2.ts` (new), `src/core/policy.ts`,
+`src/core/prompts.ts`, `README.md`,
+`docs/phase-1/d4-v2-evaluation-template.json` (new: frozen v2 contract plus
+evaluation template with no results), `test/unit/d4v2.test.ts` (new),
+`test/unit/d4.test.ts`, `test/unit/core.test.ts`, and this plan ledger.
+
+**Original requirement (unchanged):** only if the rubric proves repeatable and
+a machine-readable signal demonstrably improves classification. Never mutate
+D4 v1: additive v2 artifact + separate classifier/tool surface, coordinated
+updates to pinned guidance text and tests, D2 flow-through question named
+upfront. Verification: v1 corpus unchanged, v2 cases behave (cohesive ⇒ slice
 metadata, independent ⇒ parallel candidate, overlap ⇒ serialized,
 null ⇒ collect-facts, invalid rejected), full suite and build green.
 
+**Verification (2026-09-15):** see the Phase 3 evidence ledger below.
+
+**Limitations:** runtime efficacy is unproven — no live-host run occurred,
+tokens / cost / latency / steps remain `not-collected` and are never
+estimated, and the phase adds one in-repo advisory classifier plus prompt text
+only. The signal never bypasses serialization, scope validation, review,
+worktree lifecycle, or publication preconditions, and it is not registered as
+a host tool.
+
+### Phase 3 evidence ledger (recorded 2026-09-15)
+
+Environment: this slice's worktree on top of `main` `2cfbf1f` (the Phase 2
+merge); pinned `@opencode/plugin` / `@opencode/sdk` `0.0.0-beta-19507`; bun
+1.3.3; `bun install` run in the worktree before verification. All commands were
+run from the worktree root.
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `bun test test/unit/d4.test.ts` | 31 pass / 0 fail (28 before this phase + 3 v1 freeze guards) |
+| 2 | `bun test test/unit/d4v2.test.ts` | 19 pass / 0 fail (new suite) |
+| 3 | `bun test test/unit/core.test.ts` | 58 pass / 0 fail (57 before + 1 additive-guidance coordination test) |
+| 4 | `bun run typecheck` | pass (`tsc --noEmit`, exit 0) |
+| 5 | `bun test` | 824 pass / 1 skip / 0 fail (825 tests, 30 files) |
+| 6 | `bun run build` | pass; emitted `dist/index.js`, `dist/tui.js`, `dist/commands.js`, `dist/installer.js`, `dist/cli/index.js` |
+| 7 | `git diff --check` | clean (no whitespace errors) |
+| 8 | `git status --short` | exactly the Phase 3 scope files are modified/added; no out-of-scope file changed |
+| 9 | `bun -e "JSON.parse(await Bun.file('docs/phase-1/d4-v2-evaluation-template.json').text())"` | valid JSON |
+| 10 | before/after prompt-byte probe (`git archive HEAD` extracted tree vs this worktree, identical default options and inputs) | deltas below |
+
+Deterministic prompt byte-size deltas (UTF-8; prompts are pure functions of
+options; before = HEAD `2cfbf1f`, after = this slice):
+
+| Prompt | Before | After | Delta |
+|---|---|---|---|
+| orchestrator system | 9074 | 10080 | +1006 |
+| worker system (implementation) | 6799 | 7805 | +1006 |
+| continuation | 6052 | 7058 | +1006 |
+| command `orchestrate` (arg `scope`) | 5874 | 5874 | +0 |
+| command `goal` (arg `pause`) | 5415 | 5415 | +0 |
+| `D4_V2_COHERENCE_GUIDANCE` block | 0 (absent) | 1005 | +1005 |
+
+Each +1006 is the 1005-byte guidance block plus one joining newline; command
+prompts are byte-identical, and the before column reproduces the Phase 2
+ledger's default-column bytes exactly.
+
+Coverage in this slice:
+
+- **v1 frozen:** `test/unit/d4.test.ts` adds three freeze guards (the strict v1
+  schema/dimension keys are unchanged and still reject a `coherence` field; v1
+  corpus conformance and the documented case-006 mismatch are unchanged; a v1
+  result keeps exactly the frozen version-1 shape with no v2 fields), and
+  `test/unit/d4v2.test.ts` re-checks v1 corpus conformance with the v2 module
+  loaded.
+- **v2 cases:** `test/unit/d4v2.test.ts` — coupled-outcome ⇒ `cohesive-slice`;
+  independent ⇒ `parallel-candidate` (and `serialized` when contradicted by
+  `shared_mutable_state=true`); overlap ⇒ `serialized`; omitted/`null`/
+  `"unknown"` coherence ⇒ the collect-facts-compatible path (`collect-facts` /
+  `incomplete-facts` / null slice metadata / `missingFacts`); an unknown v1
+  dimension ⇒ the same fail-closed path; invalid input (bad coherence enum,
+  unknown fields, bad dimensions, non-object values) is rejected with a
+  deterministic error.
+- **D2 flow-through question named upfront:** the question and its
+  deterministic "No" answer are part of every v2 result (`d2FlowThrough`) and
+  of the coordinated guidance; D2 v1 files and behavior are untouched.
+- **Coordinated pinned guidance:** `test/unit/core.test.ts` asserts
+  `D4_V2_COHERENCE_GUIDANCE` appears exactly once in the orchestrator, worker,
+  and continuation prompts and never in command prompts, preserves the verbatim
+  slice safety lines next to the additive block, and adds no isolation or
+  scheduling claim; `verticalSliceGuidance()` and `VERTICAL_SLICE_GUIDANCE`
+  stay byte-identical.
+- **No new surface:** the plugin contract suite's exact tool list, the command
+  list, and the config shape are untouched and green; `src/core/config.ts` was
+  deliberately not changed because no config key was needed.
+- **Artifact:** `docs/phase-1/d4-v2-evaluation-template.json` freezes the v2
+  contract, deterministic mapping, fail-closed rules, D2 flow-through Q/A, and
+  an all-`not-collected` evaluation template; it claims no results.
+
+Limitations: no live-host run occurred; tokens / cost / latency / steps remain
+`not-collected` and are never estimated, so the coherence signal's runtime
+efficacy is unproven. The signal is advisory, is not registered as a host tool,
+and claims no filesystem isolation or concurrency enforcement.
+
 ## Phase 4 — Rollout and completion
+
+**Status: gated — not started and not authorized.** Phase 3's additive signal
+does not satisfy Phase 4's precondition (the identical corpus executed under an
+approved configuration), and this ledger records no executed run. Phase 4
+remains unstarted; it is not implemented by the Phase 3 slice.
 
 Repeat the identical corpus protocol under the approved configuration,
 compare baseline / MVP / later phases, have the review role audit slice
@@ -383,19 +521,29 @@ declined optionals recorded as declined.
 - Phase 2 adds an optional `decomposition` config key plus prompt text;
   reverting the commit (or removing the key) restores the exact Phase 1
   behavior with no state or schema migration — no D2/D4 field changed.
+- Phase 3 adds a separate advisory v2 classifier module
+  (`src/core/d4v2.ts`) plus an additive guidance block; reverting the commit
+  restores the exact Phase 2 behavior — no D4 v1 or D2 v1 field, config key,
+  tool, command, or gate changed, and no runtime behavior depends on the
+  signal.
 - D2 handoffs, plan files, review receipts, worktree records, and
   publication flows unchanged by every phase until its gate passes.
 - No phase claims filesystem isolation or runtime concurrency enforcement.
 
 ## Status
 
-**Phases 0–2 complete; Checkpoint A recorded 2026-09-15 as no-go for
+**Phases 0–3 complete; Checkpoint A recorded 2026-09-15 as no-go for
 Phases 2–4 (stop at the prompt-only MVP); the user explicitly overrode that
-gate for the next phases ("I approve, go ahead", recorded 2026-09-15), and
-Phase 2 is complete as a prompt-preference-only change. Phases 3–4 remain
-gated, unstarted, and unauthorized, and the overall plan is NOT complete.**
+gate ("I approve, go ahead", recorded 2026-09-15) and extended it by explicit
+instruction to Phase 3, and Phases 2–3 are complete as prompt-preference-only
+changes (Phase 3 adds one separate advisory v2 classifier surface plus guidance
+text). Phase 4 remains gated, unstarted, and unauthorized, and the overall plan
+is NOT complete.**
 Threshold 4 stays fail-closed, the live-host telemetry probe has still not
-run, and the runtime efficacy of the strict strategy is unproven.
+run, and the runtime efficacy of the strict strategy and of the D4 v2 coherence
+signal is unproven. The v2 precondition (rubric repeatability plus a
+demonstrably improving machine-readable signal) is not evidenced; Phase 3
+proceeded under the recorded human override only.
 
 ### Phase 0/1 evidence ledger (recorded 2026-09-15)
 
@@ -523,7 +671,10 @@ Coverage in this slice:
 Phase 2 was implemented only because the user explicitly overrode the
 Checkpoint A no-go ("I approve, go ahead", recorded 2026-09-15); each later
 phase still executes through the standard implementer → review → publication
-chain. Phases 3–4 remain unauthorized: their preconditions (rubric
-repeatability with a demonstrably improving machine-readable signal; the
-identical corpus executed under an approved configuration) are unmet, and the
-override does not substitute for them.
+chain. Phase 3 later proceeded under the same recorded override extended by
+explicit instruction (see the Phase 3 section and evidence ledger); its
+preconditions (rubric repeatability with a demonstrably improving
+machine-readable signal) remain unmet by evidence, so the override — not a met
+precondition — is what authorized it. Phase 4 remains unauthorized: its
+precondition (the identical corpus executed under an approved configuration)
+is still unmet, and the override does not substitute for it.

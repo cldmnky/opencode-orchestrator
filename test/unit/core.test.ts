@@ -9,6 +9,7 @@ import { COMMAND_NAMES, parseOptions, type OrchestratorOptions } from "../../src
 import { commandDefinitions } from "../../src/opencode-v2/commands/index.js"
 import { PEER_TOOL_PERMISSION, PUBLISH_TOOL_PERMISSION } from "../../src/core/permissions.js"
 import {
+  D4_V2_COHERENCE_GUIDANCE,
   DELEGATION_GRAPH_GUIDANCE,
   DELEGATION_RULES,
   GITHUB_LIFECYCLE_GUIDANCE,
@@ -385,6 +386,54 @@ describe("prompts", () => {
     // The disjoint-scope and fail-closed serialization rules stay verbatim.
     expect(featureSystem).toContain("Require an exact disjoint write scope from every child before any parallel write")
     expect(featureSystem).toContain("Serialize implementation tasks when file ownership overlaps")
+  })
+
+  test("additive D4 v2 coherence guidance reaches the same three prompt kinds and names the D2 flow-through question", () => {
+    // The pinned v1 slice guidance stays byte-identical: the additive v2 block
+    // is a separate constant appended after it, never a rewrite. No config
+    // option and no command prompt is added by this signal.
+    expect(VERTICAL_SLICE_GUIDANCE).not.toContain("D4 v2")
+    expect(verticalSliceGuidance()).toBe(VERTICAL_SLICE_GUIDANCE)
+    expect(verticalSliceGuidance("strict")).toBe(`${VERTICAL_SLICE_GUIDANCE}\n${STRICT_DECOMPOSITION_GUIDANCE}`)
+    expect(parseOptions({}).decomposition).toEqual({ strategy: "mvp" })
+
+    const kinds: Array<[string, string]> = [
+      ["orchestrator system", buildOrchestratorSystem(parseOptions({}))],
+      ["worker system", buildWorkerSystem("implementation")],
+      ["continuation", buildContinuationPrompt("objective", 1)],
+    ]
+    for (const [name, prompt] of kinds) {
+      expect(prompt.split(D4_V2_COHERENCE_GUIDANCE).length - 1, name).toBe(1)
+      expect(prompt, name).toContain("cohesive-slice")
+      expect(prompt, name).toContain("parallel-candidate")
+      expect(prompt, name).toContain("serializes")
+      expect(prompt, name).toContain("fail closed to collect-facts")
+      expect(prompt, name).toContain("D2 flow-through question (named upfront)")
+      expect(prompt, name).toContain("D2 v1 stays frozen")
+      expect(prompt, name).toContain("never changes handoff validation")
+      // The verbatim v1 safety lines survive next to the additive block.
+      expect(prompt, name).toContain(
+        "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
+      )
+      expect(prompt, name).toContain("A slice is a coordination unit, never a permission or filesystem boundary")
+      // Advisory only: no isolation, scheduling, or automatic-enforcement claim.
+      expect(prompt, name).not.toMatch(/scheduler|semaphore/i)
+      expect(prompt, name).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
+    }
+
+    // Strict mode keeps the strict block appended after the byte-identical v1
+    // guidance, and the additive v2 block still appears exactly once.
+    const strictSystem = buildOrchestratorSystem(parseOptions({ decomposition: { strategy: "strict" } }))
+    expect(strictSystem).toContain(STRICT_DECOMPOSITION_GUIDANCE)
+    expect(strictSystem.split(D4_V2_COHERENCE_GUIDANCE).length - 1).toBe(1)
+    expect(strictSystem.indexOf(STRICT_DECOMPOSITION_GUIDANCE)).toBe(
+      strictSystem.indexOf(VERTICAL_SLICE_GUIDANCE) + VERTICAL_SLICE_GUIDANCE.length + 1,
+    )
+
+    // The signal never taxes every dispatch: command prompts stay unchanged.
+    for (const name of COMMAND_NAMES) {
+      expect(buildCommandPrompt(name, "scope")).not.toContain(D4_V2_COHERENCE_GUIDANCE)
+    }
   })
 
   test("slice guidance never claims isolation or runtime concurrency enforcement", () => {

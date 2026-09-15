@@ -90,6 +90,27 @@ export function verticalSliceGuidance(strategy: DecompositionStrategy = "mvp"): 
 }
 
 /**
+ * Additive D4 v2 coherence-signal guidance (Phase 3), embedded verbatim after
+ * the slice guidance in the orchestrator rules, the worker system prompt, and
+ * continuation prompts. It names the explicit coherence question the eight D4
+ * v1 dimensions cannot answer, states the deterministic slice-metadata mapping
+ * (`cohesive-slice` | `parallel-candidate` | `serialized`), keeps the
+ * fail-closed collect-facts rule explicit, and answers the D2 flow-through
+ * question upfront: D2 v1 stays frozen, so the signal never adds or changes a
+ * D2 handoff field, reviewState value, or handoff-validation behavior.
+ *
+ * Prompt-preference only: it is advisory coordination guidance, never a
+ * runtime gate, and it changes no serialization, review, worktree, or
+ * publication behavior.
+ */
+export const D4_V2_COHERENCE_GUIDANCE = [
+  "Additive D4 v2 coherence signal (advisory; D4 v1 and D2 v1 are unchanged): before splitting work, answer the explicit coherence question for the candidate slice — coupled-outcome, independent, overlap, or unknown.",
+  "Deterministic slice metadata: a coupled-outcome stays one cohesive-slice; an independent slice is only a parallel-candidate after the parent verifies exact disjoint write scopes from repository facts; overlapping or unknown coupling serializes. Unknown facts fail closed to collect-facts before any slice metadata is emitted.",
+  "D2 flow-through question (named upfront): does this signal add or change any D2 handoff field, reviewState value, or handoff validation? No — D2 v1 stays frozen, and slice metadata is never written into a D2 envelope field, never replaces reviewState, and never changes handoff validation.",
+  "Slice metadata is advisory coordination guidance only: it is not filesystem isolation, not a permission boundary, and it never changes how a task is executed or published.",
+].join("\n")
+
+/**
  * Prompting policy for every orchestration participant: autonomous authorized
  * follow-through, explicit user-instruction precedence, legible inter-agent
  * messages, risk-proportionate verification, and concise evidence-led user
@@ -309,6 +330,7 @@ export function orchestrationRules(
     "Require an exact disjoint write scope from every child before any parallel write; no two children may claim the same file or area.",
     "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes.",
     verticalSliceGuidance(decompositionStrategy),
+    D4_V2_COHERENCE_GUIDANCE,
     "Separate established facts from assumptions: label every assumption explicitly and verify it before relying on it.",
     PROMPTING_POLICY_GUIDANCE,
     TOOL_AVAILABILITY_GUIDANCE,

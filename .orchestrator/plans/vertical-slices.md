@@ -299,7 +299,7 @@ with identical inputs; prompts are pure functions of options):
 | worker system (implementation) | 6050 | 6799 | +749 |
 | continuation | 5422 | 6052 | +630 |
 | command `orchestrate` | 5717 | 5874 | +157 |
-| command `run-plan` | 5325 | 5325 | +0 |
+| command `run-plan` | 5323 | 5323 | +0 |
 
 Requirement coverage in this slice:
 

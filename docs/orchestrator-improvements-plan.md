@@ -405,7 +405,7 @@ Delivered as one slice on `feat/g3-phase-0-plain-language`; no gate, tool, schem
 ### Phase A — Runtime Authority (N1, N2)
 
 - Probe the pinned host: `session.hook("prompt")` admission/retry semantics, `permission.hook("evaluate")` ordering vs configured rules, child-session `permission.rules` inheritance.
-- Ship the hook-semantics test matrix, then opt-in enforcement (N1) and the rule lifecycle around `worktree_enter` (N2).
+- Ship the hook-semantics test matrix, then opt-in enforcement (N1) and the rule lifecycle around `worktree_enter` (N2). Direction correction (2026-09-15): N2 must not install temporary rules on the parent session — the host runs tool calls concurrently, so a parent install-and-clear lifecycle has no atomic safe step and can restrict concurrent parent work. The measured safe direction is a child-only rule installed during that child's own prompt admission.
 - Exit evidence: pinned-host probe results; enforcement mode with byte-identical defaults; containment demonstrated in a contract test.
 
 **Probe progress (2026-09-15) — measurement only; N1 and N2 enforcement remain unimplemented.** The new `test/contract/phase-a-hooks.test.ts` boots the built `dist/index.js` entry in isolated `OpenCode.create` hosts next to a test-only probe plugin and records the pinned beta-19507 host's actual behavior: 5/5 tests green with 52 `expect()` calls (`bun test test/contract/phase-a-hooks.test.ts`), and the full `bun run typecheck` / `bun test` (844 pass, 1 skip, 0 fail) / `bun run build` chain green. The suite imports the built entry, so `bun run build` must run before `bun test`. Measured semantics:
@@ -417,7 +417,17 @@ Delivered as one slice on `feat/g3-phase-0-plain-language`; no gate, tool, schem
 - A child session created through the built-in `subagent` tool inherits the parent's `permission.rules` as a creation-time snapshot: the inherited `deny` blocks the tested action for the child, a child created before the rule was set is unaffected, and no rule is written to the child session itself.
 - Harness boundaries recorded for N1/N2: the public `session.create` surface (client and plugin context) silently drops `parentID`, so the probe reaches the host's `Session.create({ parentID })` inheritance path through the built-in `subagent` tool and aborts it at the first progress update — after child creation, before any prompt admission or model dispatch. No provider call is possible in the suite (all agents use unresolvable probe models; prompts are admitted with `delivery: "queue"` and `resume: false`; a throwing `http.request` hook guards every send) and every case asserts zero `model.request`/`http.request` hook events.
 
-Phase A exit evidence is not yet met: there is no N1 enforcement mode, no byte-identical-defaults proof, and no containment contract test. The probe results above are the pinned-host input those items must build on.
+**Child-admission probe (2026-09-15) — measurement only; N2 production enforcement remains unimplemented.** The same suite now carries an opt-in child-only probe mode: when armed for the subagent-created child, the child's own prompt hook installs a deny rule on that child only, inside admission. 7/7 focused tests green with 97 `expect()` calls (`bun test test/contract/phase-a-hooks.test.ts`); `bun test test/contract/embedded.test.ts test/contract/plugin.test.ts` 6/6 green (111 `expect()` calls); full `bun run typecheck` / `bun test` (846 pass, 1 skip, 0 fail) / `bun run build` green. Measured semantics:
+
+- The prompt hook is awaited inside admission: the hook's `ctx.permission.rules(...)` write completes before `session.prompt` resolves, and the child's rule set and deny decision are observable immediately after admission with no polling.
+- The newly installed rule is final for the child's tested action (deny with zero evaluation-hook events for that action), while the parent session stays `allow` for the same action before and after the child admission and keeps an empty rule set.
+- Child-only targeting is explicit and observed: an identically armed parent admission runs the same prompt hook and installs nothing.
+- Resubmitting the same admitted child message ID returns the original admission, does not re-run the installer, and adds no second inbox item.
+- A deliberate installer failure prevents admission: `session.prompt` rejects (the pinned host wraps the hook failure as `UnexpectedStatus` rather than propagating it verbatim), the child inbox stays empty, and no rule is written.
+- No provider activity in the added cases: zero `model.request`/`http.request` hook events asserted, as in the earlier matrix.
+- Direction correction (why child-only): the host can run tool calls concurrently, so a temporary parent-session rule plus a later clear has no atomic safe lifecycle and can restrict concurrent parent work. Installing on the child during the child's own admission is the measured safe point. This is still a prompt-admission permission rule — not filesystem or OS isolation — and no production code installs child rules yet.
+
+Phase A exit evidence is not yet met: there is no N1 enforcement mode, no byte-identical-defaults proof, and no N2 production enforcement or production containment acceptance proof — the added test is a measurement-only child-admission contract probe, not a containment proof. The probe results above are the pinned-host input those items must build on.
 
 ### Phase B — Worktree Migration (N3)
 

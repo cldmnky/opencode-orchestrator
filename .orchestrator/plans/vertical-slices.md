@@ -89,7 +89,9 @@ Decision rules:
 frozen date 2026-09-15): five-condition rubric, 12 hypothesis-marked corpus
 cases, per-case null/`not-collected` result slots, the binding metric
 availability table, and thresholds labeled hypotheses until the first baseline
-run. No results collected and no telemetry claimed.
+run. No results were collected at freeze time; Checkpoint A later populated the
+result slots with the first frozen-protocol run (prompt-guidance-derived; see
+Checkpoint A).
 
 **Purpose:** Make future claims falsifiable before changing any behavior.
 
@@ -210,21 +212,87 @@ bun run build
 ```
 
 Then repeat the Phase 0 corpus manually and record results in the frozen
-template.
+template. (Done 2026-09-15; recorded in the frozen template and the
+Checkpoint A section.)
 
 ## Checkpoint A — Decide whether to proceed
 
-**Status: pending manual baseline-vs-after evidence (not yet decided).** The
-frozen corpus has not been run, the manual baseline-vs-after comparison has not
-been recorded, and the live telemetry probe for tokens/cost/latency/steps has
-not run. No phase-2+ work is authorized by this checkpoint.
+**Status: decided 2026-09-15 — no-go for Phases 2–4; stop at the prompt-only
+MVP.** The manual baseline-vs-after comparison is recorded in
+`docs/phase-1/vertical-slice-evaluation-template.json` (`checkpointARun`,
+per-case `result` / `baselineResult`, `aggregateResults`, `checkpointA`). The
+live telemetry probe has still not run: tokens, cost, latency, and steps remain
+`not-collected` and are never estimated.
 
-Go beyond the MVP only if the manual baseline-vs-after comparison shows
-lower unnecessary splitting with no decline in acceptance coverage or
-verification, zero observed shared-state violations, continued parallelism
-for rubric-permitted independent work, no safety/publication regression,
-and a demonstrated user need for an explicit override. Otherwise stop at
-the prompt-only MVP.
+Go criteria (unchanged): go beyond the MVP only if the comparison shows lower
+unnecessary splitting with no decline in acceptance coverage or verification,
+zero observed shared-state violations, continued parallelism for
+rubric-permitted independent work, no safety/publication regression, and a
+demonstrated user need for an explicit override. Otherwise stop at the
+prompt-only MVP.
+
+**Method.** Manual prompt-guidance evaluation under frozen protocol v1, with no
+model execution and no transcripts: for each of the 12 frozen cases only the
+case `requests` text was rendered through the pinned prompt builders in both
+states — baseline `146f54a` extracted with `git archive` (pre-MVP parent of
+`11f92ac`) and after = this Checkpoint A worktree on top of `main` `4c6049f`
+(MVP). Environment: pinned `@opencode/plugin` / `@opencode/sdk`
+`0.0.0-beta-19507`, bun 1.3.3, default-equivalent parsed options. Baseline
+decompositions are reconstructions from pre-MVP prompt text; after
+decompositions are guidance-derived from the MVP prompt text; every produced
+slice was scored against the frozen five-condition rubric and unevidenced
+conditions fail closed. Runtime verification, review loops, and telemetry were
+not executed and are recorded as `not-collected`.
+
+**Baseline vs after (per case kind).**
+
+| Case kind | Baseline (reconstructed from 146f54a) | After (observed from MVP guidance) |
+|---|---|---|
+| Multi-file features VS-01…03 | 4/4/4 file-scoped children (12 slices, 12 dispatches); 0/12 slices pass all five conditions; 3/3 cases unnecessarily split | 1/1/1 coherent slices (3 slices, 3 dispatches); 3/3 slices pass all five conditions; 0/3 cases unnecessarily split |
+| Independent pairs VS-04…06 | 2/2/2 parallel children (6 slices); 6/6 pass; scopes verified disjoint | unchanged: 2/2/2 parallel children (6 slices); 6/6 pass |
+| Shared overlap VS-07…09 | 2/2/2 slices serialized, one child at a time (6 slices); 6/6 pass under the unchanged overlap rule | unchanged serialization (6 slices); the explicit never-concurrent and unknown-coupling-fails-closed invariant is now present; 6/6 pass |
+| Trivial controls VS-10…12 | 0 children (direct execution/direct answer) | unchanged: 0 children |
+
+**Deterministic prompt bytes** (UTF-8; prompts are pure functions of options;
+the run reproduced the Phase 0/1 ledger deltas exactly):
+
+| Prompt | Baseline | After | Delta |
+|---|---|---|---|
+| orchestrator system | 8322 | 9074 | +752 |
+| worker system (implementation) | 6050 | 6799 | +749 |
+| worker system (review) | 6019 | 6736 | +717 |
+| `VERTICAL_SLICE_GUIDANCE` block | 0 (absent) | 629 | +629 |
+| orchestration prompt, 12 cases | 9863 | 11747 | +1884 (+157/case) |
+| continuation prompt, 12 cases | 66671 | 74231 | +7560 (+630/case) |
+| command `orchestrate`, 12 cases | 70259 | 72143 | +1884 (+157/case) |
+| command `run-plan`, 12 cases | 65531 | 65531 | +0 |
+
+**Threshold evaluation (frozen hypotheses).**
+
+| # | Hypothesis | Result |
+|---|---|---|
+| 1 | ≥25% relative reduction in unnecessary splitting | Met (reconstruction basis): 3/3 → 0/3 multi-file-feature cases unnecessarily split (100% relative reduction) |
+| 2 | ≥80% cohesion on sampled multi-file outcomes | Met: baseline 0/12 → after 3/3 coherent slices (100%) |
+| 3 | Zero observed shared-state violations per case | Met as observed: 0 concurrent overlapping writes observed; no runtime execution occurred, so this is an absence of observed violations, not evidence of enforcement |
+| 4 | No regression in independent-task completion or verification | Not met (fail-closed): guidance-level comparison shows no regression (3/3 pairs parallel-permitted with disjoint scopes; acceptance ownership unchanged), but runtime completion and verification results are `not-collected` |
+| 5 | Prompt byte-size growth recorded; tokens never asserted | Met: deltas above; tokens never asserted |
+
+**Decision: no-go for Phases 2–4 (stop at the prompt-only MVP).** Threshold 4
+fails closed because no executed run evidences runtime completion or
+verification, and the go criteria additionally require a demonstrated user need
+for an explicit override, which this run does not demonstrate. Phase 3
+preconditions (rubric repeatability plus a machine-readable signal that
+demonstrably improves classification) and Phase 4 preconditions (the identical
+corpus executed under an approved configuration) are likewise unmet. The
+guidance-level comparison itself is directionally positive and no rollback of
+the MVP is indicated. Phases 2–4 remain gated, unstarted, and unauthorized; the
+overall plan remains in-progress and NOT complete.
+
+Revisit only if: a live-host executed run collects real baseline/after
+transcripts and runtime verification (closing threshold 4 and the telemetry
+gap); recorded user requests demonstrate a need for an explicit decomposition
+override; or repeated live runs show rubric repeatability and any proposed D4
+coherence signal demonstrably improves classification.
 
 ## Phase 2 — Optional decomposition configuration (gated)
 
@@ -267,9 +335,9 @@ declined optionals recorded as declined.
 
 ## Status
 
-**Phases 0 and 1 complete; Checkpoint A pending manual baseline-vs-after
-evidence; the overall plan is NOT complete.** Phases 2–4 remain gated,
-unstarted, and unauthorized.
+**Phases 0 and 1 complete; Checkpoint A recorded 2026-09-15 as no-go for
+Phases 2–4 (stop at the prompt-only MVP); the overall plan is NOT complete.**
+Phases 2–4 remain gated, unstarted, and unauthorized.
 
 ### Phase 0/1 evidence ledger (recorded 2026-09-15)
 
@@ -319,12 +387,18 @@ Requirement coverage in this slice:
   untouched). The D4 corpus is unchanged.
 - T5: `bun run typecheck && bun test && bun run build` green (rows 5–7).
 
-Pending at Checkpoint A (not evidence, and never to be estimated):
+Checkpoint A state (recorded 2026-09-15):
 
-- The manual baseline-vs-after corpus run under the frozen protocol.
-- The live-host telemetry probe for tokens / cost / latency / steps.
-- Checkpoint A's decision and any Phase 2–4 authorization.
+- The manual baseline-vs-after corpus run under the frozen protocol is recorded
+  (prompt-guidance-derived, no model execution) in
+  `docs/phase-1/vertical-slice-evaluation-template.json`; see the Checkpoint A
+  section above.
+- The live-host telemetry probe for tokens / cost / latency / steps has still
+  not run; those metrics remain `not-collected` and are never estimated.
+- Checkpoint A's decision is recorded above: no-go for Phases 2–4 (stop at the
+  prompt-only MVP). No Phase 2–4 work is authorized.
 
 No implementation beyond Phases 0–1 is authorized by this plan alone; each
 later phase must execute through the standard implementer → review →
-publication chain after Checkpoint A passes.
+publication chain after Checkpoint A passes. Checkpoint A did not pass (no-go
+recorded 2026-09-15), so no later phase is authorized by this revision.

@@ -1,5 +1,6 @@
 import { delegationGraphSummary } from "./roles.js"
 import type { RoleName } from "./roles.js"
+import type { DecompositionStrategy } from "./config.js"
 
 export type DelegationMode = "foreground" | "background"
 
@@ -63,6 +64,30 @@ export const VERTICAL_SLICE_GUIDANCE = [
   "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
   "A slice is a coordination unit, never a permission or filesystem boundary; unknown coupling fails closed and serializes, and prompt-level scopes are advisory, not isolation.",
 ].join("\n")
+
+/**
+ * Opt-in strict decomposition emphasis, appended verbatim after the base
+ * `VERTICAL_SLICE_GUIDANCE` when `decomposition.strategy === "strict"`.
+ * Prompt-preference only: it raises the emphasis on coherent end-to-end
+ * slicing and never changes enforcement. The exact disjoint-write-scope
+ * rule, the fail-closed serialization rule, aggregate review, the worktree
+ * lifecycle, and the publication preconditions all remain verbatim and are
+ * never bypassed or relaxed.
+ */
+export const STRICT_DECOMPOSITION_GUIDANCE = [
+  "Strict decomposition strategy is configured: treat the smallest coherent end-to-end slice as the default unit of work and require a stated, verified reason before splitting it into file-by-file or layer-by-layer tasks.",
+  "A split is justified only when every resulting slice has its own outcome, acceptance evidence, ownership, and no hidden dependency; when that cannot be shown, keep the work in one slice or serialize it with an explicit edge.",
+  "This preference changes emphasis only and never overrides an explicit user decision: the exact disjoint-write-scope rule, fail-closed serialization for overlapping or unknown coupling, aggregate review, the worktree lifecycle, and the publication preconditions all remain unchanged and must never be bypassed or relaxed.",
+].join("\n")
+
+/**
+ * Slice guidance for a decomposition strategy: the Phase 1 MVP text alone
+ * (default — byte-identical to the behavior before this option existed) or
+ * the same text plus the strict emphasis block. Prompt-preference only.
+ */
+export function verticalSliceGuidance(strategy: DecompositionStrategy = "mvp"): string {
+  return strategy === "strict" ? [VERTICAL_SLICE_GUIDANCE, STRICT_DECOMPOSITION_GUIDANCE].join("\n") : VERTICAL_SLICE_GUIDANCE
+}
 
 /**
  * Prompting policy for every orchestration participant: autonomous authorized
@@ -272,6 +297,7 @@ export function orchestrationRules(
   maxParallel: number,
   requireReview: boolean,
   capabilities: OrchestrationCapabilities = {},
+  decompositionStrategy: DecompositionStrategy = "mvp",
 ): string {
   return [
     `At most ${maxParallel} independent child tasks may run at once.`,
@@ -282,7 +308,7 @@ export function orchestrationRules(
     CHILD_TASK_CONTRACT,
     "Require an exact disjoint write scope from every child before any parallel write; no two children may claim the same file or area.",
     "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes.",
-    VERTICAL_SLICE_GUIDANCE,
+    verticalSliceGuidance(decompositionStrategy),
     "Separate established facts from assumptions: label every assumption explicitly and verify it before relying on it.",
     PROMPTING_POLICY_GUIDANCE,
     TOOL_AVAILABILITY_GUIDANCE,

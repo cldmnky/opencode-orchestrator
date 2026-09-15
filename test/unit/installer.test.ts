@@ -6,6 +6,7 @@ import { parse } from "jsonc-parser"
 import { inspectConfig, mergeStatus, runtimeChecks, type DoctorRunner } from "../../src/cli/doctor.js"
 import { configRelativePluginReference, installConfig, isLocalPluginReference, pluginEntryForRuntimeFile } from "../../src/cli/install.js"
 import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME } from "../../src/core/package-identity.js"
+import { STRICT_DECOMPOSITION_GUIDANCE } from "../../src/core/policy.js"
 import {
   GATES_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
@@ -830,6 +831,56 @@ describe("installer", () => {
     // The universal boundary and catalog-preflight guidance stay installed.
     expect(plainSystem).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
     expect(plainSystem).toContain("inspect the tool catalog")
+  })
+
+  test("threads the optional strict decomposition strategy into installed agent systems", () => {
+    const strictDirectory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const strictPath = join(strictDirectory, "strict.jsonc")
+    installConfig(strictPath, { decomposition: { strategy: "strict" } })
+    const strictDocument = JSON.parse(readFileSync(strictPath, "utf8")) as Record<string, any>
+    const strictOrchestrator = strictDocument.agents.orchestrator.system as string
+    expect(strictOrchestrator).toContain(STRICT_DECOMPOSITION_GUIDANCE)
+    expect(strictOrchestrator).toContain("Prefer the smallest coherent end-to-end implementation slice over the smallest file or layer")
+    expect(strictOrchestrator).toContain("Unavoidable coupling between files is resolved by sequencing or serialization")
+    expect(strictDocument.agents.implementer.system).toContain(STRICT_DECOMPOSITION_GUIDANCE)
+
+    // Omitting the key and an explicit `mvp` value install identical prompts,
+    // and the default install never carries the strict emphasis.
+    const defaultDirectory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const defaultPath = join(defaultDirectory, "default.jsonc")
+    installConfig(defaultPath, {})
+    const defaultDocument = JSON.parse(readFileSync(defaultPath, "utf8")) as Record<string, any>
+    const defaultOrchestrator = defaultDocument.agents.orchestrator.system as string
+    expect(defaultOrchestrator).not.toContain(STRICT_DECOMPOSITION_GUIDANCE)
+    const mvpDirectory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const mvpPath = join(mvpDirectory, "mvp.jsonc")
+    installConfig(mvpPath, { decomposition: { strategy: "mvp" } })
+    const mvpDocument = JSON.parse(readFileSync(mvpPath, "utf8")) as Record<string, any>
+    expect(mvpDocument.agents.orchestrator.system).toBe(defaultOrchestrator)
+
+    // Prompt-preference only: permissions and the installed surface are
+    // identical to a default install.
+    expect(strictDocument.agents.orchestrator.permissions).toEqual(defaultDocument.agents.orchestrator.permissions)
+    expect(strictDocument.agents.implementer.permissions).toEqual(defaultDocument.agents.implementer.permissions)
+  })
+
+  test("a pre-Phase-2 config without a decomposition key installs with options preserved", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "legacy.jsonc")
+    const legacyOptions = {
+      max_parallel: 2,
+      commands: { cd: true },
+      trace: { mode: "memory" },
+      review: { mode: "prompt", max_rounds: 2 },
+      clarify: { mode: "off" },
+    }
+    writeFileSync(path, JSON.stringify({ plugins: [{ package: DISTRIBUTION_NAME, options: legacyOptions }] }))
+    installConfig(path, legacyOptions)
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    // The installer never rewrites plugin options, and the legacy option set
+    // parses with the new key defaulting to the current MVP behavior.
+    expect(document.plugins[0].options).toEqual(legacyOptions)
+    expect(document.agents.orchestrator.system).not.toContain(STRICT_DECOMPOSITION_GUIDANCE)
   })
 })
 

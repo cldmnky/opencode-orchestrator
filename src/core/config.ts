@@ -57,6 +57,25 @@ const clarifyOptions = z
   .strict()
   .default({ mode: "auto" })
 
+/**
+ * Decomposition strategy: `mvp` (default — the current Phase 1 prompt
+ * guidance, unchanged) or `strict` (adds extra prompt-level emphasis on
+ * preferring the smallest coherent end-to-end slice). Prompt-preference
+ * only: it changes prompt wording, never enforcement — it never disables
+ * serialization, scope validation, review, the worktree lifecycle, or the
+ * publication preconditions, and it never overrides an explicit user
+ * decision.
+ */
+export const DECOMPOSITION_STRATEGIES = ["mvp", "strict"] as const
+export type DecompositionStrategy = (typeof DECOMPOSITION_STRATEGIES)[number]
+
+const decompositionOptions = z
+  .object({
+    strategy: z.enum(DECOMPOSITION_STRATEGIES).default("mvp"),
+  })
+  .strict()
+  .default({ strategy: "mvp" })
+
 const agentId = z.string().trim().min(1)
 
 // Nullable strict finite limits: explicit null or omission means "no limit";
@@ -172,6 +191,7 @@ export const OrchestratorOptionsSchema = z
     budget: budgetOptions,
     review: reviewOptions,
     clarify: clarifyOptions,
+    decomposition: decompositionOptions,
   })
   .strict()
   .superRefine((value, context) => {
@@ -208,6 +228,7 @@ export type BudgetLimits = Pick<
 >
 export type ReviewOptions = z.infer<typeof reviewOptions>
 export type ClarifyOptions = z.infer<typeof clarifyOptions>
+export type DecompositionOptions = z.infer<typeof decompositionOptions>
 export type PublishOptions = z.infer<typeof publishOptions>
 
 export function parseOptions(value: unknown): OrchestratorOptions {

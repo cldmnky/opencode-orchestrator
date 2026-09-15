@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { parseOptions } from "../../src/core/config.js"
+import { STRICT_DECOMPOSITION_GUIDANCE } from "../../src/core/policy.js"
 import {
   GH_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
@@ -330,6 +331,37 @@ describe("agent transform feature permissions", () => {
       expect(prompt).not.toMatch(/scheduler|semaphore/i)
       expect(prompt).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
     }
+  })
+
+  test("strict decomposition threads prompt emphasis into agent systems while the default stays byte-identical", () => {
+    const strict = parseOptions({ decomposition: { strategy: "strict" } })
+    const draft = draftWith({ orchestrator: { mode: "primary" }, implementer: { mode: "subagent" } })
+    applyAgentTransform(draft, strict)
+
+    // The strict emphasis reaches the orchestrator and worker systems...
+    const implementer = draft.get("implementer")!.system!
+    expect(implementer).toContain(STRICT_DECOMPOSITION_GUIDANCE)
+    expect(implementer).toContain("Prefer the smallest coherent end-to-end implementation slice over the smallest file or layer")
+    const orchestrator = draft.get("orchestrator")!.system!
+    expect(orchestrator).toContain(STRICT_DECOMPOSITION_GUIDANCE)
+    expect(orchestrator).toContain("never by concurrent overlapping writes")
+
+    // ...and the semantics stay prompt-preference only: the slice caveats,
+    // disjoint-scope rules, and permission rules are untouched.
+    expect(implementer).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
+    expect(implementer).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
+    expect(orchestrator).toContain("Require an exact disjoint write scope from every child before any parallel write")
+    expect(orchestrator).toContain("Serialize implementation tasks when file ownership overlaps")
+
+    // Omitting the key and an explicit `mvp` value produce identical systems.
+    const defaultDraft = draftWith({ orchestrator: { mode: "primary" }, implementer: { mode: "subagent" } })
+    applyAgentTransform(defaultDraft, options)
+    // The strategy changes prompt emphasis only: permissions are identical.
+    expect(draft.get("implementer")!.permissions).toEqual(defaultDraft.get("implementer")!.permissions)
+    const explicitMvpDraft = draftWith({ orchestrator: { mode: "primary" }, implementer: { mode: "subagent" } })
+    applyAgentTransform(explicitMvpDraft, parseOptions({ decomposition: { strategy: "mvp" } }))
+    expect(explicitMvpDraft.get("implementer")!.system).toBe(defaultDraft.get("implementer")!.system)
+    expect(defaultDraft.get("implementer")!.system).not.toContain(STRICT_DECOMPOSITION_GUIDANCE)
   })
 })
 

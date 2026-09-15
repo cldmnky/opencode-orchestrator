@@ -21,6 +21,7 @@ Constraints:
 - Beyond the original plan, the repo now ships an orchestrator-owned worktree lifecycle with safe-boundary session entry, a fail-closed autonomous publication chain (push → draft PR → ready → best-effort approve → merge → verify), per-session gates with a TUI picker and RPC, durable worker model selection, bounded nested delegation, and a read-only TUI orchestrator-sessions sidebar.
 - The dominant remaining weakness is unchanged in kind but now fixable in practice: most delegation constraints are still **prompt-only** or gated only at **plugin-owned dispatch surfaces**. The pinned beta-19507 contract now exposes `session.hook("prompt")`, `permission.hook("evaluate")`, `permission.rules` (inherited by child sessions at creation), and a native `ctx.worktree` domain — the host-side primitives needed for real runtime admission enforcement (N1), real worker containment (N2), and a documented worktree path (N3).
 - The orchestrator's **language is its weakest user-facing surface**: operational policy strings are 400–850-character single sentences, the agent has a functional description but no voice or tone contract, and clarification guidance covers only initial task ambiguity. User-visible output inherits this density. G3 targets plain-language communication, a helpful personality, and restatement/summary loops.
+- The **N3 native-worktree probe is complete (2026-09-15) and blocks cutover**: the pinned `ctx.worktree` domain cannot back the managed `worktree/v2` lifecycle (detached create, no ownership/dirty/moved/orphan states, `refresh` result dropped at the plugin surface, destructive `force`). The only permitted follow-up is a read-only inventory observation pilot with `worktree/v2` still authoritative. See [`docs/phase-1/n3-native-worktree-compatibility.md`](phase-1/n3-native-worktree-compatibility.md).
 - **Config drift defect (verified against the live schema):** the installer and dev template still write `experimental.subagent_depth`, but the current host schema defines **top-level** `subagent_depth` and `experimental` rejects additional properties — so installer-managed installs silently run at native depth 1 and nested delegation breaks. G4 plans the migration. `experimental.continue_loop_on_deny` and `experimental.batch_tool` are confirmed host keys the orchestrator experience needs but the installer does not set.
 - `max_parallel` is still prompted, not scheduled: no DAG scheduler or concurrency semaphore exists (A4 remains true).
 - Durable per-step checkpoints, append-only lifecycle logs, and materialized projections remain unimplemented (S1/S2); the TUI sidebar is a volatile projection only.
@@ -104,6 +105,7 @@ Per-session gates (`gates/`): the family `push`, `pr-draft-create`, `pr-ready-tr
 - `bun run build` produces bundles but does not replace packed-package smoke testing; no lint or formatter is configured.
 - `dev:v2:dist` rewrites the generated config to load `dist/index.js`; `opencode2 api` inspection is location-sensitive (use the deep-object `location[directory]=` parameter on beta-19507).
 - The host config schema moved subagent nesting depth from `experimental.subagent_depth` to **top-level `subagent_depth`**; the current `experimental` block has `additionalProperties: false`, so the installer-written nested key is silently ignored and installs run at native depth 1 (G4 fixes the installer; A17 records the verification).
+- Embedded-host native worktree calls are **location-routed, not config-routed**: `OpenCode.create({ config: { directory } })` leaves the plugin's boot `ctx.location` at the process working directory, and every `ctx.worktree.*` call must pass `location: { directory }` to target a project (the domain resolves it to a location-scoped service). `ctx.worktree.refresh` resolves to `void` and drops the core `{ updated, removed }` result, and dirty removal raises `Git.WorktreeError` with `forceRequired: true` — not `Worktree.OperationError`. A directly-passed plugin object is instantiated once per active location, so event ids can be delivered more than once in the same harness (dedupe by id).
 
 ## Plugin Contract Conformance
 
@@ -165,7 +167,7 @@ Everything in this section shipped after the 2026-08-30 draft (issues #8/#10/#14
 | P0 | N1 | Runtime Authority | Admission enforcement via `session.hook("prompt")` + `permission.hook("evaluate")` | Makes D4/V2/V1 enforceable at runtime on plugin-owned dispatch, opt-in and fail-closed | M | High | Prompt hooks are not exactly-once; false blocks |
 | P0 | G3 | DX & Governance | Plain-language communication, helpful personality, clarification/summary loop | Policy strings run 400–850 chars in single sentences; no voice/tone spec; clarify covers only initial ambiguity; user output inherits the density | M | High | Losing precision in safety-critical instructions |
 | P0 | G4 | DX & Governance | Installer schema migration: top-level `subagent_depth` + recommended experimental keys | Live schema moved depth to top-level; `experimental` rejects additional properties, so installer-written depth is dead and nested delegation silently breaks; `continue_loop_on_deny`/`batch_tool` are confirmed host keys the experience needs | S | High | Silent config drift on future pins |
-| P1 | N3 | Worktree & Isolation | Migrate managed worktrees onto native `ctx.worktree` (supersedes W1/W2) | Documented domain with ownership, refresh, `worktree.updated`, `Worktree.OperationError`; unlocks per-worker isolation on a supported path | L | High | Behavior drift during migration; canonical-config coupling |
+| P1 | N3 | Worktree & Isolation | Migrate managed worktrees onto native `ctx.worktree` (supersedes W1/W2) — **compatibility probe complete 2026-09-15: cutover blocked; no adapter implemented** | Documented domain with ownership, refresh, `worktree.updated`; the probe measured project-scoped inventory, detached create, `Git.WorktreeError.forceRequired` dirty refusal, and silent row drops — the native states do not match `worktree/v2` | L | High | Behavior drift during migration; canonical-config coupling; native `force` deletes dirty trees |
 | P1 | N4 | Verification & Safety | Sessionless deterministic checks via `ctx.generate.text` | Semantic handoff lint, review-rubric parsing, complexity adjudication without child sessions | S | Medium | Nondeterministic model output; cost |
 | P1 | V4 | Verification & Safety | Redaction centralization + authority recording | One tested redactor; evidence marked safe/redacted/unavailable; effective authority = intersection (now expressible via N2 rules) | M | High | False security |
 | P1 | S1 | State & Observability | Durable per-step checkpoints with backoff and cursor resume | Goal/run records still lack per-step receipts; `storage.scan` gives cursors; retry classes feed N5 | L | High | Duplicate side effects |
@@ -267,6 +269,20 @@ The plugin implements worktrees through its own git subprocess allowlist with cu
 **Next step**
 
 Compatibility probe + adapter design doc comparing native inventory with `worktree/v2` records on a synthetic set (clean, dirty, moved, orphaned).
+
+**Compatibility probe — COMPLETE (2026-09-15); cutover blocked.**
+
+`test/contract/phase-b-worktree.test.ts` boots embedded beta-19507 hosts in temporary Git repositories and measures the native `ctx.worktree` domain directly (every call routed with `location: { directory }`, zero provider traffic). The full mapping table and command evidence live in [`docs/phase-1/n3-native-worktree-compatibility.md`](phase-1/n3-native-worktree-compatibility.md).
+
+- **list/refresh:** project-scoped `{ directory, strategy? }` rows (root row has no strategy); `ctx.worktree.refresh` resolves to `void` and drops the core `{ updated, removed }` result; `worktree.updated` carries only `{ projectID }`; `worktree.resolved` is project resolution, not session movement.
+- **create:** returns exactly `{ directory }` (canonical `realpath`), collision-suffixes `-2`, and creates a **detached** HEAD — `branch`/`from` are starting refs, never a new branch. Unknown refs fail as `Git.WorktreeError` with `forceRequired: false`.
+- **remove:** clean removal succeeds and drops the row/linkage; dirty removal fails closed with a directly observed `Git.WorktreeError.forceRequired: true` and git's `contains modified or untracked files` message; `force: true` deletes the dirty tree; unknown directories and the main checkout are refused as `Worktree.InvalidDirectoryError`; workspace-scoped locations are refused.
+- **Inventory semantics:** externally created git worktrees are adopted on the next `list`; vanished directories are silently dropped (no orphan record). Of the managed states (`pending`, `ready`, `dirty`, `moved`, `orphaned`, `cleanup-failed`), only a partial `ready` (directory inventory) maps; dirty detection, ownership, `moved`, and `orphaned` do not.
+- **Decision:** **cutover is blocked.** An adapter cannot back the managed lifecycle on the measured native surface; the only permitted follow-up is a read-only inventory observation pilot with `worktree/v2` still authoritative. `forceRequired` is the one native signal worth adopting. No child filesystem/process isolation claim is made.
+
+**Next step (post-probe)**
+
+No further N3 work is authorized by this probe. If a read-only inventory observation pilot is wanted, it needs an explicit new slice with its own opt-in switch, `worktree/v2` records still authoritative, no native `create`/`remove`, no `force`, and dedupe-by-event-id handling.
 
 ### Verification & Safety (remaining)
 
@@ -501,10 +517,14 @@ Delivered as one cohesive runtime-authority slice (`phase-a-runtime-authority`);
 
 ### Phase B — Worktree Migration (N3)
 
-- Compatibility probe of `ctx.worktree` (create/list/refresh/`worktree.updated`, `Worktree.OperationError`) against synthetic clean/dirty/moved/orphaned states.
-- Adapter cutover with the current tools as fallback; preserve `worktree/v2` records as projection until native inventory is proven equivalent.
-- Re-scope per-worker isolation on the native binding + N2 rules.
-- Exit evidence: dual-record comparison; merge/decision record for cutover; per-worker isolation design.
+**Compatibility probe complete (2026-09-15) — cutover blocked.** The probe measured the pinned native `ctx.worktree` domain end to end in temporary repositories and produced the decision record [`docs/phase-1/n3-native-worktree-compatibility.md`](phase-1/n3-native-worktree-compatibility.md):
+
+- Probe scope delivered: list/refresh, `worktree.updated`/`worktree.resolved` events, create (return value, canonicalization, detached HEAD, collision suffix), clean removal, dirty removal with the directly observed `Git.WorktreeError.forceRequired: true`, unknown-directory/main-checkout refusal, workspace-location refusal, project scoping, external-worktree adoption, and vanished-directory handling — with zero provider requests and the current checkout untouched.
+- Measured result: native inventory maps only partially onto `worktree/v2` (`ready` as directory inventory); `pending`, `dirty`, `moved`, `orphaned`, and `cleanup-failed` have no native equivalent, native `refresh` discards its `{ updated, removed }` result at the plugin surface, `create` never creates a branch, and `force: true` deletes dirty trees.
+- Decision: cutover is blocked; no adapter or strategy registration was implemented. A read-only inventory observation pilot (with `worktree/v2` authoritative) is the only future candidate and needs an explicit new slice.
+- Corrected plan reference: dirty removal on the plugin surface raises `Git.WorktreeError` with `forceRequired`, not `Worktree.OperationError` (the HTTP server maps errors to a `WorktreeError` response; that mapping was declaration/source evidence only).
+- **Exit evidence:** `bun test test/contract/phase-b-worktree.test.ts` → 6 pass, 0 fail, 95 expect() calls; `bun run build`, `bun run typecheck`, and `git diff --check` green; full-suite evidence recorded in the decision record's reproduction section.
+- Remaining (not authorized by this probe): adapter with fallback, per-worker isolation re-scope on the native binding + N2 rules. These stay parked until inventory equivalence is proven.
 
 ### Phase C — Verification Hardening (N4, V4)
 
@@ -537,7 +557,7 @@ Delivered as one cohesive runtime-authority slice (`phase-a-runtime-authority`);
 - **A12 — Isolation vs security:** prompt rules, permission visibility, worktree bookkeeping, and OS containment remain separate properties; N2 adds the first host-enforced layer inside that model.
 - **A13/A14 — S3/V1 semantics:** tracked in `docs/phase-1/assumptions.md` (partially verified; live shared-service probes outstanding).
 - **A15 — Undocumented catalog domain:** `ctx.catalog` is in the pinned `Context` type but not on the plugin guide; documented equivalent is `ctx.model.list()`. Track per pin; migrate if it breaks.
-- **A16 — `tui` flag and hook/worktree host behavior:** the pinned `Plugin` type lacks the `tui` field (cast in use, contract-tested); live-host behavior of `session.hook("prompt")`, `permission.hook("evaluate")`, child rule inheritance, and native worktree ops is unit-faked only and needs the Phase A/B probes.
+- **A16 — `tui` flag and hook/worktree host behavior:** the pinned `Plugin` type lacks the `tui` field (cast in use, contract-tested). Live-host behavior is now probed on the pinned host: `session.hook("prompt")`, `permission.hook("evaluate")`, and child rule inheritance by `test/contract/phase-a-hooks.test.ts` (Phase A, 13 pass); the native worktree domain by `test/contract/phase-b-worktree.test.ts` (Phase B, 6 pass — cutover blocked, see the N3 decision record). Measured harness facts: an embedded host's plugin boot `ctx.location` follows the process working directory, `ctx.worktree.*` routes a per-call `location` ref to a location-scoped service, and a directly-passed plugin object is instantiated once per active location (dedupe events by id).
 - **A17 — Host config key placement:** verified 2026-09-15 against the live schema (`https://opencode.ai/config.json`): `subagent_depth` is a top-level `Config` property (default 1); the `experimental` block has `additionalProperties: false` and defines `continue_loop_on_deny` and `batch_tool` but no `subagent_depth`. The installer's `experimental.subagent_depth` is therefore dead on current hosts (G4). Key placement is pin-dependent: treat every installer-written config key as pin-coupled and re-verify per bump (schema-snapshot contract test).
 
 ### Verification Checklist
@@ -587,11 +607,11 @@ CLI:
 Verification surfaces:
 
 - `test/unit/` (admission, agents, clarify, continuation, contracts, core, d4, evidence, gates, gh, installer, observability, orchestration-tools, peers, process, prompt-builder, publish, review, runtime, session-move, session-state, session-status, tools, tui-sidebar, worker-models, worktree)
-- `test/contract/plugin.test.ts` · `embedded.test.ts` · `tui.test.ts`
+- `test/contract/plugin.test.ts` · `embedded.test.ts` · `tui.test.ts` · `phase-a-hooks.test.ts` · `phase-b-worktree.test.ts`
 
 Design/records:
 
-- `docs/phase-1/` (assumptions, d2/d4/v2/v3/s3 artifacts)
+- `docs/phase-1/` (assumptions, d2/d4/v2/v3/s3 artifacts, n3-native-worktree-compatibility)
 
 ### Research Source Catalog
 

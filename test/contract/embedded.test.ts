@@ -27,6 +27,41 @@ describe("embedded V2 host", () => {
     }
   })
 
+  test("keeps default authority off at the isolated-host boundary", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-sdk-"))
+    const plugin = fileURLToPath(new URL("../../src/index.ts", import.meta.url))
+    const host = await createHost(directory, resolve(plugin))
+
+    try {
+      await assertPluginActive(host, directory)
+
+      // A prompt carrying a marker-shaped authority metadata key is admitted
+      // byte-identical: the default authority mode registers no prompt hook and
+      // appends no admission marker.
+      const session = await host.session.create({ location: { directory } })
+      const marker = { "opencode-orchestrator.authority": { version: 1, dispatch: "command" } }
+      const admitted = await host.session.prompt({
+        sessionID: session.id,
+        text: "authority default off",
+        delivery: "queue",
+        resume: false,
+        metadata: marker,
+      })
+      expect(admitted.payload.metadata).toEqual(marker)
+
+      // No permission hook is registered, so a selected authority action is
+      // never downgraded.
+      const decision = await host.permission.create({
+        sessionID: session.id,
+        action: "orchestrator_validation",
+        resources: ["target"],
+      })
+      expect(decision.effect).toBe("allow")
+    } finally {
+      await host.close()
+    }
+  })
+
   test("loads a config-relative source entry and registers /orchestrate", async () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-sdk-"))
     // A local `src/index.ts` beside the config, exactly like the source-run

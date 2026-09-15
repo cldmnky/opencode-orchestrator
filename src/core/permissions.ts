@@ -137,6 +137,54 @@ export function goalToolPermissionRule(effect: PermissionEffect): PermissionRule
 }
 
 /**
+ * N1 permission-enforcement selection (Phase A, `authority.mode: "enforce"`).
+ *
+ * The permission `evaluate` hook downgrades an `allow`/`ask` decision to
+ * `deny` only for these plugin-owned authority action families, and only when
+ * the shared dispatch gate refuses (bounded-review breaker or
+ * stop-between-steps budget). Every other action — native tools and any action
+ * outside this list — is left untouched.
+ *
+ * Selection rule: every plugin-owned family that can mutate plugin/durable
+ * state or run external mutations. Deliberate exclusions, kept available while
+ * a gate refuses so the user/model can inspect and recover:
+ *   - `orchestrator_observability` — the bounded-review recovery surface
+ *     (`review_transition` starts the replacement round a human decision
+ *     requires); denying it would trap an open circuit.
+ *   - `orchestrator_gates` and `orchestrator_peer` — read-only inspection and
+ *     discovery surfaces that cannot advance a stopped run.
+ * Permission actions are family-granular, so a read-only tool inside an
+ * enforced family (for example `orchestrator_worktree_status`) inherits the
+ * family decision; that granularity is a documented limitation.
+ */
+export const AUTHORITY_ENFORCED_PERMISSION_ACTIONS = [
+  GOAL_TOOL_PERMISSION,
+  GH_TOOL_PERMISSION,
+  WORKTREE_TOOL_PERMISSION,
+  ORCHESTRATION_TOOL_PERMISSION,
+  PUBLISH_TOOL_PERMISSION,
+] as const
+
+export function isAuthorityEnforcedPermissionAction(action: string): boolean {
+  return (AUTHORITY_ENFORCED_PERMISSION_ACTIONS as readonly string[]).includes(action)
+}
+
+/**
+ * N2 child containment denies: the full orchestrator-only tool family plus the
+ * goal tools, as one exact `deny` rule per plugin-owned action family.
+ *
+ * Installed only on a configured-role child session during that child's own
+ * prompt admission, appended after the child's existing rules so last-match-
+ * wins makes the deny final for the child (session rules take precedence over
+ * an explicit agent allow; that opt-in restriction is intentional). This is a
+ * tool-action containment rule only: it is not filesystem, process, worktree,
+ * or atomic child isolation.
+ */
+export function childContainmentDenyRules(): PermissionRule[] {
+  return [...orchestratorOnlyPermissionRules("deny"), goalToolPermissionRule("deny")]
+}
+
+/**
  * True when `permissions` already carries a rule for exactly `action`.
  *
  * Used before augmenting an agent: an exact rule expresses an explicit user

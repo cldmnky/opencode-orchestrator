@@ -58,6 +58,29 @@ const clarifyOptions = z
   .default({ mode: "auto" })
 
 /**
+ * Phase A runtime authority mode: `off` (default — no authority hooks are
+ * registered, no plugin-created prompt is tagged, and every existing
+ * registration and behavior stays byte-identical) or `enforce` (registers the
+ * opt-in N1 admission/permission enforcement and N2 child-only containment
+ * hooks described in the Phase A roadmap).
+ *
+ * `enforce` is strictly additive: it only restricts (fail-closed admission of
+ * tagged plugin dispatches, deny downgrades for selected plugin-owned
+ * permission actions, exact deny rules for configured-role child sessions).
+ * It never widens a gate, never installs or clears rules on a parent session,
+ * and never claims filesystem, process, worktree, or atomic child isolation.
+ */
+export const AUTHORITY_MODES = ["off", "enforce"] as const
+export type AuthorityMode = (typeof AUTHORITY_MODES)[number]
+
+const authorityOptions = z
+  .object({
+    mode: z.enum(AUTHORITY_MODES).default("off"),
+  })
+  .strict()
+  .default({ mode: "off" })
+
+/**
  * Decomposition strategy: `mvp` (default — the current Phase 1 prompt
  * guidance, unchanged) or `strict` (adds extra prompt-level emphasis on
  * preferring the smallest coherent end-to-end slice). Prompt-preference
@@ -192,6 +215,7 @@ export const OrchestratorOptionsSchema = z
     review: reviewOptions,
     clarify: clarifyOptions,
     decomposition: decompositionOptions,
+    authority: authorityOptions,
   })
   .strict()
   .superRefine((value, context) => {
@@ -230,6 +254,7 @@ export type ReviewOptions = z.infer<typeof reviewOptions>
 export type ClarifyOptions = z.infer<typeof clarifyOptions>
 export type DecompositionOptions = z.infer<typeof decompositionOptions>
 export type PublishOptions = z.infer<typeof publishOptions>
+export type AuthorityOptions = z.infer<typeof authorityOptions>
 
 export function parseOptions(value: unknown): OrchestratorOptions {
   const parsed = OrchestratorOptionsSchema.safeParse(value ?? {})

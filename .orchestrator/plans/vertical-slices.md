@@ -296,8 +296,10 @@ evidence above, does not convert the fail-closed threshold 4 result into a
 pass, and does not close the telemetry gap. The override is a recorded human
 authorization, not a met go criterion. The same recorded human authorization
 was later extended by explicit instruction to Phase 3 (recorded in the Phase 3
-section), and Phase 4 later proceeded under that same recorded override
-(recorded in the Phase 4 section). No evidence above is revised.
+section); Phase 4 remained gated on its own preconditions and was not
+authorized by that extension at the time of the Phase 3 record, and Phase 4
+later proceeded under that same recorded override (recorded in the Phase 4
+section). No evidence above is revised.
 
 Revisit only if: a live-host executed run collects real baseline/after
 transcripts and runtime verification (closing threshold 4 and the telemetry
@@ -315,8 +317,10 @@ recorded human authorization, not a met go criterion: threshold 4 remains
 fail-closed (no executed run evidences runtime completion or verification),
 the live-host telemetry probe has still not run, and the runtime efficacy of
 the strict strategy remains unproven. Phase 3 later proceeded under the same
-recorded override extended by explicit instruction (Phase 3 section), and
-Phase 4 later proceeded under the same recorded override (Phase 4 section).
+recorded override extended by explicit instruction (Phase 3 section); Phase 4
+remained gated on its own preconditions and was not authorized by that override
+at the time of this Phase 2 record, and Phase 4 later proceeded under the same
+recorded override (Phase 4 section).
 
 Only if Checkpoint A shows users need an explicit strategy override.
 Optional strict config (e.g. a strategy key defaulting to current MVP
@@ -369,9 +373,9 @@ a met go criterion. Phase 3's own precondition — rubric repeatability plus a
 machine-readable signal that demonstrably improves classification — is **not**
 demonstrated by running evidence, the live-host telemetry probe has still not
 run, and the signal's runtime efficacy remains unproven. Checkpoint A evidence
-is unchanged, threshold 4 stays fail-closed, and Phase 4 was not started by
-this phase (it later proceeded under the same recorded override; see the
-Phase 4 section).
+is unchanged, threshold 4 stays fail-closed, and Phase 4 remained gated and
+unauthorized when this phase closed (this phase does not start it); Phase 4
+later proceeded under the same recorded override (see the Phase 4 section).
 
 **D2 flow-through question (named upfront, required by this phase):** does the
 additive D4 v2 coherence signal add or change any D2 v1 handoff field,
@@ -904,8 +908,10 @@ chain. Phase 3 later proceeded under the same recorded override extended by
 explicit instruction (see the Phase 3 section and evidence ledger); its
 preconditions (rubric repeatability with a demonstrably improving
 machine-readable signal) remain unmet by evidence, so the override — not a met
-precondition — is what authorized it. Phase 4 later proceeded under the same
-recorded override (see the Phase 4 section and evidence ledger); its
-precondition (the identical corpus executed under an approved configuration)
-remains unmet by execution evidence, so the override — not a met
-precondition — is what authorized the closure.
+precondition — is what authorized it. Phase 4 remained gated and unauthorized
+at that point (its precondition — the identical corpus executed under an
+approved configuration — still unmet, and the override does not substitute for
+it); Phase 4 later proceeded under the same recorded override (see the Phase 4
+section and evidence ledger), and its precondition remains unmet by execution
+evidence, so the override — not a met precondition — is what authorized the
+closure.

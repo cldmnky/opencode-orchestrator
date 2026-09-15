@@ -1,1226 +1,464 @@
 # OpenCode Orchestrator Improvement Plan
 
-**Date:** 2026-08-30  
-**Status:** Suggestion-only research plan; no implementation authorized
+**Date:** 2026-09-15 (supersedes the 2026-08-30 suggestion-only draft)  
+**Status:** Living plan — completed work recorded, remaining improvements planned
 
 ## Goal and Constraints
 
-This plan identifies potential improvements to `opencode-orchestrator` using repository evidence and web research.
+This plan tracks improvements to `opencode-orchestrator` against repository evidence, the pinned OpenCode V2 contract, and the current [plugin guide](https://opencode.ai/v2/docs/build/plugins), [CLI plugin guide](https://opencode.ai/v2/docs/build/plugins/cli), and [HTTP API reference](https://opencode.ai/v2/docs/api).
 
 Constraints:
 
-- No code changes are included or implied by this document.
-- Proposals are advisory suggestions only.
-- OpenCode V2 APIs are beta/experimental and require verification before implementation.
+- The original 2026-08-30 draft was suggestion-only. Since then a first wave of work landed (see [Completed Work](#completed-work-and-residual-gaps)); this document now records what is done and plans the next wave.
+- OpenCode V2 APIs are beta/experimental; every proposal must be re-verified against the pinned package types before implementation.
 - Web sources are directional evidence, not automatically authoritative.
 - Claims about storage durability, token counts, isolation, redaction completeness, and runtime enforcement must be verified before relying on them.
-- No GitHub, worktree, merge, issue, or pull-request action is proposed.
-
-> **No code changes were made.**
+- New enforcement work must never weaken the static `github`/`worktree` config gates, the durable publish capability, or the per-session gate picker (`/gates`): a session-disabled gate is final.
 
 ## Executive Summary
 
-- The repository has a clear semantic role model—`planner`, `explore`, `implementer`, and `reviewer`—but most delegation constraints are prompt-level rather than runtime-enforced.
-- `max_parallel` defaults to four and is included in orchestration prompts, but repository inspection does not show a central DAG scheduler or runtime semaphore enforcing it.
-- The highest-value near-term improvements are a complexity gate, versioned structured handoffs, bounded context, two-level validation, and stronger capability preflight.
-- Durable goal/run state already exists, but there are no durable per-step checkpoints, append-only lifecycle logs, materialized projections, or explicit cursor-based recovery records.
-- Worktree tooling is safety-conscious for the coordinating session, yet native child sessions still lack plugin-controlled atomic worktree isolation and merge-back reconciliation.
-- Messaging, adaptive DAG execution, model tiering, and scale-out should follow—not precede—a foundation of evidence contracts, budgets, recovery semantics, and observability.
+- The semantic role model (`planner`, `explore`, `implementer`, `reviewer`) is unchanged, but the first improvement wave landed the **evidence-contract foundation**: structured handoffs (D2), an advisory complexity classifier (D4), a callable two-level validator with admission vocabulary (V2), typed evidence on GitHub/worktree results (V3), opt-in trace/budget controls (S3), and bounded maker-checker review with a circuit breaker (V1-bounded).
+- Beyond the original plan, the repo now ships an orchestrator-owned worktree lifecycle with safe-boundary session entry, a fail-closed autonomous publication chain (push → draft PR → ready → best-effort approve → merge → verify), per-session gates with a TUI picker and RPC, durable worker model selection, bounded nested delegation, and a read-only TUI orchestrator-sessions sidebar.
+- The dominant remaining weakness is unchanged in kind but now fixable in practice: most delegation constraints are still **prompt-only** or gated only at **plugin-owned dispatch surfaces**. The pinned beta-19507 contract now exposes `session.hook("prompt")`, `permission.hook("evaluate")`, `permission.rules` (inherited by child sessions at creation), and a native `ctx.worktree` domain — the host-side primitives needed for real runtime admission enforcement (N1), real worker containment (N2), and a documented worktree path (N3).
+- `max_parallel` is still prompted, not scheduled: no DAG scheduler or concurrency semaphore exists (A4 remains true).
+- Durable per-step checkpoints, append-only lifecycle logs, and materialized projections remain unimplemented (S1/S2); the TUI sidebar is a volatile projection only.
 
 ## Current State Snapshot
 
 ### Architecture
 
-- `src/index.ts` exports the server plugin.
-- `src/opencode-v2/plugin.ts` uses `Plugin.define`, registers agent/command/tool transforms, context hooks, event subscriptions, goal continuation, GitHub tools, and worktree tools.
-- The main plugin sets `tui: true`.
-- `src/tui.ts` is a separate CLI/TUI plugin using `@opencode-ai/plugin/tui`.
-- The package exports `./tui`, `./commands`, and `./installer`.
-- CLI-only plugin configuration belongs in global `cli.json`, according to repository guidance.
-- `src/core/` contains configuration, roles, policy, prompts, permissions, and package identity.
-- `src/opencode-v2/` contains runtime commands, goal continuation, session movement, process execution, worktree support, and GitHub support.
+- `src/index.ts` exports the server plugin plus the serialized public pure APIs (D4 classifier, D2 contract, admission machine, evidence vocabulary, budget/trace, review-v1, publish policy, peer query).
+- `src/opencode-v2/plugin.ts` uses `Plugin.define`, registers agent/command/tool transforms, a `session.hook("context")` system-prompt injector, `tool.hook("execute.after")` failure logging, the gates RPC registration, goal continuation, worktree event sync, and the observability runtime.
+- The main plugin sets `tui: true`; `src/tui.ts` is the CLI/TUI plugin importing `@opencode/plugin/tui`, with a read-only orchestrator-sessions sidebar (`src/tui/sidebar.ts`).
+- The package exports `./tui`, `./commands`, and `./installer`; CLI-only plugin configuration belongs in global `cli.json`.
+- `src/core/` owns configuration, roles, policy, prompts, permissions, prompt building, package identity, and the pure contracts: `d4.ts` (complexity classifier), `contracts.ts` (D2 handoff schema), `admission.ts` (admission state machine), `model-reference.ts`.
+- `src/opencode-v2/` owns commands/runtime, goal continuation, session state/move/move-coordinator, process runner + redaction, worktree support, GitHub support, plus the newer domains: `gates/` (per-session gates + RPC), `observability/` (trace/budget/review), `orchestration/` (validation/evidence/tools), `peers/` (peer discovery), `publish/` (publication capability + terminal chain), `worker-models/` (durable model selection).
 
-### Delegation Rules
+### Delegation Rules and Config Surface
 
 `src/core/config.ts` defines:
 
-- `max_parallel`: integer from 1 through 8, default `4`.
-- `require_review`: default `true`.
-- `strict_agents`: default `true`.
-- Goal continuation enabled by default.
-- Goal continuation maximum: `50`.
-- Goal continuation cooldown: `1000 ms`.
-- GitHub and worktree features disabled by default.
-- Mutations disabled by default.
+- `max_parallel`: integer 1..8, default `4`; `require_review`: default `true`; `strict_agents`: default `true`.
+- Goal continuation enabled by default (max `50`, cooldown `1000 ms`).
+- `clarify`: `auto|off` (default `auto` — native ask-tool clarification guidance).
+- `trace`: `off|memory|snapshot` (default `off`); `budget`: `advisory|stop-between-steps` (default `advisory`, nullable finite `max_steps`/`max_tokens`/`max_cost_usd`/`max_wall_clock_ms`/`max_retries`); `review`: `prompt|bounded` (`max_rounds` 1..8, default 2).
+- `github` and `worktree` disabled by default; mutations additionally disabled by default; `publish.enabled` default `false`.
+- Defaults preserve pre-observability behavior exactly; the S3/V1 controls are strictly opt-in.
 
-`src/core/roles.ts` maps the default semantic roles:
+`src/core/roles.ts` still maps planning→`planner`, research→`explore`, implementation→`implementer`, review→`reviewer`. Nested delegation is bounded to the role graph (a delegating worker stays accountable; research never delegates).
 
-| Role | Default agent | Intended behavior |
-|---|---|---|
-| Planning | `planner` | Read-only planning |
-| Research | `explore` | Background repository/web exploration |
-| Implementation | `implementer` | Focused edits |
-| Review | `reviewer` | Independent audit |
+### Enforcement Matrix
 
-`src/core/policy.ts` declares:
-
-- Planning: foreground, read-only, parallel-safe.
-- Research: background, read-only, parallel-safe.
-- Implementation: foreground, writes, not parallel-safe by default.
-- Review: foreground, read-only, parallel-safe.
-- A child-task contract requiring task, expected outcome, exact ownership, must/must-not rules, verification, and handoff.
-- A handoff format:
-  - `Outcome`
-  - `Files`
-  - `Verification`
-  - `Risks`
-  - `Follow-up`
-
-The policy also states that write scopes must be disjoint and that native V2 delegation should be retained where isolation is unnecessary.
-
-**Observed limitation:** repository inspection shows `max_parallel` being placed into prompts/context, but no orchestrator-owned scheduling queue or runtime concurrency counter. Native OpenCode enforcement is an assumption requiring verification.
+| Constraint | Enforcement today |
+|---|---|
+| `max_parallel`, disjoint write scopes, `require_review` (in `prompt` review mode), complexity routing | Prompt-only |
+| `stop-between-steps` budget, bounded-review circuit breaker | Plugin-owned dispatch gates (goal auto-continuation before reservation/delivery; slash-command prompt delivery); never in-flight cancellation, never `session.interrupt` |
+| GitHub/worktree mutations | Fail-closed tool preconditions + static config gates + `confirm: true` + durable publish capability + per-session gates |
+| Worker authority/containment | Prompt-only (no host-enforced boundary yet — target of N2) |
+| Completion gating (no finish without validated review) | Not enforced (target of N1) |
 
 ### Review and Verification
 
-`require_review=true` changes the generated orchestration policy to require an aggregate reviewer pass. Current enforcement appears prompt-based:
-
-- `src/core/policy.ts` describes review as mandatory.
-- `src/core/prompts.ts` embeds that rule.
-- No independent runtime gate was found that prevents completion without a reviewer result.
-- Worker handoffs are text-based and require evidence, but the parent must verify claims directly.
+- `require_review=true` remains prompt-level in the default `prompt` review mode.
+- `review.mode: "bounded"` adds `orchestrator_review_get`/`orchestrator_review_transition` with a version-1 review schema (states `pending`/`approved`/`changes-requested`/`blocked`/`tripped`, fixed reason codes, deterministic transitions); tripped/blocked records stop goal auto-continuation. Still no automatic completion gate and no model-tier escalation.
+- `orchestrator_handoff_validate` performs deterministic D2 + V2 checks including parent-side `ctx.vcs` state, path existence, realpath, and redaction; it is callable, not automatic. Worker-declared verification passes are never upgraded.
 
 ### Goal Continuation
 
-`src/opencode-v2/goal/` provides durable goal state through `ctx.storage`:
+`src/opencode-v2/goal/` provides durable goal state through `ctx.storage`: versioned goal/plan-run/halt keys, `withSessionLock` (process-local), `session.idle`/`session.deleted` handling, reservation under lock, cooldown/max/halt/duplicate/replacement/pause-race handling, queued prompt delivery, and cleanup on session deletion.
 
-- Goal, plan-run, and halt records use versioned keys.
-- `withSessionLock` serializes operations in a process-local map.
-- `startGoalContinuation` listens for `session.idle` and `session.deleted`.
-- Continuations are reserved under a lock.
-- Cooldown, maximum continuation count, halt state, duplicate events, goal replacement, and pause races are handled.
-- Prompt delivery uses queued session prompts.
-- Deleted sessions clean up goal, run, and halt records.
+**Observed limitation:** storage now exposes `get`, `set`, `remove`, **and `scan` (prefix + cursor pagination — already used by worktree state and peers)**; transactions, compare-and-set, append-only events, and cross-process locking are still absent from the visible abstraction.
 
-**Observed limitation:** the storage interface exposes `get`, `set`, and `remove`; transactions, compare-and-set, append-only events, and cross-process locking are not part of the visible abstraction. Durability and crash semantics therefore require verification.
+### Worktree, GitHub, Publication, Gates
 
-### Worktree and GitHub Opt-In
+Worktree tools (opt-in): creation restricted to an absolute configured `worktree.root`; `shell:false`, fixed Git subcommand allowlist, bounded output, timeouts, redaction; refusal to clean up the main worktree, dirty worktrees, or other sessions' worktrees; durable records under `worktree/v2/...` with lifecycle states (`pending`, `ready`, `moved`, `dirty`, `orphaned`, `cleanup-failed`); `worktree_enter` moves only the current session with a safe-boundary pending receipt (retry until `entered:true` before delegating); move reconciliation anchors on `session.moved`.
 
-Worktree tools:
+GitHub tools (opt-in): host `gh` executable via the injected runner, validated response shapes, direct identifiers/URLs as typed evidence. A fail-closed publication chain is now orchestrator-owned: verify/tests green → commit → sync against latest remote base → exact-revision internal review → push → draft PR → ready transition → best-effort approve → merge → post-merge verify → worktree cleanup. Every step fails closed (stale SHA, dirty tree, missing receipt, moved revision, conflicts, branch protection, merge queues, permission failures). Single-collaborator repos may merge without a GitHub review; the exact-revision approved internal review receipt is the review authority.
 
-- Are registered only when `worktree.enabled=true`.
-- Mutations additionally require `worktree.allow_mutations=true` and literal `confirm: true`.
-- Restrict creation to an absolute configured `worktree.root`.
-- Use `shell:false`, a fixed Git subcommand allowlist, bounded output, timeouts, and redaction.
-- Verify worktree creation with `git worktree list` and `git rev-parse`.
-- Refuse cleanup of the main worktree, dirty worktrees, and worktrees owned by another session.
-- Track durable worktree records under `worktree/v2/...`.
-- Track lifecycle states such as `pending`, `ready`, `moved`, `dirty`, `orphaned`, and `cleanup-failed`.
+Publication capability (`publish/v1/<project>`): durable project-scoped record (policy, not caller authentication); never authorizes issue creation; never weakens static gates.
 
-GitHub tools:
+Per-session gates (`gates/`): the family `push`, `pr-draft-create`, `pr-ready-transition`, `approve-after-review`, `merge`, `github-mutations`, `worktree-mutations` can only narrow the project/config ceiling; set via `/gates` or the TUI gate picker (RPC `opencode-orchestrator.gates`); the model reads effective gates via read-only `orchestrator_gates_get`. A session-disabled gate is final.
 
-- Are registered only when `github.enabled=true`.
-- Mutations require `github.allow_mutations=true` and `confirm: true`.
-- Use the host `gh` executable through the injected process runner.
-- Validate issue, pull-request, and repository response shapes.
-- Return direct identifiers and URLs as evidence.
-- Do not currently persist durable GitHub records.
-
-**Critical boundary:** repository policy explicitly states that native V2 child sessions do not receive plugin-controlled atomic worktree isolation. Current worktree ownership applies to the coordinating session, not automatically to delegated children.
+**Boundary that still holds:** delegated child sessions receive no plugin-controlled atomic worktree isolation. Managed ownership covers the coordinating session only; parallel children still share the parent filesystem. (N2/N3 below target this.)
 
 ### Verification Traps
 
-- `strict_agents=true` can fail plugin setup when a non-empty agent response lacks required agents or modes.
-- Empty bootstrap responses are treated specially because config-backed agents may materialize later.
-- OpenCode V2 APIs are beta/experimental.
-- The package is pinned to `@opencode-ai/plugin` `0.0.0-beta-18684` and `@opencode-ai/sdk` `0.0.0-dev-18683`.
-- `doctor` runtime checks inspect the local CLI machine only and remain advisory.
-- Server-side `github_capabilities` is authoritative for live GitHub availability.
-- Host-configured GitHub MCP and the plugin’s own `gh` tools are separate concerns.
+- `strict_agents=true` can fail plugin setup when a non-empty agent response lacks required agents; empty/partial bootstrap responses are treated as "pending" with late setup on `agent.updated`.
+- The package is pinned to `@opencode/plugin` `0.0.0-beta-19507` and `@opencode/sdk` `0.0.0-beta-19507` (names and versions changed from the `@opencode-ai/*` betas referenced by the previous draft).
+- `doctor` runtime checks inspect the local CLI machine only and remain advisory; the server-side `orchestrator_github_capabilities` probe is authoritative for live GitHub availability. Host-configured GitHub MCP and the plugin's own `gh` tools are separate concerns.
 - Prompt-level write scopes do not provide filesystem isolation.
-- `ask` permission rules affect visibility but do not necessarily create interactive runtime approval in the public Promise plugin API.
-- `bun run build` produces bundles but does not replace packed-package smoke testing.
-- No lint or formatter command is configured.
-- `dev:v2:dist` rewrites generated configuration to load `dist/index.js`.
-- `opencode2 api` inspection is location-sensitive and should be run from the repository directory.
+- The pinned Promise plugin API **does** expose runtime permission surfaces (`permission.hook("evaluate")`, `permission.list/get/reply/rules`) and the prompt-admission hook (`session.hook("prompt")`); the previous draft's "no interactive runtime approval in the public Promise API" trap is stale.
+- `bun run build` produces bundles but does not replace packed-package smoke testing; no lint or formatter is configured.
+- `dev:v2:dist` rewrites the generated config to load `dist/index.js`; `opencode2 api` inspection is location-sensitive (use the deep-object `location[directory]=` parameter on beta-19507).
 
-## Research Themes
+## Plugin Contract Conformance
 
-### Theme 1 — Adaptive decomposition and resource-aware scaling
+Assessed 2026-09-15 against the current plugin guide and the pinned `@opencode/plugin` `0.0.0-beta-19507` declarations.
 
-Anthropic describes orchestrator-worker systems, parallel exploration, explicit scaling rules, and the cost of excessive delegation. Beam compares sequential, fan-out, debate, dynamic handoff, and adaptive-planning patterns.
+### Verified-proper usage
 
-Suggested implication: task decomposition should be adaptive rather than always maximally parallel.
+- Lifecycle: `Plugin.define` default export, async `setup` returning cleanup; registrations disposed in reverse order, including on the error path.
+- Transforms: `agent`/`command`/`tool` registered via `ctx.*.transform` with `Registration.dispose()`; callbacks are cheap and repeatable; commands are collision-aware via a prior `ctx.command.list()` read.
+- Events: `ctx.event.subscribe` with `AbortController` + explicit iterator cleanup (late agent setup on `agent.updated`); registry re-read after the event instead of trusting earlier reads.
+- Hooks: `session.hook("context")` for agent-scoped system prompt injection; `tool.hook("execute.after")` for failure logging.
+- Storage: `get`/`set`/`remove` plus `scan({ prefix, after, limit })` cursor pagination (worktree inventory, peer queries).
+- Commands: executors rebuild prompt text, pass through the requested `delivery`, and drop stale attachment `mention` offsets — matching the documented guidance for rewritten command prompts.
+- RPC: server-side `ctx.rpc.register(gatesRpcDefinition, …)` with the TUI consuming `context.client.rpc(gatesRpcDefinition)`; contract-tested.
+- TUI plugin: `tui: true` on the main plugin, `./tui` export, OpenTUI/Solid peer dependencies, cleanup functions for `data.on`/slots, and the keymap layer correctly anchored in the always-mounted `app` slot (registering it from `setup` throws — host provider constraint).
+- `ctx.vcs` used for parent-side validation checks; `ctx.location.project` scopes all storage keys.
 
-Sources:
+### Deviations (accepted, documented)
 
-- [R1 — Anthropic multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R4 — Beam production orchestration patterns](https://beam.ai/agentic-insights/multi-agent-orchestration-patterns-production)
-- [R6 — OpenCode plugin orchestration issue](https://github.com/anomalyco/opencode/issues/20849)
+1. `(Plugin.define as any)({ id, tui: true, … })` — the pinned `Plugin` type has no `tui` field, so the plugin object is type-erased at definition. Works and is covered by `test/contract/plugin.test.ts`, but typos in `id`/`setup` would not be caught at compile time. Alternative: a local augmented type or upstream field.
+2. `ctx.catalog.model.list()` (`worker-models/runtime.ts`) — `catalog` exists in the pinned `Context` type but is **not documented** on the plugin guide; the documented surface is `ctx.model.list()`. Compat risk on future pins; treat as a tracked assumption (A15).
+3. `src/tui.ts` exports a plain object `satisfies Definition` rather than `Plugin.define` from `@opencode/plugin/tui` — functionally equivalent; cosmetic conformance nit.
+4. No `./rpc` package export. The docs recommend exporting `./rpc` when the RPC contract is shared with other packages; today the gates definition is bundled into both entrypoints by direct import, which is fine for internal use. Revisit if external consumers appear.
 
-### Theme 2 — Context isolation and structured transport
+### Pinned-contract capabilities available but unused (inputs to N1–N5)
 
-PromptEngines emphasizes small, task-specific contexts and metadata transport. CopilotKit demonstrates isolated subagent calls with explicit return values and visible delegation state. The deprecated npm package claims at least 40% token reduction from structured JSON instead of raw transcript passing.
+- `session.hook("prompt")` — prompt-admission hook (mutable draft: text/files/metadata/delivery). Retry semantics documented as not exactly-once.
+- `permission.hook("evaluate")` — runs for `allow`/`ask` decisions after configured rules; an explicit configured `deny` is final; the hook may flip `effect` and set `message`.
+- `ctx.permission.rules` — session-scoped rules; **child sessions inherit the rules in effect when they are created** (real containment, not prompts).
+- Native `ctx.worktree` domain — `create`/`remove`/`list`/`refresh` + `transform`/`reload`, project ownership, `Worktree.OperationError` (force-required confirmations), `worktree.updated` events.
+- `ctx.generate.text` — sessionless model calls (no session, tools, or history).
+- `session.hook("retry")` — retry decision/delay override with `attempt` number.
+- `ctx.reference.transform`, `ctx.skill.transform`, `ctx.shell.hook("create.before")`, `ctx.integration.*` — documented surfaces with no current use.
 
-Suggested implication: downstream agents should receive typed task packets and artifact references, not copied conversation histories.
+## Completed Work and Residual Gaps
 
-Sources:
+Everything in this section shipped after the 2026-08-30 draft (issues #8/#10/#14–#21, branches `feat/s3-v1-controls`, `feat/10-phase1-runtime-contracts`, `feat/worktree-pr-orchestration`, `feat/nested-worker-delegation`, `feat/orchestration-lifecycle-reliability`, `feat/orchestrator-sessions-sidebar`, `feat/single-collab-merge`, and successors; pinned through beta-19151 → beta-19507).
 
-- [R2 — PromptEngines orchestrator pattern](https://www.promptengines.com/labnotes/articles/2026-03-14-orchestrator-pattern-agent-design-v3.html)
-- [R3 — CopilotKit subagents](https://docs.copilotkit.ai/pydantic-ai/multi-agent/subagents)
-- [R11 — `@moderndegree/opencode-agent-teams`](https://www.npmjs.com/package/@moderndegree/opencode-agent-teams)
+| Delivered | Evidence | Residual gap |
+|---|---|---|
+| **D2 — versioned structured handoffs** | `src/core/contracts.ts` (strict Zod mirror, 13-field envelope), `orchestrator_handoff_validate`, `STRUCTURED_HANDOFF_GUIDANCE`, `docs/phase-1/d2-*` | Callable, not an automatic gate; one-way structured→prose rendering; no stored handoff artifacts |
+| **D4 — complexity classifier** | `src/core/d4.ts`, `orchestrator_task_complexity_classify` (`runtimeEnforced: false`), `docs/phase-1/d4-*` | Advisory only; corpus labels unmeasured; not part of a run record |
+| **V2 — two-level validation** | `src/core/admission.ts` (8-state machine), `orchestration/validation.ts` (C1–C7/O1–O9 checks incl. `ctx.vcs`), `orchestrator_admission_transition`, `docs/phase-1/v2-validation-checklist.md` | Stateless vocabulary + callable validator; no automatic downstream admission; required-command re-runs remain parent-owned |
+| **V3 — capability/evidence hardening** | `orchestration/evidence.ts` (typed `EvidenceRecord`, `assessEvidence`, live/mutation factories) attached to every successful GH/worktree result; `docs/phase-1/v3-capability-matrix.md`; doctor authority split | Evidence returned to the model, not persisted; doctor still lacks a rendered capability matrix; `ctx.integration` auth state unused as a signal |
+| **S3 — trace/budget controls** | `observability/trace.ts` + `runtime.ts` (metadata-only, snapshot usage, unknown≠zero), `observability/budget.ts` (`within|exceeded|unknown`, fail-closed only for `stop-between-steps`), `docs/phase-1/s3-v1-controls.md` | No rate limits, retention policy, or operator dashboards; gates only plugin-owned next dispatches |
+| **V1-bounded — maker-checker review** | `observability/review.ts` (states/actions/reasons, terminal breaker), `orchestrator_review_get/transition`, goal-continuation integration, `test/unit/review.test.ts` | No automatic completion gate, no model-tier escalation, no separate reviewer context/hidden reasoning, process-local locking only |
+| **Publication lifecycle (beyond plan)** | `publish/` + terminal-chain policy: fail-closed push→draft→ready→best-effort approve→merge→verify; single-collaborator merge; exact-revision internal review authority | No durable per-operation GitHub ledger (only the capability record); merge-policy decision record is embedded in policy prose, not a standalone doc |
+| **Managed worktree lifecycle (beyond plan)** | `worktree/tools.ts` incl. `worktree_enter` safe boundary + pending receipt, `session/move-coordinator.ts`, `session.moved` anchor reconciliation | Still current-session ownership; no per-child isolation (see N2/N3); own git subprocess tooling rather than the native `ctx.worktree` domain |
+| **Per-session gates + TUI picker** | `gates/` (state/tools/rpc), `/gates`, TUI picker, read-only `orchestrator_gates_get` | Gates only narrow; they cannot grant; nothing to close |
+| **Bounded nested delegation + durable worker models** | `roles.ts` delegation graph, `worker-models/` (catalog + durable selection) | Nested concurrency still unscheduled (A4) |
+| **Peer discovery (beyond plan)** | `peers/` — bounded, redacted, deterministic peer-goal summaries via `storage.scan` | Not messaging (G1 remains open) |
+| **TUI sessions sidebar** | `src/tui/sidebar.ts` — read-only volatile projection from client caches | Not a durable projection (S2 remains open) |
 
-### Theme 3 — Independent validation, review, and failure containment
+## Prioritized Proposals — Remaining
 
-Beam discusses maker-checker debate, model tiering, circuit breakers, and bounded rounds. Anthropic recommends end-state evaluation, small evaluation suites, and human review. The npm package documents schema/static/test/semantic validation as an example architecture.
-
-Suggested implication: reviewer output should be an independently validated gate, not merely another conversational opinion.
-
-Sources:
-
-- [R1 — Anthropic evaluation and reliability guidance](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R4 — Beam maker-checker and model-tiering patterns](https://beam.ai/agentic-insights/multi-agent-orchestration-patterns-production)
-- [R11 — npm validation and failure taxonomy](https://www.npmjs.com/package/@moderndegree/opencode-agent-teams)
-
-### Theme 4 — Worktree isolation and integration policy
-
-Issue #20849 proposes worktree isolation as Phase 3 after background execution and DAG scheduling. The community OpenCode council repository describes lane worktrees, reconcilers, merge policy, and evidence packets. The OpenAgents teardown warns that lifecycle ownership and execution authority are separate concerns.
-
-Suggested implication: per-worker worktrees should be introduced only with explicit ownership, merge, conflict, and cleanup semantics.
-
-Sources:
-
-- [R6 — Issue #20849, Phase 3 worktree isolation](https://github.com/anomalyco/opencode/issues/20849)
-- [R7 — OpenCode orchestration workflows](https://github.com/marcel-tuinstra/opencode-council/tree/v0.2.0-beta)
-- [R10 — OpenCode V2 architecture teardown](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-10-opencode-v2-architecture-teardown.md)
-
-### Theme 5 — Durable execution, checkpoints, and resumption
-
-Anthropic describes checkpoints and resume rather than restarting long-running agents. Knowlee recommends per-step checkpointing, exponential backoff, fallback routing, and cursor-based resumption. Tyk identifies durable execution and state management as core orchestration pillars.
-
-Suggested implication: goals and plan runs should evolve toward durable step-level execution records.
-
-Sources:
-
-- [R1 — Anthropic production reliability](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R5 — Agentik orchestration guide](https://www.agentik-os.com/blog/multi-agent-orchestration-production-guide)
-- [R8 — Tyk enterprise orchestration guide](https://tyk.io/learning-center/ai-agent-orchestration-a-complete-enterprise-guide/)
-
-### Theme 6 — Events, projections, observability, and budgets
-
-The OpenAgents teardown distinguishes volatile events, durable logs, and projections. Tyk recommends trace context, token budgets, step limits, rate limiting, and audit trails. Knowlee recommends per-run logs, structured reports, alerts, and token tracking.
-
-Suggested implication: live event delivery should not be treated as the sole source of truth.
-
-Sources:
-
-- [R8 — Tyk observability and governance](https://tyk.io/learning-center/ai-agent-orchestration-a-complete-enterprise-guide/)
-- [R9 — Knowlee fleet operations](https://www.knowlee.ai/blog/ai-agent-orchestration-guide-2026)
-- [R10 — OpenAgents event and projection model](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-10-opencode-v2-architecture-teardown.md)
-
-### Theme 7 — Bounded inter-agent messaging and start-simple governance
-
-Issue #20849 identifies `promptAsync` plus SSE as possible background primitives. PR #38942 describes bounded parent/child messaging with authorization, timeouts, caps, and visible markers. Beam cites a secondary Princeton NLP claim that single-agent systems match or outperform multi-agent systems on 64% of benchmarked tasks.
-
-Suggested implication: add messaging only where it solves a demonstrated coordination need, and route trivial tasks directly.
-
-Sources:
-
-- [R4 — Beam complexity tradeoffs](https://beam.ai/agentic-insights/multi-agent-orchestration-patterns-production)
-- [R6 — OpenCode background-agent proposal](https://github.com/anomalyco/opencode/issues/20849)
-- [R12 — OpenCode agent messaging proposal](https://github.com/anomalyco/opencode/pull/38942)
-
-## Prioritized Proposals
-
-| Priority | ID | Group | Improvement | Codebase rationale and research linkage | Effort | Impact | Primary risk |
+| Priority | ID | Group | Improvement | Rationale | Effort | Impact | Primary risk |
 |---|---|---|---|---|---:|---:|---|
-| P0 | D4 | Delegation & Prompting | Start-simple complexity gate | README already advises skipping trivial edits; Beam and Anthropic warn about cost multiplication. | S | High | Under-delegation |
-| P0 | D2 | Delegation & Prompting | Versioned JSON handoffs and artifact references | Current handoff is plain text; npm claims ≥40% token reduction from structured transport. | M | High | Information loss |
-| P0 | V2 | Verification & Safety | Two-level validation before downstream admission | Current review policy is prompt-based; Anthropic and npm support explicit evaluation stages. | M | High | False confidence — callable validation tools implemented (issue #10), still no automatic gate |
-| P0 | V3 | Verification & Safety | Host-tool preflight and capability matrix | `policy.ts` already requires preflight; `doctor` remains local/advisory. | S | High | Misleading capability status |
-| P0 | S3 | State & Observability | Trace, budget, latency, token, and step controls | Current hook mainly warns on failed orchestrator tools; Tyk/Knowlee recommend structured governance. | M | High | Privacy and overhead — **bounded opt-in impl (trace/budget) on `feat/s3-v1-controls`** |
-| P1 | D1 | Delegation & Prompting | DAG decomposition with adaptive scaling | Current native delegation has no visible task graph; Anthropic and issue #20849 describe DAG scheduling. | L | High | Over-decomposition |
-| P1 | D3 | Delegation & Prompting | Context isolation target and enforcement | PromptEngines recommends task-specific contexts under 5K tokens; native isolation is not currently measured. | M | High | Lossy compression |
-| P1 | V1 | Verification & Safety | Maker-checker review with circuit breaker and model tiering | `require_review` is not a runtime gate; Beam recommends bounded independent review. | M | High | Cost and review loops — **bounded opt-in impl (review + breaker) on `feat/s3-v1-controls`; tiering not implemented** |
-| P1 | V4 | Verification & Safety | Redaction and authority-boundary hardening | Redaction is pattern-based; child authority and permission `ask` semantics need explicit boundaries. | M | High | False security |
-| P1 | S1 | State & Observability | Durable step checkpoints with backoff and cursor resume | Goal/run records lack per-step receipts; Knowlee and Anthropic recommend resumable execution. | L | High | Duplicate side effects |
-| P1 | S2 | State & Observability | Separate volatile events, durable logs, and projections | Current subscriptions can miss events; OpenAgents documents this distinction. | L | High | State divergence |
-| P1 | W1 | Worktree & Isolation | Worktree per worker after host API validation | Current policy explicitly says no atomic child isolation; issue #20849 proposes this as Phase 3. | L | High | Corruption or unowned edits |
-| P1 | W2 | Worktree & Isolation | Reconciler and explicit merge policy | Current tools create/status/push/cleanup but do not provide merge-back policy. | L | High | Destructive merge |
-| P2 | G1 | DX & Governance | Bounded parent/child messaging | PR #38942 proposes authorization, timeouts, caps, and separate message channels. | M | Medium | Deadlock |
-| P2 | G2 | DX & Governance | Versioned policy profiles and evidence packets | Community council and enterprise guides emphasize reason codes, governance records, and operator review. | M | Medium | Configuration complexity |
+| P0 | N2 | Runtime Authority | Worker containment via `permission.rules` | Child sessions inherit rules at creation — the first real host-enforced authority boundary; closes the V4 containment gap | M | High | Over-blocking legitimate work; rule drift |
+| P0 | N1 | Runtime Authority | Admission enforcement via `session.hook("prompt")` + `permission.hook("evaluate")` | Makes D4/V2/V1 enforceable at runtime on plugin-owned dispatch, opt-in and fail-closed | M | High | Prompt hooks are not exactly-once; false blocks |
+| P1 | N3 | Worktree & Isolation | Migrate managed worktrees onto native `ctx.worktree` (supersedes W1/W2) | Documented domain with ownership, refresh, `worktree.updated`, `Worktree.OperationError`; unlocks per-worker isolation on a supported path | L | High | Behavior drift during migration; canonical-config coupling |
+| P1 | N4 | Verification & Safety | Sessionless deterministic checks via `ctx.generate.text` | Semantic handoff lint, review-rubric parsing, complexity adjudication without child sessions | S | Medium | Nondeterministic model output; cost |
+| P1 | V4 | Verification & Safety | Redaction centralization + authority recording | One tested redactor; evidence marked safe/redacted/unavailable; effective authority = intersection (now expressible via N2 rules) | M | High | False security |
+| P1 | S1 | State & Observability | Durable per-step checkpoints with backoff and cursor resume | Goal/run records still lack per-step receipts; `storage.scan` gives cursors; retry classes feed N5 | L | High | Duplicate side effects |
+| P1 | D1 | Delegation & Prompting | DAG scheduler with adaptive scaling | `max_parallel` still prompted only (A4 true); D4 now supplies the routing input | L | High | Over-decomposition |
+| P2 | S2 | State & Observability | Durable event log + materialized projections | Volatile events still sole source for continuation/sidebar hydration; TUI sidebar is a volatile projection | L | High | State divergence |
+| P2 | N5 | State & Observability | Retry/backoff policy via `session.hook("retry")` | Documented retry override; feeds S1 retry classification with bounded delays | S | Medium | Fighting host classification |
+| P2 | D3 | Delegation & Prompting | Context budget measurement | No token estimator or budget yet; usage snapshots exist in trace records | M | High | Lossy compression |
+| P2 | G1 | DX & Governance | Bounded parent/child messaging | Pinned contract still has no messaging/parentage API; peers are a stopgap; requires host primitives first | M | Medium | Deadlock |
+| P2 | G2 | DX & Governance | Versioned policy profiles + evidence packets | Config surface has grown (trace/budget/review/clarify/publish/gates); `ctx.reference.transform` can publish profile docs | M | Medium | Profile sprawl |
 
-### Delegation & Prompting
+### Runtime Authority (new)
 
-#### D1 — DAG Task Decomposition with Adaptive Scaling
+#### N1 — Admission Enforcement via Prompt and Permission Hooks
 
 **Problem**
 
-The repository declares delegation roles and a parallelism ceiling, but source inspection does not show a first-class task graph, dependency validator, topological scheduler, or central semaphore. Native model behavior may therefore determine decomposition and concurrency.
+D4 classification, D2/V2 validation, and V1 review are all callable/advisory. Nothing prevents a run from being reported complete without validated review, and no admission metadata survives into the host.
 
 **Proposal**
 
-A future orchestration layer could represent each child task with:
+An opt-in enforcement mode (strictly additive to current defaults) could:
 
-- Stable task ID.
-- Semantic role.
-- Prompt and expected output schema.
-- Dependency IDs.
-- Exact read/write scope.
-- Risk class.
-- Token, step, and time budgets.
-- Retry policy.
-- Artifact references.
-- Validation requirements.
-
-A scheduler could execute ready nodes in waves, reject cycles and duplicate IDs, and cap active tasks at `max_parallel`. Suggested scaling heuristics:
-
-- Simple fact or single-file tasks: direct execution or one worker.
-- Small comparisons: two to four workers.
-- Complex breadth-first tasks: more workers only when expected value justifies cost.
-- Shared mutable files: serialize or require validated isolation.
+- Register `session.hook("prompt")` for the orchestrator session to attach admission metadata (`event.metadata`) and, when a configured gate refuses, steer delivery or rewrite to the refusal contract instead of admitting the orchestration prompt.
+- Register `permission.hook("evaluate")` so plugin-owned tool calls (permission actions `orchestrator_validation`, `orchestrator_gates`, publication actions) can be downgraded to `deny` with a truthful `message` when the dispatch gate, bounded-review breaker, or budget evaluation refuses — a real runtime gate for plugin surfaces.
+- Keep the plugin-owned dispatch gate (goal continuation, command delivery) as the primary checkpoint; hooks are the second, host-visible layer.
+- Respect the documented semantics: prompt hooks run once per admission and are not an exactly-once boundary; permission hooks run only for `allow`/`ask` outcomes (explicit configured `deny` is final and must stay final).
+- Never auto-enable: default behavior must stay byte-identical to today.
 
 **Files affected (candidate)**
 
-- `src/core/config.ts`
-- `src/core/policy.ts`
-- `src/core/prompts.ts`
+- `src/core/config.ts` (new enforcement mode)
 - `src/opencode-v2/plugin.ts`
-- `src/opencode-v2/commands/runtime.ts`
-- Candidate new `src/opencode-v2/orchestration/graph.ts`
+- `src/opencode-v2/observability/runtime.ts`
+- Candidate new `src/opencode-v2/authority/hooks.ts`
 
-**Effort:** L  
-**Impact:** High  
-**Risk:** Poor decomposition could make incorrect plans execute faster. A scheduler could also conflict with native OpenCode lifecycle semantics.
+**Effort:** M · **Impact:** High · **Risk:** False blocks on retry-safe hooks; overlapping with native permission UX.
 
 **Next step**
 
-Create a design-only task graph schema and evaluate it against representative repository tasks before implementing a scheduler.
+Write a hook-semantics test matrix (admission, retry-no-rerun, deny-is-final, delivery steering) against the pinned package before any gating logic.
 
-**Web source linkage**
-
-- [R1](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R4](https://beam.ai/agentic-insights/multi-agent-orchestration-patterns-production)
-- [R6](https://github.com/anomalyco/opencode/issues/20849)
-
-#### D2 — Versioned JSON Handoffs and Artifact References
+#### N2 — Worker Containment via Session Permission Rules
 
 **Problem**
 
-`HANDOFF_FORMAT` is a useful human-readable contract, but raw text is ambiguous and expensive to pass through multiple agents. The parent must parse claims from prose and cannot reliably distinguish facts, assumptions, evidence, and recommendations.
+Worker authority is prompt-only. Disjoint write scopes and "implementers never push" are instructions, not boundaries.
 
 **Proposal**
 
-A future handoff contract could use a versioned JSON envelope containing:
+Use `ctx.permission.rules` to install session-scoped rules for the orchestrator session immediately before delegating, relying on documented child-session inheritance at creation:
 
-- `version`
-- `taskId`
-- `status`
-- `outcome`
-- `facts`
-- `assumptions`
-- `filesRead`
-- `filesChanged`
-- `verification[]`
-- `risks[]`
-- `followUp`
-- `artifactRefs[]`
-- `reviewState`
+- Deny `edit`/`write`-class actions outside the current managed worktree directory (or the orchestrator's checkout when no worktree is entered) for sessions that will spawn implementation children.
+- Deny plugin-orchestrator-only tool actions (`orchestrator_validation`, `orchestrator_gates`) to child sessions at the permission layer, in addition to the existing tool-level agent checks.
+- Deny GitHub mutation actions to non-orchestrator sessions when `github.enabled` (defense in depth behind the tool preconditions).
+- Record effective authority as the intersection of parent delegation and these rules (feeds V4), and clear rules when the orchestrator leaves the worktree or the session ends.
+- Never widen: rules only restrict, and only within the orchestrator's own session lineage; static config gates and per-session gates remain untouched.
 
-Human-readable rendering could remain available, but downstream agents should consume validated structured data and references to stored artifacts rather than raw transcripts.
+**Verification requirement**
 
-The npm package claims at least 40% token reduction against naive transcript passing. That figure should be treated as an unverified external claim, especially because the package is deprecated.
+Child-session rule inheritance is documented on the current plugin guide but must be probed against the pinned host before relying on it (see A3/A16 below): create a child from a session with rules and confirm the child enforces them.
 
 **Files affected (candidate)**
 
-- `src/core/policy.ts`
-- `src/core/prompts.ts`
-- `src/opencode-v2/agents.ts`
-- `src/opencode-v2/commands/runtime.ts`
-- Candidate new `src/core/contracts.ts`
-- Candidate new `src/opencode-v2/orchestration/handoff.ts`
-
-**Effort:** M  
-**Impact:** High  
-**Risk:** Overly rigid schemas could discard useful context; artifact storage could retain secrets.
-
-**Next step**
-
-Define a minimal schema and test whether it preserves the information currently required by the five-field handoff.
-
-**Web source linkage**
-
-- [R1](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R2](https://www.promptengines.com/labnotes/articles/2026-03-14-orchestrator-pattern-agent-design-v3.html)
-- [R3](https://docs.copilotkit.ai/pydantic-ai/multi-agent/subagents)
-- [R11](https://www.npmjs.com/package/@moderndegree/opencode-agent-teams)
-
-#### D3 — Context Isolation and a Subagent Context Budget
-
-**Problem**
-
-Workers receive prompt policy, but the repository has no visible token estimator, context budget, output-size budget, or enforcement that a child receives only relevant inputs.
-
-**Proposal**
-
-A future transport could enforce:
-
-- Task-specific inputs only.
-- Artifact references instead of copied transcripts.
-- A target of less than 5,000 task-specific tokens for ordinary workers.
-- Explicit exceptions for tasks requiring larger context.
-- Output size limits and compression levels.
-- Parent summaries capped separately from worker outputs.
-- Measured input/output token metadata where the host exposes it.
-
-The `<5K` value should be treated as a heuristic from PromptEngines’ internal observations, not a universal correctness threshold.
-
-**Files affected (candidate)**
-
-- `src/core/prompts.ts`
-- `src/core/policy.ts`
-- `src/opencode-v2/agents.ts`
-- `src/opencode-v2/commands/runtime.ts`
-- `src/opencode-v2/process/runner.ts`
-- Candidate new `src/opencode-v2/orchestration/context-budget.ts`
-
-**Effort:** M  
-**Impact:** High  
-**Risk:** Compression could omit a critical requirement; token accounting may not be available from the pinned V2 API.
-
-**Next step**
-
-Measure prompt and handoff sizes on a small task corpus before selecting a hard limit.
-
-**Web source linkage**
-
-- [R1](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R2](https://www.promptengines.com/labnotes/articles/2026-03-14-orchestrator-pattern-agent-design-v3.html)
-- [R3](https://docs.copilotkit.ai/pydantic-ai/multi-agent/subagents)
-
-#### D4 — Start-Simple Complexity Gate
-
-**Problem**
-
-Multi-agent execution adds model calls, latency, coordination, and failure modes. The README already advises direct execution for trivial single-file edits, but the gate is advisory and not represented in a run record.
-
-**Proposal**
-
-A future admission step could estimate:
-
-- Number of independent subtasks.
-- Number of dependent stages.
-- Number of files or modules.
-- Need for independent review.
-- External side effects.
-- Shared mutable state.
-- Security or compliance risk.
-- Expected value of parallelism.
-
-The system could recommend direct execution for low-complexity tasks and require an explicit user override for unnecessary orchestration.
-
-The Beam article cites a secondary Princeton NLP claim that single-agent systems suffice on 64% of benchmark tasks. That claim should be independently validated before becoming a product metric.
-
-**Files affected (candidate)**
-
-- `src/core/config.ts`
-- `src/core/policy.ts`
-- `src/core/prompts.ts`
-- `src/opencode-v2/commands/runtime.ts`
 - `src/opencode-v2/plugin.ts`
-
-**Effort:** S  
-**Impact:** High  
-**Risk:** A gate may under-delegate tasks whose complexity is initially hidden.
-
-**Next step**
-
-Build a labeled corpus of trivial, multi-step, high-risk, and shared-state tasks and evaluate false-positive/false-negative rates.
-
-**Web source linkage**
-
-- [R1](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R4](https://beam.ai/agentic-insights/multi-agent-orchestration-patterns-production)
-
-### Verification & Safety
-
-#### V1 — Maker-Checker Review with Circuit Breaker and Model Tiering
-
-**Problem**
-
-`require_review` changes prompts but does not visibly prevent a run from being reported complete without an independent reviewer. Repeated reviewer rejection could also create an unbounded loop.
-
-**Proposal**
-
-A future review gate could:
-
-- Require a maker result and independent checker result.
-- Keep reviewer context separate from the maker’s hidden reasoning.
-- Require direct diff and test evidence.
-- Limit review/rework rounds.
-- Escalate to a stronger model tier after bounded failures.
-- Open a circuit breaker after repeated rejection, timeout, or contradictory evidence.
-- Require human confirmation for high-risk or externally mutating actions.
-
-Model tiering should remain role/capability-based rather than hard-coded to vendor model names.
-
-**Implemented (bounded, opt-in — `feat/s3-v1-controls`)**
-
-- `review.mode: "bounded"` adds `orchestrator_review_get` / `orchestrator_review_transition` and a **separate version-1 review schema** (`src/opencode-v2/observability/review.ts`) with fixed states (`pending`/`approved`/`changes-requested`/`blocked`/`tripped`), fixed reason codes, and deterministic transitions. D2 `reviewState` and the core admission machine (V2) are unchanged.
-- **Bounded rounds** (`review.max_rounds`, default 2, range 1..8): `request-changes` re-opens rounds while rounds remain and trips the circuit (open, requires human) at max; `approve` requires every fixed boolean check; `block` opens the circuit immediately.
-- **Circuit breaker**: tripped/blocked records stop goal auto-continuation (checked before reservation and before delivery); pending/changes-requested/approved do not trip it; a new task start that replaces a terminal record reopens it.
-- One bounded current record per session (`review/v1/<project>/<session>`, process-local `withSessionLock` only — no CAS/cross-process guarantee). No free-form reviewer text is persisted.
-- Still **not implemented** here: automatic completion gating, model-tier escalation (V1 keeps role-based review; no vendor tiering), human confirmation prompts, and separate reviewer contexts/hidden reasoning.
-- See `docs/phase-1/s3-v1-controls.md`.
-
-**Files affected (candidate)**
-
-- `src/core/config.ts`
-- `src/core/roles.ts`
-- `src/core/policy.ts`
-- `src/core/prompts.ts`
-- `src/opencode-v2/plugin.ts`
-- `src/opencode-v2/commands/runtime.ts`
-
-**Effort:** M  
-**Impact:** High  
-**Risk:** Cost and latency could grow rapidly; independent agents may share the same blind spot.
-
-**Next step**
-
-Define a fixed review rubric, maximum rounds, escalation rules, and terminal states before changing runtime behavior.
-
-**Web source linkage**
-
-- [R1](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R4](https://beam.ai/agentic-insights/multi-agent-orchestration-patterns-production)
-- [R8](https://tyk.io/learning-center/ai-agent-orchestration-a-complete-enterprise-guide/)
-
-#### V2 — Two-Level Validation Before Downstream Admission
-
-**Problem**
-
-Current handoffs can contain claims and verification text, but downstream work is not visibly blocked until both the worker and orchestrator validate the result.
-
-**Proposal**
-
-A future downstream admission gate could require:
-
-1. Worker-level validation:
-   - Output schema.
-   - Scope compliance.
-   - Required commands.
-   - Artifact existence.
-   - Local tests or checks.
-
-2. Orchestrator-level validation:
-   - Direct inspection of files and repository state.
-   - Cross-task consistency.
-   - Conflict and dependency checks.
-   - Confirmation that evidence corresponds to the current workspace.
-   - Review verdict where required.
-
-Only a validated receipt should be passed to dependent tasks.
-
-**Files affected (candidate)**
-
-- `src/core/policy.ts`
-- `src/core/prompts.ts`
-- `src/opencode-v2/plugin.ts`
-- `src/opencode-v2/commands/runtime.ts`
-- Candidate new `src/opencode-v2/orchestration/validation.ts`
-
-**Effort:** M  
-**Impact:** High  
-**Risk:** Validation may become ceremonial if checks are not deterministic or independently sourced.
-
-**Next step**
-
-List which repository claims can be checked deterministically and which require reviewer judgment.
-
-**Web source linkage**
-
-- [R1](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R3](https://docs.copilotkit.ai/pydantic-ai/multi-agent/subagents)
-- [R11](https://www.npmjs.com/package/@moderndegree/opencode-agent-teams)
-
-#### V3 — Host Tool Preflight and Capabilities Probe Hardening
-
-**Problem**
-
-`src/core/policy.ts` already requires inspecting the host tool catalog before GitHub operations. `src/cli/doctor.ts` explicitly says it cannot prove merged MCP configuration, remote reachability, live permissions, or server state.
-
-**Proposal**
-
-A future capability layer could distinguish:
-
-- Static configuration validity.
-- Local CLI availability.
-- Live server-side tool availability.
-- Authentication state.
-- Repository resolution.
-- Permission/action availability.
-- Worktree root validity.
-- Native API feature availability.
-
-Doctor output could show an explicit capability matrix and authority source for each result. It should remain credential-safe and should never treat local checks as proof of remote capability.
-
-The existing server-side `github_capabilities` probe should remain authoritative for the plugin’s own `gh` tools.
-
-**Files affected (candidate)**
-
-- `src/cli/doctor.ts`
-- `src/core/policy.ts`
-- `src/opencode-v2/gh/client.ts`
-- `src/opencode-v2/gh/tools.ts`
-- `src/opencode-v2/worktree/tools.ts`
-- `src/opencode-v2/plugin.ts`
-
-**Effort:** S  
-**Impact:** High  
-**Risk:** Capability results may become stale or appear more authoritative than they are.
-
-**Next step**
-
-Document each capability’s authority, freshness, failure mode, and credential exposure before expanding doctor output.
-
-**Web source linkage**
-
-- [R1](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R8](https://tyk.io/learning-center/ai-agent-orchestration-a-complete-enterprise-guide/)
-- [R10](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-10-opencode-v2-architecture-teardown.md)
-
-#### V4 — Redaction and Authority-Boundary Hardening
-
-**Problem**
-
-`src/opencode-v2/process/redact.ts` covers known credential patterns and caller-provided exact secrets, but pattern coverage is not proof of completeness. Handover code has a separate, narrower redaction function. Permission rules primarily control visibility, and prompt-level worker restrictions are not containment.
-
-**Proposal**
-
-A future safety layer could:
-
-- Centralize redaction through one tested interface.
-- Mark every evidence field as safe, redacted, or unavailable.
-- Add adversarial redaction fixtures for URLs, encoded values, multiline output, and provider-specific credentials.
-- Record effective authority as an intersection of parent delegation and child policy.
-- Explicitly distinguish visibility, approval, and containment.
-- Refuse claims of isolation unless the host provides a real boundary.
-
-**Files affected (candidate)**
-
-- `src/opencode-v2/process/redact.ts`
-- `src/opencode-v2/commands/runtime.ts`
+- `src/opencode-v2/worktree/tools.ts` (rule install/clear around `worktree_enter`/`cleanup`)
 - `src/core/permissions.ts`
-- `src/opencode-v2/agents.ts`
-- `src/opencode-v2/gh/client.ts`
-- `src/opencode-v2/worktree/tools.ts`
+- Candidate new `src/opencode-v2/authority/rules.ts`
 
-**Effort:** M  
-**Impact:** High  
-**Risk:** False positives can obscure useful evidence; false negatives create security exposure.
+**Effort:** M · **Impact:** High · **Risk:** Over-blocking legitimate parent work if rule scope is too broad; inheritance semantics differ across hosts.
 
 **Next step**
 
-Perform a redaction and authority threat model, explicitly excluding any claim that regexes are a complete secret boundary.
-
-**Web source linkage**
-
-- [R8](https://tyk.io/learning-center/ai-agent-orchestration-a-complete-enterprise-guide/)
-- [R10](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-10-opencode-v2-architecture-teardown.md)
-- [R12](https://github.com/anomalyco/opencode/pull/38942)
+Probe inheritance on the pinned host; then define the rule lifecycle (install at enter, clear at cleanup/exit) with unit tests against a fake rules store.
 
 ### Worktree & Isolation
 
-#### W1 — Worktree per Worker, Subject to Native API Validation
+#### N3 — Native Worktree Domain Migration (supersedes W1/W2)
 
 **Problem**
 
-The current policy explicitly states that native V2 child sessions do not receive plugin-controlled atomic worktree isolation. Existing worktree tools are current-session tools.
+The plugin implements worktrees through its own git subprocess allowlist with custom ownership bookkeeping. The pinned contract now ships a first-class `ctx.worktree` domain: project-scoped `create`/`remove`/`list`/`refresh`, recorded strategy ownership, `Worktree.OperationError` for force-required confirmations, and `worktree.updated` events. The old W1 ("worktree per worker after host API validation") and W2 ("reconciler and explicit merge policy") proposals should be re-scoped onto this documented surface; the fail-closed merge policy itself already shipped in the publication chain.
 
 **Proposal**
 
-A future isolation mode could provision one worktree per implementation child only if the host API can bind:
-
-- Parent session.
-- Child session.
-- Worktree directory.
-- Branch.
-- Base commit.
-- Effective permissions.
-- Cleanup ownership.
-
-If atomic binding cannot be proven, the system should refuse to claim isolation and retain the current safe-delegation behavior.
+- Preflight the native domain on the pinned host (`list`/`refresh`/`worktree.updated` delivery) and record compatibility (A16).
+- Migrate managed worktree create/list/remove behind a thin adapter with the existing tools as fallback; keep durable `worktree/v2/...` records as the projection until native inventory is proven equivalent.
+- Adopt `Worktree.OperationError({ forceRequired })` for dirty-worktree cleanup confirmation instead of ad-hoc refusal text.
+- Evaluate registering the plugin's git strategy via `ctx.worktree.transform` only if the plugin must own destination layout; otherwise rely on the bundled strategy.
+- Re-open per-worker isolation (old W1) on top of the native binding: orchestrator session → managed worktree → children created under rules (N2) that pin writes to that directory; cleanup only after integration or explicit user decision (old W2 lifecycles: `ready`, `moved`, `dirty`, `orphaned`, `cleanup-failed` are preserved).
 
 **Files affected (candidate)**
 
-- `src/core/config.ts`
-- `src/core/policy.ts`
+- `src/opencode-v2/worktree/{tools,git,state,events}.ts`
 - `src/opencode-v2/plugin.ts`
-- `src/opencode-v2/worktree/git.ts`
-- `src/opencode-v2/worktree/tools.ts`
-- `src/opencode-v2/worktree/state.ts`
-- `src/opencode-v2/worktree/events.ts`
-- `src/opencode-v2/session/move.ts`
+- `src/core/config.ts` (migration switch)
 
-**Effort:** L  
-**Impact:** High  
-**Risk:** Child edits could still reach the parent checkout if binding is advisory rather than atomic.
+**Effort:** L · **Impact:** High · **Risk:** Native create/refresh waits for canonical plugins and loads canonical configuration — behavior differences around worktrees created outside the repo root must be mapped before cutover.
 
 **Next step**
 
-Verify the pinned V2 session creation and location APIs against the installed SDK before designing an isolation contract.
+Compatibility probe + adapter design doc comparing native inventory with `worktree/v2` records on a synthetic set (clean, dirty, moved, orphaned).
 
-**Web source linkage**
+### Verification & Safety (remaining)
 
-- [R6](https://github.com/anomalyco/opencode/issues/20849)
-- [R7](https://github.com/marcel-tuinstra/opencode-council/tree/v0.2.0-beta)
-- [R10](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-10-opencode-v2-architecture-teardown.md)
+#### V4 — Redaction Centralization and Authority Recording
 
-#### W2 — Reconciler and Explicit Merge Policy
+Unchanged in goal from the previous draft — one tested redactor, adversarial fixtures, evidence fields marked safe/redacted/unavailable — with one new component: effective authority can now be **recorded** (and later enforced by N2) as the intersection of parent delegation, worker policy, and installed session rules. A redaction/authority threat model remains the entry point; regexes are still not a secret boundary (A8).
 
-**Problem**
+**Files affected (candidate):** `process/redact.ts`, `commands/runtime.ts`, `core/permissions.ts`, `gh/client.ts`, `worktree/tools.ts`, candidate `authority/rules.ts` (with N2).
 
-Current tooling supports worktree creation, status, push, and cleanup, but not a complete merge-back lifecycle. It does not define fast-forward, conflict, stale-base, or reviewer-approved integration policy.
+#### N4 — Sessionless Deterministic Checks via `ctx.generate.text`
 
-**Proposal**
+Use `ctx.generate.text` for checks that need judgment but not a session: semantic D2 lint (facts/assumptions coherence), review-rubric structuring for bounded review, and D4 adjudication of borderline classifications. Output must be parsed defensively and treated as advisory unless deterministic (schema/semantic) checks already pass; no transcripts or secrets in prompts; results recorded in the trace summary only as metadata.
 
-A future reconciler could require:
+**Files affected (candidate):** `orchestration/validation.ts`, `observability/review.ts` (adapters), `core/d4.ts`.
 
-- Stable base commit.
-- Clean worker tree.
-- Verified branch ownership.
-- Explicit merge strategy.
-- Fast-forward-only default.
-- No automatic conflict resolution.
-- Review approval before integration.
-- Direct commit/branch evidence.
-- Reconciliation status distinct from worker completion.
-- Cleanup only after integration or explicit user decision.
+**Effort:** S · **Impact:** Medium · **Risk:** Model nondeterminism; added cost; must never become the sole gate.
 
-Existing lifecycle statuses could be extended rather than silently repurposed.
-
-**Files affected (candidate)**
-
-- `src/opencode-v2/worktree/state.ts`
-- `src/opencode-v2/worktree/git.ts`
-- `src/opencode-v2/worktree/tools.ts`
-- `src/opencode-v2/worktree/events.ts`
-- `src/opencode-v2/gh/tools.ts`
-- `src/core/policy.ts`
-
-**Effort:** L  
-**Impact:** High  
-**Risk:** Incorrect merge policy could destroy user changes or create misleading completion claims.
-
-**Next step**
-
-Write a merge-policy decision record covering clean fast-forward, stale base, conflict, dirty tree, abandoned worker, and failed cleanup cases.
-
-**Web source linkage**
-
-- [R6](https://github.com/anomalyco/opencode/issues/20849)
-- [R7](https://github.com/marcel-tuinstra/opencode-council/tree/v0.2.0-beta)
-- [R10](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-10-opencode-v2-architecture-teardown.md)
-
-### State & Observability
+### State & Observability (remaining)
 
 #### S1 — Durable Per-Step Checkpoints with Backoff and Cursor Resume
 
-**Problem**
+As previously drafted (run/task IDs, idempotency keys, attempt numbers, cursors, error classes, backoff with jitter, last validated checkpoint, terminal reasons; refuse exactly-once claims). New inputs: `storage.scan` cursors exist; retry classes can consume N5's hook; trace summaries already count steps/retries. Replay-safety inventory (replay-safe / idempotent / compensatable / ambiguous) remains the entry point, now including the publication chain's external GitHub side effects.
 
-Goal and plan-run state is durable at a coarse level, but there are no visible durable records for each child step, attempt, output artifact, retry, or resume cursor. `withSessionLock` is process-local.
+**Files affected (candidate):** `goal/state.ts`, `goal/continuation.ts`, `commands/runtime.ts`, `publish/`, candidate `orchestration/run-state.ts`.
 
-**Proposal**
+#### S2 — Durable Event Log and Materialized Projections
 
-A future execution record could include:
+As previously drafted (volatile events vs durable append-only lifecycle records vs projections; monotonic sequence, schema version, idempotency key, redacted payload, replay/gap semantics). New context: the TUI sidebar is a working volatile projection; `storage.scan` pagination can back projection hydration; storage still lacks transactions, so publication rules must be defined before choosing primitives.
 
-- Run ID and task ID.
-- Idempotency key.
-- Step status.
-- Attempt number.
-- Cursor or dependency watermark.
-- Input artifact references.
-- Output artifact references.
-- Error classification.
-- Next retry timestamp.
-- Exponential backoff with jitter.
-- Last validated checkpoint.
-- Cancellation and terminal reason.
+**Files affected (candidate):** `plugin.ts`, `goal/continuation.ts`, `worktree/events.ts`, candidate `orchestration/{events,projections}.ts`.
 
-Recovery should resume from the last committed checkpoint where safe, while explicitly refusing to claim exactly-once behavior for ambiguous external side effects.
+#### N5 — Retry/Backoff Policy via the Retry Hook
 
-**Files affected (candidate)**
+Register `session.hook("retry")` to implement bounded, classed retry policy for orchestrator sessions: honor host classification, cap delays (documented: invalid delays fall back to the computed delay; built-in max attempts remain a hard limit), and record attempts in the trace summary. Feeds S1 retry classes; must not convert terminal failures into retries for external side-effect classes.
 
-- `src/opencode-v2/goal/state.ts`
-- `src/opencode-v2/goal/continuation.ts`
-- `src/opencode-v2/commands/runtime.ts`
-- `src/opencode-v2/plugin.ts`
-- Candidate new `src/opencode-v2/orchestration/run-state.ts`
+**Files affected (candidate):** `plugin.ts`, `observability/{runtime,trace}.ts`, candidate `authority/hooks.ts` (with N1).
 
-**Effort:** L  
-**Impact:** High  
-**Risk:** Retrying a partially completed external action can duplicate side effects.
+**Effort:** S · **Impact:** Medium · **Risk:** Fighting host classification; retry storms.
 
-**Next step**
+### Delegation & Prompting (remaining)
 
-Inventory which operations are replay-safe, idempotent, compensatable, or irreversibly ambiguous.
+#### D1 — DAG Scheduler with Adaptive Scaling
 
-**Web source linkage**
+Unchanged in goal: first-class task graph (stable IDs, roles, dependencies, scopes, risk, budgets, retries, artifacts, validation), cycle/duplicate rejection, wave execution capped at `max_parallel`. New inputs: D4 supplies routing recommendations; bounded nested delegation exists; worker models are durable. Still design-first: validate a schema against representative tasks before building a scheduler, and keep native delegation as the fallback.
 
-- [R1](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R5](https://www.agentik-os.com/blog/ai-agent-orchestration-production-guide)
-- [R8](https://tyk.io/learning-center/ai-agent-orchestration-a-complete-enterprise-guide/)
-- [R10](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-10-opencode-v2-architecture-teardown.md)
+#### D3 — Context Budget Measurement
 
-#### S2 — Separate Volatile Events, Durable Logs, and Projections
+Unchanged in goal (task-specific inputs, artifact references over transcripts, measured token metadata, explicit exceptions). New input: trace usage snapshots provide measured input/output token aggregates where the host emits them; the `<5K` figure remains a heuristic (A7). First step is still measurement on a small corpus, now feasible with `trace: "memory"`.
 
-**Problem**
-
-Current components subscribe to event streams for continuation and worktree reconciliation. The repository does not expose a durable orchestration event log or replayable projection layer, and event delivery guarantees are not equivalent to durable state.
-
-**Proposal**
-
-A future state model could provide three distinct surfaces:
-
-1. Volatile low-latency events for UI updates.
-2. Durable append-only lifecycle records for causality and replay.
-3. Materialized projections for current run/task/worktree status.
-
-Each event should have:
-
-- Run or aggregate ID.
-- Monotonic sequence.
-- Event type.
-- Schema version.
-- Idempotency key.
-- Timestamp.
-- Redacted payload.
-- Replay/gap semantics.
-
-Reconnect should hydrate from a projection or durable log before consuming live events.
-
-**Files affected (candidate)**
-
-- `src/opencode-v2/plugin.ts`
-- `src/opencode-v2/goal/continuation.ts`
-- `src/opencode-v2/worktree/events.ts`
-- `src/opencode-v2/goal/state.ts`
-- `src/opencode-v2/worktree/state.ts`
-- Candidate new `src/opencode-v2/orchestration/events.ts`
-- Candidate new `src/opencode-v2/orchestration/projections.ts`
-
-**Effort:** L  
-**Impact:** High  
-**Risk:** Multiple state surfaces can diverge without transactional publication and projection repair.
-
-**Next step**
-
-Define event authority, replay, retention, sequence, and projection-rebuild rules before selecting storage primitives.
-
-**Web source linkage**
-
-- [R1](https://www.anthropic.com/engineering/multi-agent-research-system)
-- [R8](https://tyk.io/learning-center/ai-agent-orchestration-a-complete-enterprise-guide/)
-- [R9](https://www.knowlee.ai/blog/ai-agent-orchestration-guide-2026)
-- [R10](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-10-opencode-v2-architecture-teardown.md)
-
-#### S3 — Structured Observability, Budgets, and Step Limits
-
-**Problem**
-
-Current `execute.after` handling logs failed orchestrator tools, but there is no structured trace ID, per-run token budget, latency series, step limit, or audit record.
-
-**Proposal**
-
-A future observability envelope could capture metadata only:
-
-- Trace ID.
-- Run, task, worker, and tool IDs.
-- Start/end timestamps.
-- Duration.
-- Model/provider identifiers where available.
-- Input/output token counts where available.
-- Tool-call counts.
-- Retry counts.
-- Validation outcomes.
-- Budget consumption.
-- Terminal reason.
-- Approval/review references.
-
-Hard controls could include:
-
-- Per-run token budget.
-- Per-task token budget.
-- Maximum steps.
-- Maximum wall-clock duration.
-- Maximum retries.
-- Rate limits.
-- Maximum concurrent workers.
-
-Prompts, secrets, and unrestricted raw transcripts should not be required for ordinary operational telemetry.
-
-**Files affected (candidate)**
-
-- `src/core/config.ts`
-- `src/core/policy.ts`
-- `src/opencode-v2/plugin.ts`
-- `src/opencode-v2/process/runner.ts`
-- `src/opencode-v2/commands/runtime.ts`
-- `src/opencode-v2/goal/continuation.ts`
-- `src/opencode-v2/gh/tools.ts`
-- `src/opencode-v2/worktree/tools.ts`
-
-**Effort:** M  
-**Impact:** High  
-**Risk:** Provider token metadata may be unavailable; telemetry can itself expose sensitive information.
-
-**Next step**
-
-Define a privacy-preserving metric schema and establish retention, redaction, and user-visibility rules.
-
-**Implemented (bounded, opt-in — `feat/s3-v1-controls`)**
-
-- Strict config blocks (`src/core/config.ts`): `trace` `off|memory|snapshot` (default `off`), `budget` `advisory|stop-between-steps` (default `advisory`, nullable finite `max_steps`/`max_tokens`/`max_cost_usd`/`max_wall_clock_ms`/`max_retries`), and `review` `prompt|bounded` (`max_rounds` 1..8 default 2). Defaults preserve the previous behavior exactly.
-- **Metadata-only tracing** (`src/opencode-v2/observability/trace.ts`, runtime in `observability/runtime.ts`): versioned bounded summaries (counts, timestamps, per-tool aggregates, steps/retries, latest usage snapshot) from pinned `execute.before/after` hooks and typed events only. No prompts, transcripts, payloads, call IDs (in-memory pairing only), or credentials. Usage aggregate events are snapshots (never additive) — no double counting; missing coverage is unknown/partial, never zero. The pinned Promise `SessionDomain` has no `session.stats`; no HTTP client is built.
-- **Deterministic budget evaluation** (`observability/budget.ts`): `within|exceeded|unknown` with exact-boundary `within`; unknown **token/cost** coverage fails closed only for `stop-between-steps` checks (reason recorded) while `advisory` never blocks. `stop-between-steps` gates only plugin-owned next dispatches (goal auto-continuation before reservation and before delivery; slash-command prompt delivery). `session.interrupt` is never called and no in-flight provider/tool call is cancelled.
-- Still **not implemented**: durable step checkpoints (§S1), replayable event logs/projections (§S2), rate limiting, per-workflow dashboards, and retention policies.
-
-**Web source linkage** for S3
-
-- [R8](https://tyk.io/learning-center/ai-agent-orchestration-a-complete-enterprise-guide/)
-- [R9](https://www.knowlee.ai/blog/ai-agent-orchestration-guide-2026)
-- [R10](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-10-opencode-v2-architecture-teardown.md)
-
-### DX & Governance
+### DX & Governance (remaining)
 
 #### G1 — Bounded Parent/Child Messaging
 
-**Problem**
-
-The repository uses native event subscriptions and queued session prompts but does not expose a bounded inter-agent message channel. Background completion and direct question/reply semantics are not modeled.
-
-**Proposal**
-
-If the pinned V2 API supports the required primitives, a future messaging channel could:
-
-- Use parent-mediated routing by default.
-- Identify sender, recipient, parent, and task ID.
-- Authorize replies against recorded parentage.
-- Cap message body size.
-- Cap per-child in-flight messages.
-- Cap cumulative round trips.
-- Time out blocked questions.
-- Cancel pending waits when either session stops.
-- Keep messaging separate from prompt promotion.
-- Preserve the recipient’s current model explicitly.
-- Emit visible, redacted transcript markers.
-- Fail fast when no parent exists.
-
-Messaging should remain opt-in until deadlock, cancellation, and race behavior are verified.
-
-**Files affected (candidate)**
-
-- `src/core/config.ts`
-- `src/core/policy.ts`
-- `src/core/prompts.ts`
-- `src/opencode-v2/plugin.ts`
-- `src/opencode-v2/goal/continuation.ts`
-- Candidate new `src/opencode-v2/messaging/service.ts`
-- Candidate new `src/opencode-v2/messaging/tools.ts`
-
-**Effort:** M  
-**Impact:** Medium  
-**Risk:** Deadlock, message storms, race conditions with queued prompts, and model switching.
-
-**Next step**
-
-Verify `promptAsync`, child-session relationships, event delivery, and cancellation behavior against the pinned V2 contract before designing the channel.
-
-**Web source linkage**
-
-- [R3](https://docs.copilotkit.ai/pydantic-ai/multi-agent/subagents)
-- [R6](https://github.com/anomalyco/opencode/issues/20849)
-- [R12](https://github.com/anomalyco/opencode/pull/38942)
+Still blocked on host primitives: the pinned contract has no `promptAsync`, parentage, or inter-session messaging surface (verified by grep of the pinned declarations); `permission`/`prompt` hooks do not provide it. Peer discovery is the current stopgap. Keep the design (parent-mediated routing, parentage authorization, size/round caps, timeouts, cancellation, visible redacted markers) parked until the pinned contract exposes the primitives; do not treat issue #20849 or PR #38942 as merged functionality.
 
 #### G2 — Versioned Policy Profiles and Evidence Packets
 
-**Problem**
-
-Configuration currently expresses role IDs, parallelism, review, goals, GitHub, and worktrees, but not a versioned operational profile containing budgets, isolation mode, validation policy, risk class, or approval requirements.
-
-**Proposal**
-
-A future policy profile could define:
-
-- Profile version and ID.
-- Role map.
-- Complexity gate.
-- Maximum workers.
-- Token/step/time budgets.
-- Review rubric and circuit breaker.
-- Isolation guarantees.
-- Allowed side effects.
-- Required capabilities.
-- Data sensitivity class.
-- Human approval requirements.
-- Evidence packet schema.
-- Retention and redaction policy.
-
-`doctor` and `/handover` could report the effective profile and explicit unsupported capabilities without exposing secrets.
-
-**Files affected (candidate)**
-
-- `src/core/config.ts`
-- `src/core/policy.ts`
-- `src/core/prompts.ts`
-- `src/cli/doctor.ts`
-- `src/cli/install.ts`
-- `src/opencode-v2/commands/runtime.ts`
-- `src/opencode-v2/plugin.ts`
-- `src/tui.ts`
-
-**Effort:** M  
-**Impact:** Medium  
-**Risk:** Profile sprawl and silent no-op configuration fields.
-
-**Next step**
-
-Define one conservative profile and list every field that is advisory, enforced, unsupported, or host-dependent.
-
-**Web source linkage**
-
-- [R7](https://github.com/marcel-tuinstra/opencode-council/tree/v0.2.0-beta)
-- [R8](https://tyk.io/learning-center/ai-agent-orchestration-a-complete-enterprise-guide/)
-- [R9](https://www.knowlee.ai/blog/ai-agent-orchestration-guide-2026)
-- [R10](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-10-opencode-v2-architecture-teardown.md)
+Unchanged in goal, now with a concrete delivery surface: publish the effective profile as a local reference via `ctx.reference.transform` (handbook-style), report it through `doctor` and `/handover`, and derive it from the existing strict config blocks (trace/budget/review/clarify/publish/gates). List every field as advisory, enforced, unsupported, or host-dependent; no secrets.
 
 ## Non-Goals / Out of Scope
 
-This plan does not propose:
-
-- Editing source, tests, configuration, or README files.
-- Replacing OpenCode’s native V2 session or plugin architecture.
-- Claiming stable V2 APIs.
-- Treating prompt instructions as filesystem or OS isolation.
-- Automatically creating GitHub issues, branches, pull requests, or merges.
-- Automatically merging worker branches.
+- Replacing OpenCode's native V2 session or plugin architecture.
+- Claiming stable V2 APIs or treating beta behavior as contract.
+- Treating prompt instructions as filesystem or OS isolation (until N2 lands and is verified, prompt rules remain prompts).
 - Guaranteeing exactly-once provider or external-tool execution.
-- Persisting raw transcripts or credentials.
-- Adopting the deprecated npm package as a dependency.
-- Treating closed issue #20849 or closed PR #38942 as merged upstream functionality.
-- Building a general-purpose enterprise agent platform.
-- Certifying regulatory compliance.
-- Adding distributed cluster placement before leases, fencing, and ownership semantics exist.
+- Persisting raw transcripts, prompts, or credentials.
+- Adopting the deprecated npm package as a dependency; treating closed issue #20849 or closed PR #38942 as merged upstream functionality.
+- Widening any gate: session gates only narrow; N1/N2 enforcement must only restrict.
+- Building a general-purpose enterprise agent platform; certifying regulatory compliance.
+- Distributed cluster placement before leases, fencing, and ownership semantics exist.
 
 ## Risks and Mitigations
 
 | Risk | Mitigation |
 |---|---|
-| Over-orchestration increases cost and latency | Start-simple complexity gate, budgets, step limits, and direct-execution path |
-| Bad decomposition amplifies errors | DAG validation, independent planning, two-level validation, bounded review |
-| Structured compression loses requirements | Versioned schemas, artifact references, required facts/assumptions, parent verification |
-| Multi-agent consensus becomes correlated error | Independent checker prompts, deterministic checks, human review for high-risk actions |
-| Native V2 API changes break integration | Capability probes, pinned contract tests, explicit beta assumptions, no undocumented calls |
-| Storage is not transactional or durable enough | Verify storage guarantees, add idempotency, avoid exactly-once claims, use append/replay design |
-| Retry duplicates side effects | Classify operations by replay safety, require idempotency keys, pause ambiguous actions |
-| Worktree isolation is only advisory | Refuse isolation claims without atomic child/location binding |
-| Merge reconciliation destroys user work | Fast-forward-only default, dirty/conflict refusal, explicit confirmation, immutable base evidence |
-| Messaging deadlocks or loops | Separate channels, parentage checks, timeouts, cancellation, per-child and cumulative caps |
+| Over-orchestration increases cost and latency | D4 routing (shipped), budgets/step limits (shipped, opt-in), direct-execution path |
+| Bad decomposition amplifies errors | Two-level validation (shipped, callable), bounded review (shipped), D1 DAG validation (planned) |
+| Runtime enforcement false-blocks legitimate work (N1/N2) | Opt-in modes, defaults byte-identical, truthful refusal messages, deny-is-final preserved, hook test matrix first |
+| Native worktree migration drift (N3) | Adapter with fallback, dual-record comparison, compatibility probe before cutover |
+| Child rule inheritance differs across hosts (N2) | Pin-level probe (A16), rules recorded and reported, never the only boundary |
+| Storage is not transactional or durable enough | Idempotency keys, no exactly-once claims, append/replay design (S1/S2), scan-cursor hydration |
+| Retry duplicates side effects | Replay-safety inventory incl. publication chain, retry classes (N5), pause ambiguous actions |
+| Multi-agent consensus becomes correlated error | Independent checker prompts, deterministic checks first (N4 advisory only), human review for high-risk actions |
+| Native V2 API changes break integration | Pinned contract tests, conformance section above, A15/A16 tracked assumptions, no undocumented calls beyond `ctx.catalog` |
 | Redaction misses novel credential formats | Central redactor, adversarial fixtures, no raw output in evidence, explicit uncertainty |
-| Observability leaks private data | Metadata-first telemetry, redaction, retention limits, configurable visibility |
-| Doctor creates false confidence | Show authority and freshness for every capability; keep local checks advisory |
-| Vendor/community claims are overstated | Mark source quality, verify quantitative claims, do not use deprecated/closed artifacts as dependencies |
+| Observability leaks private data | Metadata-only trace records (shipped), retention limits still to define (S2) |
+| Doctor creates false confidence | Authority/freshness per capability, local checks advisory, `ctx.integration` signal optional |
 
 ## Next Steps
 
-No implementation is proposed yet. Each phase begins with design, measurement, and contract verification.
+### Phase A — Runtime Authority (N1, N2)
 
-### Phase 1 — Quick Wins
+- Probe the pinned host: `session.hook("prompt")` admission/retry semantics, `permission.hook("evaluate")` ordering vs configured rules, child-session `permission.rules` inheritance.
+- Ship the hook-semantics test matrix, then opt-in enforcement (N1) and the rule lifecycle around `worktree_enter` (N2).
+- Exit evidence: pinned-host probe results; enforcement mode with byte-identical defaults; containment demonstrated in a contract test.
 
-Suggested activities:
+### Phase B — Worktree Migration (N3)
 
-- Establish a task corpus for trivial, multi-step, shared-state, and high-risk requests.
-- Measure current prompt sizes, handoff sizes, delegation counts, latency, failures, and review loops where host telemetry permits.
-- Document which constraints are prompt-only versus runtime-enforced.
-- Draft the minimal structured handoff schema.
-- Draft the complexity-gate decision table.
-- Create a capability authority matrix for local doctor checks, server-side probes, and host-configured tools.
-- Record all assumptions about V2 APIs and storage.
+- Compatibility probe of `ctx.worktree` (create/list/refresh/`worktree.updated`, `Worktree.OperationError`) against synthetic clean/dirty/moved/orphaned states.
+- Adapter cutover with the current tools as fallback; preserve `worktree/v2` records as projection until native inventory is proven equivalent.
+- Re-scope per-worker isolation on the native binding + N2 rules.
+- Exit evidence: dual-record comparison; merge/decision record for cutover; per-worker isolation design.
 
-Suggested exit evidence:
+### Phase C — Verification Hardening (N4, V4)
 
-- Baseline metrics.
-- Reviewed handoff schema.
-- Complexity-gate false-positive/false-negative analysis.
-- Capability matrix with explicit unknowns.
+- Redaction/authority threat model; central redactor with adversarial fixtures.
+- Sessionless semantic checks wired as advisory post-steps of the existing validators.
+- Exit evidence: threat model; fixtures green; N4 outputs recorded as trace metadata only.
 
-### Phase 2 — Foundation
+### Phase D — State and Scale (S1, S2, N5, D1, D3, G1, G2)
 
-Suggested activities:
-
-- Design task, receipt, validation, checkpoint, and evidence-packet contracts.
-- Decide whether storage can support atomic update, idempotency, append, and replay.
-- Define two-level validation and maker-checker terminal states.
-- Define budgets, step limits, retry classes, and circuit-breaker behavior.
-- Define volatile event, durable log, and projection authority.
-
-Suggested exit evidence:
-
-- Versioned contract documents.
-- Failure and recovery matrix.
-- Storage capability report.
-- Security and redaction threat model.
-
-### Phase 3 — Isolation
-
-Suggested activities:
-
-- Verify native child-session and location/worktree binding in the pinned V2 environment.
-- Design per-worker worktree ownership and cleanup.
-- Define fast-forward, conflict, stale-base, dirty-tree, and abandoned-worker policy.
-- Test reconcilers with synthetic dirty, moved, orphaned, and conflicting states.
-- Keep isolation disabled unless atomicity is directly demonstrated.
-
-Suggested exit evidence:
-
-- Host API compatibility result.
-- Worktree lifecycle state machine.
-- Merge-policy decision record.
-- Recovery and cleanup test matrix.
-
-### Phase 4 — Scale
-
-Suggested activities:
-
-- Pilot adaptive DAG execution on a narrow workload.
-- Add bounded messaging only if measured workflows require it.
-- Add model tier routing only after review and budget baselines exist.
-- Add structured observability and operator projections.
-- Compare single-agent and multi-agent outcomes, cost, latency, and failure rates.
-- Retain rollback to direct execution and current native delegation.
-
-Suggested exit evidence:
-
-- End-state quality comparison.
-- Cost and latency report.
-- Failure taxonomy and recovery statistics.
-- User-visible capability and evidence report.
+- Replay-safety inventory; checkpoint/cursor schema; durable event log + projections; retry classes via the retry hook.
+- DAG scheduler pilot on a narrow workload after S1 exists; context-budget measurement using trace snapshots.
+- G1 stays parked until host messaging primitives exist; G2 profile via `ctx.reference.transform`.
+- Exit evidence: failure/recovery matrix; projection rebuild proof; scheduler pilot comparison; measured handoff sizes.
 
 ## Appendix
 
 ### Assumptions Requiring Verification
 
-- **A1 — V2 API stability:** OpenCode V2 is beta/experimental; APIs may change.
-- **A2 — Native background primitives:** `promptAsync`, SSE event behavior, child-session APIs, and cancellation semantics from issue #20849 are not assumed to exist in the pinned package.
-- **A3 — Atomic isolation:** Current repository policy says plugin-controlled atomic child worktrees are unavailable.
-- **A4 — Parallelism enforcement:** `max_parallel=4` is configured and prompted, but source inspection does not show a central runtime scheduler enforcing it.
-- **A5 — Review enforcement:** `require_review=true` appears to be prompt/policy enforcement rather than an independently enforced runtime gate.
-- **A6 — Storage guarantees:** `ctx.storage` durability, transactionality, cross-process behavior, and crash consistency are not established by the visible interface.
-- **A7 — Token measurement:** Token counts and the `<5K` target may not be available from the host API; `<5K` is a heuristic, not a universal invariant.
-- **A8 — Redactor completeness:** Existing tests cover known patterns and supplied exact secrets, not every possible provider or credential format.
-- **A9 — Capability authority:** CLI `doctor` is local and advisory; server-side probes are authoritative only for the capabilities they actually test.
-- **A10 — Source reliability:** Vendor articles, community repositories, secondary benchmark claims, deprecated packages, and closed PRs require independent validation.
-- **A11 — GitHub durability:** Plugin GitHub tools return validated evidence but do not currently persist durable GitHub operation records.
-- **A12 — Isolation/security:** Prompt rules, permission visibility, worktree bookkeeping, and OS containment are separate properties.
+- **A1 — V2 API stability:** beta/experimental; re-verify each surface per pin.
+- **A2 — Background/messaging primitives:** `promptAsync`, parentage, and inter-session messaging are absent from the pinned declarations (grep-verified); issue #20849/PR #38942 remain proposals. The **prompt-admission hook, permission hooks/rules, and native worktree domain are now verified present** in the pinned package types (this reverses the 2026-08-30 status).
+- **A3 — Atomic child isolation:** still unavailable end-to-end. Native worktree operations exist (N3), but child-session↔worktree binding must be demonstrated (now via N2 rule inheritance + N3), not assumed.
+- **A4 — Parallelism enforcement:** unchanged — `max_parallel` is prompted; no scheduler or semaphore exists.
+- **A5 — Review enforcement:** bounded review gates plugin-owned dispatch only; completion is still not gated anywhere (target N1).
+- **A6 — Storage guarantees:** `get`/`set`/`remove`/`scan` confirmed (scan in use); transactions, CAS, append-only writes, and cross-process locks remain absent; durability across server restarts unverified for newer records (snapshot persistence is a live-probe item, A13).
+- **A7 — Token measurement:** trace usage snapshots capture host-emitted aggregates where available; coverage is unknown/partial, never zero; `<5K` remains a heuristic.
+- **A8 — Redactor completeness:** pattern coverage is not a secret boundary; adversarial fixtures still owed (V4).
+- **A9 — Capability authority:** unchanged — doctor local/advisory; server probes authoritative only for tested fields.
+- **A10 — Source reliability:** vendor/community claims remain directional; closed issue/PR are not contracts.
+- **A11 — GitHub durability:** the publication **capability record** is durable (`publish/v1`); per-operation GitHub ledgers still do not exist.
+- **A12 — Isolation vs security:** prompt rules, permission visibility, worktree bookkeeping, and OS containment remain separate properties; N2 adds the first host-enforced layer inside that model.
+- **A13/A14 — S3/V1 semantics:** tracked in `docs/phase-1/assumptions.md` (partially verified; live shared-service probes outstanding).
+- **A15 — Undocumented catalog domain:** `ctx.catalog` is in the pinned `Context` type but not on the plugin guide; documented equivalent is `ctx.model.list()`. Track per pin; migrate if it breaks.
+- **A16 — `tui` flag and hook/worktree host behavior:** the pinned `Plugin` type lacks the `tui` field (cast in use, contract-tested); live-host behavior of `session.hook("prompt")`, `permission.hook("evaluate")`, child rule inheritance, and native worktree ops is unit-faked only and needs the Phase A/B probes.
 
 ### Verification Checklist
 
-Future implementation work should eventually run:
-
 ```sh
 bun run typecheck && bun test && bun run build
-```
-
-Additional repository-specific checks may include:
-
-```sh
-bun run dev:setup
-bun run dev:v2
-bun run dev:v2:dist
 bun run src/cli/index.ts doctor
 ```
 
-No verification commands were run for this research-only draft.
+Docs-only changes to this file need no build; the checklist applies when plan items are implemented. Packed-package smoke tests remain required for packaging changes.
 
 ### File Inventory
 
 Core:
 
-- `src/core/config.ts`
-- `src/core/roles.ts`
-- `src/core/policy.ts`
-- `src/core/prompts.ts`
-- `src/core/permissions.ts`
-- `src/core/package-identity.ts`
+- `src/core/config.ts` · `roles.ts` · `policy.ts` · `prompts.ts` · `permissions.ts` · `package-identity.ts`
+- `src/core/d4.ts` · `contracts.ts` · `admission.ts` · `model-reference.ts` · `prompt-builder.ts`
 
 Plugin and TUI:
 
-- `src/index.ts`
-- `src/tui.ts`
-- `src/opencode-v2/plugin.ts`
-- `src/opencode-v2/agents.ts`
+- `src/index.ts` · `src/tui.ts` · `src/tui/sidebar.ts`
+- `src/opencode-v2/plugin.ts` · `agents.ts`
 
 Commands and state:
 
-- `src/opencode-v2/commands/index.ts`
-- `src/opencode-v2/commands/runtime.ts`
-- `src/opencode-v2/goal/state.ts`
-- `src/opencode-v2/goal/tools.ts`
-- `src/opencode-v2/goal/continuation.ts`
-- `src/opencode-v2/session/state.ts`
-- `src/opencode-v2/session/move.ts`
+- `src/opencode-v2/commands/index.ts` · `commands/runtime.ts`
+- `src/opencode-v2/goal/{state,tools,continuation}.ts`
+- `src/opencode-v2/session/{state,move,move-coordinator}.ts`
 
-Worktree and process:
+Domains:
 
-- `src/opencode-v2/worktree/state.ts`
-- `src/opencode-v2/worktree/tools.ts`
-- `src/opencode-v2/worktree/git.ts`
-- `src/opencode-v2/worktree/events.ts`
-- `src/opencode-v2/process/runner.ts`
-- `src/opencode-v2/process/redact.ts`
+- `src/opencode-v2/gates/{state,tools,rpc}.ts`
+- `src/opencode-v2/observability/{trace,budget,review,runtime,tools}.ts`
+- `src/opencode-v2/orchestration/{validation,evidence,tools}.ts`
+- `src/opencode-v2/peers/tools.ts` · `publish/{state,tools}.ts` · `worker-models/{runtime,state}.ts`
 
-GitHub:
+Worktree, process, GitHub:
 
-- `src/opencode-v2/gh/client.ts`
-- `src/opencode-v2/gh/tools.ts`
+- `src/opencode-v2/worktree/{state,tools,git,events}.ts`
+- `src/opencode-v2/process/{runner,redact}.ts`
+- `src/opencode-v2/gh/{client,tools}.ts`
 
 CLI:
 
-- `src/cli/index.ts`
-- `src/cli/install.ts`
-- `src/cli/doctor.ts`
+- `src/cli/index.ts` · `install.ts` · `doctor.ts`
 
 Verification surfaces:
 
-- `test/unit/core.test.ts`
-- `test/unit/agents.test.ts`
-- `test/unit/continuation.test.ts`
-- `test/unit/session-state.test.ts`
-- `test/unit/session-move.test.ts`
-- `test/unit/runtime.test.ts`
-- `test/unit/worktree.test.ts`
-- `test/unit/gh.test.ts`
-- `test/unit/process.test.ts`
-- `test/unit/installer.test.ts`
-- `test/contract/plugin.test.ts`
-- `test/contract/embedded.test.ts`
+- `test/unit/` (admission, agents, clarify, continuation, contracts, core, d4, evidence, gates, gh, installer, observability, orchestration-tools, peers, process, prompt-builder, publish, review, runtime, session-move, session-state, session-status, tools, tui-sidebar, worker-models, worktree)
+- `test/contract/plugin.test.ts` · `embedded.test.ts` · `tui.test.ts`
+
+Design/records:
+
+- `docs/phase-1/` (assumptions, d2/d4/v2/v3/s3 artifacts)
 
 ### Research Source Catalog
 
-1. [Anthropic — How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)
+Retained from the 2026-08-30 draft; directional only.
+
+1. [Anthropic — How we built their multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)
 2. [PromptEngines — The Orchestrator Pattern](https://www.promptengines.com/labnotes/articles/2026-03-14-orchestrator-pattern-agent-design-v3.html)
 3. [CopilotKit — PydanticAI Sub-Agents](https://docs.copilotkit.ai/pydantic-ai/multi-agent/subagents)
 4. [Beam — Multi-Agent Orchestration Patterns](https://beam.ai/agentic-insights/multi-agent-orchestration-patterns-production)
 5. [Agentik OS — Production Orchestration Guide](https://www.agentik-os.com/blog/multi-agent-orchestration-production-guide)
-6. [OpenCode issue #20849 — Plugin-Based Agent Orchestration](https://github.com/anomalyco/opencode/issues/20849)
+6. [OpenCode issue #20849 — Plugin-Based Agent Orchestration](https://github.com/anomalyco/opencode/issues/20849) (closed proposal; its worktree phase is now largely superseded by the shipped native `ctx.worktree` domain)
 7. [OpenCode Council — v0.2.0-beta](https://github.com/marcel-tuinstra/opencode-council/tree/v0.2.0-beta)
 8. [Tyk — Enterprise AI Agent Orchestration Guide](https://tyk.io/learning-center/ai-agent-orchestration-a-complete-enterprise-guide/)
 9. [Knowlee — AI Agent Orchestration Guide 2026](https://www.knowlee.ai/blog/ai-agent-orchestration-guide-2026)
 10. [OpenAgents — OpenCode V2 Architecture Teardown](https://github.com/OpenAgentsInc/openagents/blob/main/docs/teardowns/2026-07-10-opencode-v2-architecture-teardown.md)
-11. [npm — `@moderndegree/opencode-agent-teams`](https://www.npmjs.com/package/@moderndegree/opencode-agent-teams)
-12. [OpenCode PR #38942 — Agent-to-Agent Messaging](https://github.com/anomalyco/opencode/pull/38942)
+11. [npm — `@moderndegree/opencode-agent-teams`](https://www.npmjs.com/package/@moderndegree/opencode-agent-teams) (deprecated; unverified claims)
+12. [OpenCode PR #38942 — Agent-to-Agent Messaging](https://github.com/anomalyco/opencode/pull/38942) (closed proposal; still no pinned primitives)
+
+Primary contract sources (authoritative for this plan): [plugin guide](https://opencode.ai/v2/docs/build/plugins) · [CLI plugin guide](https://opencode.ai/v2/docs/build/plugins/cli) · [HTTP API](https://opencode.ai/v2/docs/api) · pinned `@opencode/plugin`/`@opencode/sdk` `0.0.0-beta-19507` declarations.
 
 ---
 
-*Generated via repository inspection and web research on 2026-08-30. Suggestion-only; no code changes were made.*
-</subagent>
+*Restructured 2026-09-15 from repository inspection (post issue #21, pinned beta-19507), the current OpenCode V2 plugin documentation, and the pinned package declarations. Completed items are recorded with evidence; every remaining proposal starts from a pinned-contract probe.*

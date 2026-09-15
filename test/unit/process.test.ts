@@ -85,6 +85,84 @@ describe("redaction", () => {
     expect(out).toContain("refs/heads/main")
     expect(out).toContain("M\tREADME.md")
   })
+
+  test("replaces exact secrets with reserved characters in raw and URI-encoded form", () => {
+    const secret = "FAKE/EXACT?VALUE&ONLY=1"
+    const encoded = encodeURIComponent(secret)
+    const out = redactExact(`raw ${secret} encoded ${encoded}`, [secret])
+    expect(out).toBe(`raw ${REDACTED} encoded ${REDACTED}`)
+    // A space-bearing secret is only ever seen encoded inside a URL.
+    expect(redact(`?next=${encodeURIComponent("FAKE SECRET VALUE")}`, ["FAKE SECRET VALUE"])).toBe(`?next=${REDACTED}`)
+    // Empty entries are skipped instead of matching every position.
+    expect(redactExact("unchanged", ["", ""])).toBe("unchanged")
+    expect(redactExact("unchanged", [])).toBe("unchanged")
+  })
+
+  test("preserves surrounding substrings and does not over-match partial parameter names", () => {
+    expect(redactExact("prefixFAKEMARKERsuffix", ["FAKEMARKER"])).toBe(`prefix${REDACTED}suffix`)
+    // Only whole key words followed by `:`/`=` are keyed secrets: `tokenizer`
+    // and `authorization_code` are different words and stay readable.
+    expect(redact("tokenizer=fast authorization_code=abc")).toBe("tokenizer=fast authorization_code=abc")
+  })
+
+  test("redacts multiline mixed output without dropping benign lines", () => {
+    const raw = [
+      "diff --git a/src/app.ts b/src/app.ts",
+      "Authorization: Bearer FAKE-BEARER-TOKEN-FOR-TEST-0001",
+      "api_key=FAKE-API-KEY-FOR-TEST-0002",
+      "https://example.invalid/cb?access_token=FAKE-QUERY-TOKEN-0003&state=ok",
+      "const FAKE_EXACT_SECRET_0004 = read()",
+      "plain status line",
+    ].join("\n")
+    const out = redact(raw, ["FAKE_EXACT_SECRET_0004"])
+    expect(out.split("\n")).toHaveLength(6)
+    expect(out).not.toContain("FAKE-BEARER-TOKEN-FOR-TEST-0001")
+    expect(out).not.toContain("FAKE-API-KEY-FOR-TEST-0002")
+    expect(out).not.toContain("FAKE-QUERY-TOKEN-0003")
+    expect(out).not.toContain("FAKE_EXACT_SECRET_0004")
+    expect(out).toContain("diff --git a/src/app.ts b/src/app.ts")
+    expect(out).toContain("state=ok")
+    expect(out).toContain("plain status line")
+    expect(out).toContain(REDACTED)
+  })
+
+  test("handles query-like text conservatively", () => {
+    const out = redact("https://example.invalid/cb?secret=FAKE-QUERY-SECRET-0001&next=1")
+    expect(out).not.toContain("FAKE-QUERY-SECRET-0001")
+    expect(out).toContain("next=1")
+    expect(out).toContain(REDACTED)
+    // Unrecognized parameters and bare words are left readable.
+    expect(redact("plain?mode=read&tokenizer=fast")).toBe("plain?mode=read&tokenizer=fast")
+  })
+
+  test("applies known patterns with an empty secret list and skips empty exact secrets", () => {
+    expect(redact("token=FAKE-KEYED-VALUE", [])).toBe(redactKnownPatterns("token=FAKE-KEYED-VALUE"))
+    expect(redact("token=FAKE-KEYED-VALUE", [])).not.toContain("FAKE-KEYED-VALUE")
+    expect(redactExact("ghp_EXAMPLEFAKETOKENFORTEST123456", [])).toBe("ghp_EXAMPLEFAKETOKENFORTEST123456")
+    expect(createRedactor()("password=FAKE-PASSWORD-VALUE")).not.toContain("FAKE-PASSWORD-VALUE")
+  })
+
+  test("redactProcessResult preserves the envelope and never mutates its input", () => {
+    const original: ProcessResult = {
+      exitCode: 7,
+      stdout: "Bearer FAKE-BEARER-TOKEN-FOR-TEST",
+      stderr: "password=FAKE-PASSWORD-VALUE",
+      truncated: true,
+    }
+    const redacted = redactProcessResult(original, ["FAKE-BEARER-TOKEN-FOR-TEST"])
+    expect(redacted.exitCode).toBe(7)
+    expect(redacted.truncated).toBe(true)
+    expect(redacted.stdout).not.toContain("FAKE-BEARER-TOKEN-FOR-TEST")
+    expect(redacted.stderr).not.toContain("FAKE-PASSWORD-VALUE")
+    expect(redacted.stderr).toContain(REDACTED)
+    // The input result object is never mutated in place.
+    expect(original.stdout).toContain("FAKE-BEARER-TOKEN-FOR-TEST")
+    expect(original.stderr).toContain("FAKE-PASSWORD-VALUE")
+    // Nothing to do: the same reference is returned.
+    const empty: ProcessResult = { exitCode: 0, stdout: "", stderr: "" }
+    expect(redactProcessResult(empty)).toBe(empty)
+    expect(redactProcessResult({ ...empty, stdout: "token=FAKE-KEYED-VALUE" }, []).stdout).not.toContain("FAKE-KEYED-VALUE")
+  })
 })
 
 describe("spawn runner", () => {

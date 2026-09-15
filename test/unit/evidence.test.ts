@@ -366,3 +366,24 @@ describe("assessEvidence admission", () => {
     expect(outcome(assessEvidence(declared, { kind: "advisory" }))).toBe("rejected")
   })
 })
+
+describe("evidence schema boundaries (V4a)", () => {
+  test("source and sessionID are non-empty strings; capturedAt is a non-negative integer", () => {
+    const base = liveEvidence({ source: "opencode-orchestrator.gh", capturedAt: 0 })
+    expect(evidenceSchema.safeParse({ ...base, source: "" }).success).toBe(false)
+    expect(evidenceSchema.safeParse({ ...base, sessionID: "" }).success).toBe(false)
+    expect(evidenceSchema.safeParse({ ...base, sessionID: undefined }).success).toBe(true)
+    expect(evidenceSchema.safeParse({ ...base, capturedAt: -0.5 }).success).toBe(false)
+  })
+
+  test("does not treat credential-shaped source text as a redaction boundary", () => {
+    // `source` is producer-identity metadata validated only as a non-empty
+    // string. Redaction happens at the process/tool boundary before evidence
+    // is shaped (`createRedactor` in the gh/worktree tools), so the schema
+    // accepts any non-empty source by design: this documents that no
+    // credential-shape rejection exists here and must not be claimed.
+    const record = liveEvidence({ source: "ghp_EXAMPLEFAKETOKENFORTEST123456", capturedAt: 0 })
+    expect(record.source).toBe("ghp_EXAMPLEFAKETOKENFORTEST123456")
+    expect(evidenceSchema.safeParse(record).success).toBe(true)
+  })
+})

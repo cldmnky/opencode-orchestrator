@@ -687,6 +687,57 @@ describe("handoff_validate credential redaction (C7)", () => {
     expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.c7Redaction)?.verdict).toBe("fail")
     expect(output.content).not.toContain("TOPSECRETMARKER")
   })
+
+  test("fails a safe github-token-shaped fixture without echoing it", async () => {
+    const tools = collect()
+    const output = await tools
+      .get("handoff_validate")!
+      .execute(
+        {
+          level: "worker",
+          handoff: handoff({ outcome: "rotated ghp_EXAMPLEFAKETOKENFORTEST123456" }),
+          contract: contract(),
+        },
+        toolContext("session-1", "orchestrator"),
+      )
+    const result = parseResult(output.content)
+    expect(result.verdict).toBe("fail")
+    expect(result.admissionState).toBe("worker-failed")
+    const redaction = result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.c7Redaction)
+    expect(redaction?.verdict).toBe("fail")
+    expect(redaction?.detail).toContain("credential-shaped")
+    expect(output.content).not.toContain("ghp_")
+    expect(output.content).not.toContain("EXAMPLEFAKETOKENFORTEST123456")
+    expect(result.prose).toBeUndefined()
+  })
+
+  test("fails a safe bearer-shaped fixture and passes the no-secret control", async () => {
+    const tools = collect()
+    const bearer = await tools
+      .get("handoff_validate")!
+      .execute(
+        {
+          level: "worker",
+          handoff: handoff({ followUp: "call Bearer FAKE-BEARER-TOKEN-FOR-TEST" }),
+          contract: contract(),
+        },
+        toolContext("session-1", "orchestrator"),
+      )
+    const bearerResult = parseResult(bearer.content)
+    expect(bearerResult.verdict).toBe("fail")
+    expect(bearerResult.admissionState).toBe("worker-failed")
+    expect(bearerResult.checks.find((check) => check.id === HANDOFF_CHECK_IDS.c7Redaction)?.verdict).toBe("fail")
+    expect(bearer.content).not.toContain("FAKE-BEARER-TOKEN-FOR-TEST")
+    expect(bearerResult.prose).toBeUndefined()
+
+    const control = await tools
+      .get("handoff_validate")!
+      .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
+    const controlResult = parseResult(control.content)
+    expect(controlResult.admissionState).toBe("worker-passed")
+    expect(controlResult.checks.find((check) => check.id === HANDOFF_CHECK_IDS.c7Redaction)?.verdict).toBe("pass")
+    expect(controlResult.prose).toBeDefined()
+  })
 })
 
 describe("handoff_validate file artifacts (C5) and evidence files (O4)", () => {

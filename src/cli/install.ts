@@ -82,14 +82,31 @@ export function defaultConfigPath(target: InstallTarget, cwd = process.cwd()): s
 /**
  * Native V2 subagent nesting depth written by the installer.
  *
- * OpenCode's `experimental.subagent_depth` defaults to 1 ("Maximum subagent
+ * OpenCode's **top-level** `subagent_depth` defaults to 1 ("Maximum subagent
  * nesting depth. Defaults to 1, which prevents subagents from launching
  * subagents"), which would block the approved deepest bounded-delegation path
  * `orchestrator -> implementation -> planning -> research` (three subagent
  * hops). The installer writes this value only when the property is absent and
  * never enforces depth itself; an explicit user value always wins.
+ *
+ * The key used to live under `experimental`; on the current host schema that
+ * block rejects additional properties, so the nested spelling is silently dead
+ * (A17/G4). Legacy nested values are migrated to this top-level key.
  */
 const REQUIRED_SUBAGENT_DEPTH = 3
+
+/**
+ * Recommended host-config keys written by the installer, each only when absent
+ * and never overwriting an explicit user value:
+ * - `continue_loop_on_deny: true` keeps the agent loop alive when a tool call is
+ *   denied, so orchestrator-only denials and runtime-authority refusals are
+ *   recoverable instead of terminal for the model.
+ * - `batch_tool: true` enables per-turn parallel tool invocation.
+ *
+ * Both are confirmed host keys for the `experimental` block; the installer
+ * tests pin this placement with a schema-snapshot guard.
+ */
+const RECOMMENDED_EXPERIMENTAL = { continue_loop_on_deny: true, batch_tool: true } as const
 
 export function installConfig(
   path: string,
@@ -197,20 +214,36 @@ export function installConfig(
   // Native V2 subagent nesting depth defaults to 1, which stops a subagent
   // from launching another subagent. The approved deepest delegation path —
   // orchestrator -> implementation -> planning -> research — is three subagent
-  // hops, so a fresh install needs top-level `experimental.subagent_depth: 3`.
-  // This is a native OpenCode setting, not a plugin-enforced one: the installer
-  // only writes it when the property is absent, an explicitly authored value
-  // (any value) is the user's policy and is preserved untouched, and every
-  // other key inside an existing `experimental` object is preserved.
-  if (isRecord(document.experimental)) {
-    if (!Object.hasOwn(document.experimental, "subagent_depth")) {
-      result = applyEdits(
-        result,
-        modify(result, ["experimental", "subagent_depth"], REQUIRED_SUBAGENT_DEPTH, { formattingOptions }),
-      )
+  // hops, so a fresh install needs top-level `subagent_depth: 3`. This is a
+  // native OpenCode setting, not a plugin-enforced one: an explicitly authored
+  // top-level value (any value) is the user's policy and is preserved untouched.
+  //
+  // The same key used to be written under `experimental`, but that block rejects
+  // additional properties on the current host schema, so the nested spelling is
+  // dead config and an affected install silently ran at native depth 1. A legacy
+  // nested value therefore migrates up — value preserved byte-for-byte, stale
+  // key removed — only when no top-level value exists. When both spellings are
+  // present the explicit top-level value wins and the legacy nested value is
+  // left untouched rather than deleted.
+  if (!Object.hasOwn(document, "subagent_depth")) {
+    if (isRecord(document.experimental) && Object.hasOwn(document.experimental, "subagent_depth")) {
+      const legacyDepth = document.experimental.subagent_depth
+      result = applyEdits(result, modify(result, ["subagent_depth"], legacyDepth, { formattingOptions }))
+      result = applyEdits(result, modify(result, ["experimental", "subagent_depth"], undefined, { formattingOptions }))
+    } else {
+      result = applyEdits(result, modify(result, ["subagent_depth"], REQUIRED_SUBAGENT_DEPTH, { formattingOptions }))
     }
+  }
+  // Recommended host keys are additive and idempotent: each one is written only
+  // when absent, an explicit user value is preserved untouched, and every other
+  // key inside an existing `experimental` object is preserved.
+  if (!isRecord(document.experimental)) {
+    result = applyEdits(result, modify(result, ["experimental"], { ...RECOMMENDED_EXPERIMENTAL }, { formattingOptions }))
   } else {
-    result = applyEdits(result, modify(result, ["experimental"], { subagent_depth: REQUIRED_SUBAGENT_DEPTH }, { formattingOptions }))
+    for (const [key, value] of Object.entries(RECOMMENDED_EXPERIMENTAL)) {
+      if (Object.hasOwn(document.experimental, key)) continue
+      result = applyEdits(result, modify(result, ["experimental", key], value, { formattingOptions }))
+    }
   }
   atomicWrite(resolved, result)
   return { addedAgents, preservedAgents, addedCommands: [], preservedCommands, path: resolved }

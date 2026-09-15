@@ -361,7 +361,7 @@ The orchestrator's language is hard to read (see [Conversation and Tone](#conver
 
 Write the plain-language template and personality spec as a short design note; pilot on status messages and the finish summary with readability assertions; then roll out to the agent prompt and runtime injection.
 
-#### G4 — Installer Schema Migration and Recommended Host Config
+#### G4 — Installer Schema Migration and Recommended Host Config — COMPLETE (2026-09-15)
 
 **Problem**
 
@@ -401,6 +401,14 @@ Two additional confirmed host keys are required/recommended for the orchestrator
 **Next step**
 
 Identify the beta where the key moved (probe older pins or schema history), ship the installer migration + template/README updates, and add the schema-snapshot guard before the next pin bump.
+
+**Implemented (2026-09-15)**
+
+- `src/cli/install.ts` writes **top-level** `subagent_depth: 3` when the key is absent. A legacy `experimental.subagent_depth` migrates to the top level only when no top-level value exists: the user's value moves byte-for-byte and the stale nested key is removed. An explicit top-level value wins, and a coexisting nested value is preserved rather than deleted (no data loss). It also adds `experimental.continue_loop_on_deny: true` and `experimental.batch_tool: true` only when absent, preserving explicit values and every unrelated `experimental` key.
+- `dev/project/opencode.example.jsonc` uses the top-level depth key plus the two recommended `experimental` keys; all four README references were updated, with the recommended host keys documented under Configuration and the "nested delegation stops after the first hop" symptom under Troubleshooting.
+- `test/unit/installer.test.ts` covers fresh placement, legacy migration (value preserved, stale key removed), explicit top-level preservation, coexisting nested preservation, absent-only recommended keys, user-value preservation, reinstall idempotency, and a dev-template parity assertion. An **offline schema-snapshot pin-drift guard** pins installer-written key placement to the 2026-09-15 verified schema (top-level `subagent_depth`; `experimental` keys exactly `continue_loop_on_deny` + `batch_tool`; no nested `subagent_depth`), refreshed by hand on pin bumps — no network at test time.
+- The five embedded-host child-session cases in `test/contract/phase-a-hooks.test.ts` (the ones that create a child through the shared `createChildViaSubagent` helper) now carry an explicit 20 s per-case timeout. Bun's 5 s default per-test budget is the only 5 s bound that distinguishes these heavier cases (the harness activation poll is shared by all 13 tests), so it no longer fails them on a loaded machine. No assertion, sequence, or measured behavior changed; the other cases keep the default budget so a genuine hang still fails fast.
+- **Exit evidence:** `bun test test/unit/installer.test.ts` → 63 pass, 1 platform skip, 0 fail; `bun test test/contract/phase-a-hooks.test.ts` → 13 pass, 0 fail; `bun run typecheck` → clean. Full suite and `bun run build` were not part of this slice's exit checks.
 
 ## Non-Goals / Out of Scope
 

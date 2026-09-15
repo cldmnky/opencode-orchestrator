@@ -52,6 +52,27 @@ const CHILD_RULE_FAILURE = "phase-a child rule installer failed"
 const BUILT_ENTRY = fileURLToPath(new URL("../../dist/index.js", import.meta.url))
 
 /**
+ * Per-case timeout for the five child-session cases that create a child through
+ * the shared `createChildViaSubagent` helper.
+ *
+ * Bun's default per-test timeout is 5000 ms, and it is the only 5 s bound in
+ * this file that distinguishes these five cases: the harness `waitFor`
+ * activation poll is shared by all 13 tests and cannot explain a five-case
+ * subset. Each child-session case boots a full embedded host (activation wait
+ * plus SDK round trips) and then drives the host's own built-in `subagent` tool
+ * through `Session.create({ parentID })` — several extra round trips on top of
+ * the boot. On an idle machine a case finishes in well under a second, but
+ * under a loaded full-suite run (several embedded-host files in parallel) they
+ * can exceed the 5 s default and fail with "test timed out after 5000ms" while
+ * measuring the same behavior. This only extends how long the runner waits for
+ * that behavior: every assertion, sequence, and probe record is unchanged, and
+ * the remaining cases keep the default budget so a genuine hang still fails
+ * fast. 20 s keeps roughly 25x headroom over the observed runtime without
+ * hiding a real deadlock for long.
+ */
+const CHILD_SESSION_TEST_TIMEOUT = 20_000
+
+/**
  * Production Phase A authority surface under test (mirrors the constants in
  * `src/opencode-v2/authority/runtime.ts` and `src/core/permissions.ts`).
  */
@@ -739,7 +760,7 @@ describe("phase A pinned-host hook contract", () => {
       expect(probe.modelRequests).toEqual([])
       expect(probe.httpRequests).toEqual([])
     })
-  })
+  }, CHILD_SESSION_TEST_TIMEOUT)
 
   test("blocks child admission and creates no inbox item when the child rule installer fails", async () => {
     await withIsolatedHost(async ({ host, directory, probe }) => {
@@ -786,7 +807,7 @@ describe("phase A pinned-host hook contract", () => {
       expect(probe.modelRequests).toEqual([])
       expect(probe.httpRequests).toEqual([])
     })
-  })
+  }, CHILD_SESSION_TEST_TIMEOUT)
 })
 
 /**
@@ -1034,7 +1055,7 @@ describe("phase A production runtime authority (authority.mode enforce)", () => 
       expect(probe.modelRequests).toEqual([])
       expect(probe.httpRequests).toEqual([])
     })
-  })
+  }, CHILD_SESSION_TEST_TIMEOUT)
 
   test("blocks child admission and creates no inbox item when containment installation fails", async () => {
     await withAuthorityHost(ALLOWING_OPTIONS, async ({ host, directory, probe, faults }) => {
@@ -1063,7 +1084,7 @@ describe("phase A production runtime authority (authority.mode enforce)", () => 
       expect(probe.modelRequests).toEqual([])
       expect(probe.httpRequests).toEqual([])
     })
-  })
+  }, CHILD_SESSION_TEST_TIMEOUT)
 
   test("default off registers no authority behavior even with a refusing gate", async () => {
     await withAuthorityHost(DEFAULT_OFF_OPTIONS, async ({ host, directory, probe }) => {
@@ -1101,5 +1122,5 @@ describe("phase A production runtime authority (authority.mode enforce)", () => 
       expect(probe.modelRequests).toEqual([])
       expect(probe.httpRequests).toEqual([])
     })
-  })
+  }, CHILD_SESSION_TEST_TIMEOUT)
 })

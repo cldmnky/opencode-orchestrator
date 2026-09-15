@@ -2,7 +2,7 @@
   "artifact": "vertical-slice",
   "name": "Coherent Vertical-Slice Decomposition — Evaluation Template",
   "version": 1,
-  "status": "checkpoint-a-evaluated",
+  "status": "phase-4-rollout-recorded",
   "date": "2026-09-15",
   "planRef": {
     "path": ".orchestrator/plans/vertical-slices.md",
@@ -395,6 +395,32 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "mismatch: the frozen hypothesis expects 1 coherent slice; the reconstruction records the file-scoped split this MVP targets"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "One coherent slice: cursor-based pagination works end to end on /api/items (the route handler accepts and forwards the cursor, the query layer executes it, the OpenAPI schema documents it, and the integration tests prove it).",
+          "sliceCount": 1,
+          "childrenCount": 1,
+          "childDispatchCount": 1,
+          "rubricPassPerSlice": "1/1 slice passes all five conditions",
+          "acceptanceOwner": "the slice owner (one implementation child); the parent verifies the integrated request directly",
+          "parallelOrSerialized": "not applicable (single slice)",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "hypothesisAgreement": "match: frozen hypothesis expects 1 slice / 1 child",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-01:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ]
         }
       },
       {
@@ -572,6 +598,32 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "mismatch: the frozen hypothesis expects 1 coherent slice; the reconstruction records the file-scoped split this MVP targets"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "One coherent slice: goal updates are recorded through the storage layer, surfaced in the status output, covered by tests, and noted in the docs.",
+          "sliceCount": 1,
+          "childrenCount": 1,
+          "childDispatchCount": 1,
+          "rubricPassPerSlice": "1/1 slice passes all five conditions",
+          "acceptanceOwner": "the slice owner (one implementation child); the parent verifies the audit path directly",
+          "parallelOrSerialized": "not applicable (single slice)",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "hypothesisAgreement": "match: frozen hypothesis expects 1 slice / 1 child",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-02:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ]
         }
       },
       {
@@ -749,6 +801,32 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "mismatch: the frozen hypothesis expects 1 atomic slice; the reconstruction records the file-scoped split this MVP targets"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "One coherent slice: the legacy review_mode option is renamed to the nested review.mode shape across the strict schema, prompt builders, installer output, and the tests that pin the old name, as one atomic change.",
+          "sliceCount": 1,
+          "childrenCount": 1,
+          "childDispatchCount": 1,
+          "rubricPassPerSlice": "1/1 slice passes all five conditions",
+          "acceptanceOwner": "the slice owner (one implementation child); the parent verifies that schema, prompts, installer, and tests agree",
+          "parallelOrSerialized": "not applicable (single slice)",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "hypothesisAgreement": "match: frozen hypothesis expects 1 slice / 1 child",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-03:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ]
         }
       },
       {
@@ -903,6 +981,32 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "Two independent slices in parallel: the README anchor fix and the parseLsRemoteRefSha regression test share no mutable surface.",
+          "sliceCount": 2,
+          "childrenCount": 2,
+          "childDispatchCount": 2,
+          "rubricPassPerSlice": "2/2 slices pass all five conditions",
+          "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+          "parallelOrSerialized": "parallel: two children with write scopes verified disjoint from the case text (README troubleshooting section vs worktree unit test file); no shared file, module, or fixture.",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-04:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ]
         }
       },
       {
@@ -1057,6 +1161,32 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "Two independent slices in parallel: the CLI help-text addition and the delegation-graph ordering test share no mutable surface.",
+          "sliceCount": 2,
+          "childrenCount": 2,
+          "childDispatchCount": 2,
+          "rubricPassPerSlice": "2/2 slices pass all five conditions",
+          "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+          "parallelOrSerialized": "parallel: two children with write scopes verified disjoint from the case text (CLI entry file vs role-graph unit test file).",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-05:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ]
         }
       },
       {
@@ -1211,6 +1341,32 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "Two independent slices in parallel: the docs-index entry and the gate-status ordering unit test share no mutable surface.",
+          "sliceCount": 2,
+          "childrenCount": 2,
+          "childDispatchCount": 2,
+          "rubricPassPerSlice": "2/2 slices pass all five conditions",
+          "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+          "parallelOrSerialized": "parallel: two children with write scopes verified disjoint from the case text (documentation index vs dedicated unit test file).",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-06:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ]
         }
       },
       {
@@ -1369,6 +1525,33 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "Two slices, serialized: both tasks write the same shared policy file, so one child runs at a time with an explicit dependency edge.",
+          "sliceCount": 2,
+          "childrenCount": 1,
+          "childDispatchCount": 2,
+          "rubricPassPerSlice": "2/2 slices pass all five conditions (the shared writable surface is resolved by serialization, never by concurrent writes)",
+          "acceptanceOwner": "the parent sequences the two slices and verifies the integrated file",
+          "parallelOrSerialized": "serialized (shared writable file; explicit dependency edge; one child at a time)",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "Overlap is known (same file). The emitted after-MVP guidance requires sequencing/serialization with integrated parent verification and states the anti-overlap invariant ('never by concurrent overlapping writes'; unknown coupling fails closed and serializes). Zero concurrent overlapping writes observed (no runtime execution).",
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-07:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ],
+          "childrenCountBasis": "Frozen-corpus semantics: childrenCount is the maximum concurrent children for a serialized case; both slices are dispatched sequentially (childDispatchCount 2)."
         }
       },
       {
@@ -1529,6 +1712,33 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "Two slices, serialized: the contract module, the published schema document, and the contract tests form one mutable surface.",
+          "sliceCount": 2,
+          "childrenCount": 1,
+          "childDispatchCount": 2,
+          "rubricPassPerSlice": "2/2 slices pass all five conditions (the shared writable surface is resolved by serialization, never by concurrent writes)",
+          "acceptanceOwner": "the parent sequences the slices and verifies the integrated contract",
+          "parallelOrSerialized": "serialized (shared module and tests; explicit dependency edge; one child at a time)",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "Overlap is known (same contract module and tests). The emitted after-MVP guidance serializes the slices and states the anti-overlap invariant; concurrent writers would corrupt the surface. Zero concurrent overlapping writes observed (no runtime execution).",
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-08:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ],
+          "childrenCountBasis": "Frozen-corpus semantics: childrenCount is the maximum concurrent children for a serialized case; both slices are dispatched sequentially (childDispatchCount 2)."
         }
       },
       {
@@ -1689,6 +1899,33 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "Two slices, serialized: both tasks edit the same orchestrator guidance file and the same pinned-phrase test file; unknown coupling fails closed.",
+          "sliceCount": 2,
+          "childrenCount": 1,
+          "childDispatchCount": 2,
+          "rubricPassPerSlice": "2/2 slices pass all five conditions (the shared writable surface is resolved by serialization, never by concurrent writes)",
+          "acceptanceOwner": "the parent sequences the slices and verifies the integrated guidance and tests",
+          "parallelOrSerialized": "serialized (same source file and same pinned test file; one child at a time)",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "Same source file and same pinned test file; the emitted after-MVP guidance fails closed and serializes unknown coupling, and states the anti-overlap invariant. Zero concurrent overlapping writes observed (no runtime execution).",
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-09:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ],
+          "childrenCountBasis": "Frozen-corpus semantics: childrenCount is the maximum concurrent children for a serialized case; both slices are dispatched sequentially (childDispatchCount 2)."
         }
       },
       {
@@ -1756,6 +1993,32 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct execution control)"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "Direct execution: fix the misspelled word 'recieve' in one README sentence; no slice boundary exists (single-word fix).",
+          "sliceCount": 0,
+          "childrenCount": 0,
+          "childDispatchCount": 0,
+          "rubricPassPerSlice": "not applicable (no slice produced; direct execution control)",
+          "acceptanceOwner": "direct execution by the orchestrator; no child",
+          "parallelOrSerialized": "not applicable (direct execution)",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "No delegation and no writes observed (no runtime execution).",
+          "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct execution control)",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-10:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ]
         }
       },
       {
@@ -1823,6 +2086,32 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct execution control)"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "Direct execution: bump the patch version string in the package manifest by one; no slice boundary exists (one-line bump).",
+          "sliceCount": 0,
+          "childrenCount": 0,
+          "childDispatchCount": 0,
+          "rubricPassPerSlice": "not applicable (no slice produced; direct execution control)",
+          "acceptanceOwner": "direct execution by the orchestrator; no child",
+          "parallelOrSerialized": "not applicable (direct execution)",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "No delegation and no writes observed (no runtime execution).",
+          "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct execution control)",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-11:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ]
         }
       },
       {
@@ -1890,6 +2179,32 @@
             "git:146f54a:src/core/roles.ts"
           ],
           "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct answer control)"
+        },
+        "rolloutResult": {
+          "status": "observed-prompt-guidance-derived",
+          "state": "phase-4-approved-configuration",
+          "protocolVersion": 1,
+          "configuration": "mvp default (decomposition omitted or strategy 'mvp'); the optional strict strategy is documented as prompt-preference-only and was not used for this rollout",
+          "outcome": "Direct answer: which command opens the TUI gate picker; no code change and no delegation. Existing documentation answers it.",
+          "sliceCount": 0,
+          "childrenCount": 0,
+          "childDispatchCount": 0,
+          "rubricPassPerSlice": "not applicable (no slice produced; direct execution control)",
+          "acceptanceOwner": "direct execution by the orchestrator; no child",
+          "parallelOrSerialized": "not applicable (direct execution)",
+          "reworkLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "reviewLoops": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "verificationResult": "not-collected (no runtime execution in the Phase 4 rollout)",
+          "promptSizeBytes": "not-collected (Phase 4 recorded fixed-prompt bytes only; per-case bytes for the post-Phase-3 approved-configuration tree were not measured and are never estimated)",
+          "safetyObservations": "No delegation and no writes observed (no runtime execution).",
+          "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct answer control)",
+          "reproducedFrom": "result (Checkpoint A after-MVP prompt-guidance-derived evaluation); the rollout reproduces its decomposition under the approved configuration",
+          "evidenceRefs": [
+            "corpus:VS-12:requests (frozen protocol v1)",
+            "result (Checkpoint A after-MVP; reproduced by this rollout)",
+            "phase4Rollout (this file)",
+            "plan:.orchestrator/plans/vertical-slices.md Phase 4"
+          ]
         }
       }
     ]
@@ -2497,6 +2812,157 @@
         "Repeated live runs show rubric repeatability and any proposed D4 coherence signal demonstrably improves classification."
       ]
     }
+  },
+  "phase4Rollout": {
+    "status": "recorded-prompt-guidance-derived",
+    "date": "2026-09-15",
+    "runId": "vertical-slice-protocol-v1-phase-4-rollout",
+    "frozenProtocolVersion": 1,
+    "evaluationType": "manual frozen-corpus re-evaluation under the approved configuration, with a deterministic prompt-byte rollout comparison",
+    "checkpointAOverride": "Checkpoint A's recorded no-go was overridden by explicit human authorization (2026-09-15). The checkpointA object retains the original decision record unchanged; this rollout is recorded under that override, not as a met go criterion.",
+    "approvedConfiguration": {
+      "strategy": "mvp (default)",
+      "statement": "The approved rollout configuration is the default MVP decomposition strategy (decomposition omitted or strategy 'mvp'). The optional strict strategy is prompt-preference-only and never disables serialization, scope validation, review, worktree lifecycle, or publication preconditions.",
+      "evidence": "src/core/config.ts decomposition.strategy (Phase 2); omission and explicit mvp parse to byte-identical prompts (Phase 2 ledger)."
+    },
+    "environment": {
+      "date": "2026-09-15",
+      "plugin": "@opencode/plugin 0.0.0-beta-19507",
+      "sdk": "@opencode/sdk 0.0.0-beta-19507",
+      "runtime": "bun 1.3.3",
+      "approvedConfigurationState": "main 447fffb (merge of PR #25, feat/vertical-slices-phase-3): mvp default plus the additive D4 v2 coherence guidance",
+      "baselineRef": "146f54a (pre-MVP; unchanged Checkpoint A basis)",
+      "protocolVersion": 1
+    },
+    "method": {
+      "identicalProtocol": "The frozen protocol v1 steps were repeated on the same 12 frozen cases; no case text, label, rubric condition, metric, or threshold was changed. The recorded decomposition for each case is the one the emitted guidance under the approved configuration directs when the frozen decision rules are applied to the frozen request text; no orchestrator/model was invoked and no transcript exists.",
+      "baselineBasis": "reconstruction from pre-MVP prompt text at 146f54a (unchanged Checkpoint A basis)",
+      "rolloutBasis": "prompt-guidance-derived from the approved-configuration tree; no model execution",
+      "perCaseSlots": "corpus.cases[].rolloutResult",
+      "executedRuns": "not-collected: no live-host execution occurred; runtime completion, verification, rework loops, review loops, tokens, cost, latency, and steps are never estimated"
+    },
+    "perCaseOutcomes": {
+      "multiFileFeatures": "VS-01/02/03: 1/1/1 coherent slices (3 slices, 3 dispatches); 3/3 slices pass all five rubric conditions; 0/3 cases unnecessarily split.",
+      "independentPairs": "VS-04/05/06: 2/2/2 parallel children (6 slices); 6/6 pass; write scopes verified disjoint from the case text.",
+      "sharedOverlap": "VS-07/08/09: 2/2/2 slices serialized one child at a time (6 slices); 6/6 pass; the never-concurrent anti-overlap and unknown-coupling-fails-closed invariants are present.",
+      "trivialControls": "VS-10/11/12: 0 children (direct execution/direct answer).",
+      "rubricTotals": "15 produced slices, 15/15 pass all five conditions.",
+      "sharedStateObserved": "zero observed concurrent overlapping writes (no runtime execution occurred; absence of observation, never 'guaranteed serialization')",
+      "unchangedFromCheckpointAAfter": true
+    },
+    "deterministicPromptBytes": {
+      "unit": "UTF-8 bytes; prompts are pure functions of the parsed options",
+      "states": {
+        "baseline": "146f54a (pre-MVP)",
+        "mvp": "Phase 1 (default options)",
+        "strict": "Phase 2 optional decomposition.strategy=strict (measurement taken before the v2 block existed)",
+        "v2Advisory": "Phase 3 (default mvp state; the additive D4 v2 coherence guidance is always present)"
+      },
+      "fixedPrompts": [
+        {
+          "prompt": "orchestrator system",
+          "baselineBytes": 8322,
+          "mvpBytes": 9074,
+          "strictBytes": 9839,
+          "v2AdvisoryBytes": 10080
+        },
+        {
+          "prompt": "worker system (implementation)",
+          "baselineBytes": 6050,
+          "mvpBytes": 6799,
+          "strictBytes": 7564,
+          "v2AdvisoryBytes": 7805
+        },
+        {
+          "prompt": "worker system (review)",
+          "baselineBytes": 6019,
+          "mvpBytes": 6736,
+          "strictBytes": "not recorded",
+          "v2AdvisoryBytes": "not recorded"
+        },
+        {
+          "prompt": "continuation",
+          "baselineBytes": 5422,
+          "mvpBytes": 6052,
+          "strictBytes": 6817,
+          "v2AdvisoryBytes": 7058
+        },
+        {
+          "prompt": "VERTICAL_SLICE_GUIDANCE block",
+          "baselineBytes": 0,
+          "mvpBytes": 629,
+          "strictBytes": 629,
+          "v2AdvisoryBytes": 629
+        },
+        {
+          "prompt": "STRICT_DECOMPOSITION_GUIDANCE block",
+          "baselineBytes": 0,
+          "mvpBytes": 0,
+          "strictBytes": 764,
+          "v2AdvisoryBytes": 0
+        },
+        {
+          "prompt": "D4_V2_COHERENCE_GUIDANCE block",
+          "baselineBytes": 0,
+          "mvpBytes": 0,
+          "strictBytes": 0,
+          "v2AdvisoryBytes": 1005
+        }
+      ],
+      "caseTotals": {
+        "basis": "Phase 0/1 ledger (12 cases; baseline vs Phase 1 MVP)",
+        "orchestration": {
+          "baselineBytes": 9863,
+          "mvpBytes": 11747,
+          "delta": 1884
+        },
+        "continuation": {
+          "baselineBytes": 66671,
+          "mvpBytes": 74231,
+          "delta": 7560
+        },
+        "commandOrchestrate": {
+          "baselineBytes": 70259,
+          "mvpBytes": 72143,
+          "delta": 1884
+        },
+        "commandRunPlan": {
+          "baselineBytes": 65531,
+          "mvpBytes": 65531,
+          "delta": 0
+        },
+        "laterPhaseTotals": "not-collected (Phases 2 and 3 did not measure 12-case totals; never derived by arithmetic)"
+      },
+      "commandPromptInvariant": "Phases 2 and 3 recorded +0 deltas for command prompts (Phase 2: orchestrate +0; Phase 3: orchestrate +0 and goal +0); single-case values are quoted from each phase's own ledger.",
+      "strictPlusV2Combined": "not-collected (not measured)",
+      "tokensNote": "prompt bytes are not tokens; tokens are never asserted"
+    },
+    "thresholdCarryForward": {
+      "note": "Threshold evaluation is unchanged from Checkpoint A; Phase 4 introduces no executed run and therefore cannot close or change any threshold.",
+      "unnecessarySplittingReduction": "met (reconstruction basis, unchanged)",
+      "cohesion": "met (unchanged)",
+      "sharedStateViolations": "met-as-observed (unchanged; absence of observation, not enforcement)",
+      "noIndependentRegression": "not-met (fail-closed, unchanged): no executed run evidences runtime completion or verification",
+      "promptSizeGrowthRecorded": "met (extended with the Phase 2 strict and Phase 3 v2-advisory deterministic byte deltas)"
+    },
+    "executedRunFields": {
+      "runtimeCompletion": "not-collected",
+      "runtimeVerification": "not-collected",
+      "reworkLoops": "not-collected",
+      "reviewLoops": "not-collected",
+      "tokens": "not-collected",
+      "costUsd": "not-collected",
+      "latencyMs": "not-collected",
+      "steps": "not-collected",
+      "note": "never estimated; no live-host probe has run"
+    },
+    "limitations": [
+      "No orchestrator/model execution: the rollout is a prompt-guidance-derived re-evaluation; threshold 4 stays fail-closed and no met-threshold claim is made for it.",
+      "Baseline decompositions remain reconstructions from 146f54a prompt text, not live runs.",
+      "Zero observed shared-state violations is an absence of observation; prompt-level scopes are coordination units, not isolation.",
+      "Per-case prompt bytes for the Phase 2/3 states were not measured and are never estimated; later-phase 12-case totals are not-collected."
+    ],
+    "v2AdvisoryRollout": "docs/phase-1/d4-v2-evaluation-template.json stays unmodified (byte-identical to origin/main): no executed v2 run exists, so its evaluation slots remain not-collected; the v2-advisory rollout evidence is this file's phase4Rollout and the plan's Phase 4 section."
   },
   "noResultsStatement": "The 2026-09-15 Checkpoint A run (protocol v1) populated this artifact with a manual, prompt-guidance-derived baseline-vs-after evaluation: per-case after results observed from the current MVP prompt text, per-case baseline results reconstructed from the pre-MVP prompt text at 146f54a. No orchestrator/model was invoked, no runtime transcript exists, and tokens, cost, latency, and step counts remain not-collected and are never estimated. The Checkpoint A decision (no-go for Phases 2-4; stop at the prompt-only MVP) is recorded in the checkpointA object."
 }

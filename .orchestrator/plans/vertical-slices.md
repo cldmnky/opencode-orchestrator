@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: complete
 title: Prefer coherent end-to-end vertical slices
 taskId: vertical-slices
 created: 2026-09-14
@@ -296,8 +296,10 @@ evidence above, does not convert the fail-closed threshold 4 result into a
 pass, and does not close the telemetry gap. The override is a recorded human
 authorization, not a met go criterion. The same recorded human authorization
 was later extended by explicit instruction to Phase 3 (recorded in the Phase 3
-section); Phase 4 remains gated on its own preconditions and is not authorized
-by it. No evidence above is revised.
+section); Phase 4 remained gated on its own preconditions and was not
+authorized by that extension at the time of the Phase 3 record, and Phase 4
+later proceeded under that same recorded override (recorded in the Phase 4
+section). No evidence above is revised.
 
 Revisit only if: a live-host executed run collects real baseline/after
 transcripts and runtime verification (closing threshold 4 and the telemetry
@@ -316,7 +318,9 @@ fail-closed (no executed run evidences runtime completion or verification),
 the live-host telemetry probe has still not run, and the runtime efficacy of
 the strict strategy remains unproven. Phase 3 later proceeded under the same
 recorded override extended by explicit instruction (Phase 3 section); Phase 4
-remains gated on its own preconditions and is not authorized by this override.
+remained gated on its own preconditions and was not authorized by that override
+at the time of this Phase 2 record, and Phase 4 later proceeded under the same
+recorded override (Phase 4 section).
 
 Only if Checkpoint A shows users need an explicit strategy override.
 Optional strict config (e.g. a strategy key defaulting to current MVP
@@ -369,8 +373,9 @@ a met go criterion. Phase 3's own precondition — rubric repeatability plus a
 machine-readable signal that demonstrably improves classification — is **not**
 demonstrated by running evidence, the live-host telemetry probe has still not
 run, and the signal's runtime efficacy remains unproven. Checkpoint A evidence
-is unchanged, threshold 4 stays fail-closed, and Phase 4 remains gated and
-unauthorized (this phase does not start it).
+is unchanged, threshold 4 stays fail-closed, and Phase 4 remained gated and
+unauthorized when this phase closed (this phase does not start it); Phase 4
+later proceeded under the same recorded override (see the Phase 4 section).
 
 **D2 flow-through question (named upfront, required by this phase):** does the
 additive D4 v2 coherence signal add or change any D2 v1 handoff field,
@@ -500,20 +505,200 @@ Limitations: no live-host run occurred; tokens / cost / latency / steps remain
 efficacy is unproven. The signal is advisory, is not registered as a host tool,
 and claims no filesystem isolation or concurrency enforcement.
 
-## Phase 4 — Rollout and completion
+## Phase 4 — Rollout and completion (complete under human override)
 
-**Status: gated — not started and not authorized.** Phase 3's additive signal
-does not satisfy Phase 4's precondition (the identical corpus executed under an
-approved configuration), and this ledger records no executed run. Phase 4
-remains unstarted; it is not implemented by the Phase 3 slice.
+**Status: complete (2026-09-15) under the recorded explicit human override,
+with residual limitations.** The recorded human authorization ("I approve, go
+ahead", extended by explicit instruction to Phase 3) authorizes this closure;
+Phase 4 proceeds under that same recorded override, which is a recorded human
+authorization, not a met precondition. Phase 4's own precondition — the
+identical corpus **executed** under an approved configuration — is not met by
+execution evidence: the rollout repeats the frozen protocol v1 manually under
+the approved configuration and records deterministic prompt-guidance evidence
+only; every executed-run field remains `not-collected` and is never estimated.
+Threshold 4 stays fail-closed (no executed run evidences runtime completion or
+verification), Checkpoint A evidence is unchanged, and the plan closes as
+"complete under human override with residual limitations" — never as a claim
+that an unmet threshold was met.
 
-Repeat the identical corpus protocol under the approved configuration,
-compare baseline / MVP / later phases, have the review role audit slice
-boundaries, shared-state handling, acceptance ownership, prompt
-compatibility, and exact review/worktree/GitHub invariants. Mark complete
-only with green tests, reviewer approval, zero observed shared-state
-violations, met thresholds, unavailable telemetry honestly marked, and
-declined optionals recorded as declined.
+**Original requirement (unchanged):** repeat the identical corpus protocol
+under the approved configuration, compare baseline / MVP / later phases, have
+the review role audit slice boundaries, shared-state handling, acceptance
+ownership, prompt compatibility, and exact review/worktree/GitHub invariants.
+Mark complete only with green tests, reviewer approval, zero observed
+shared-state violations, met thresholds, unavailable telemetry honestly
+marked, and declined optionals recorded as declined. (Completion accounting
+against each criterion is recorded in the Status section; the met-thresholds
+criterion is not met for threshold 4, which is why completion is recorded
+against the human override with that limitation explicit.)
+
+**Approved configuration.**
+
+- The approved rollout configuration is the **mvp default**: `decomposition`
+  omitted, or `{ "strategy": "mvp" }` (the Phase 2 optional key defaulting to
+  existing behavior). Phase 4 evaluates the frozen corpus under it.
+- `strict` is documented as a **prompt-preference-only option**: it appends
+  the 764-byte `STRICT_DECOMPOSITION_GUIDANCE` block after the byte-identical
+  Phase 1 block and never disables serialization, scope validation, review,
+  worktree lifecycle, or publication preconditions. No executed-run evidence
+  exists for strict and none is claimed.
+
+**Frozen corpus re-evaluated under the approved configuration (protocol v1,
+manual; no model execution).** Method identical to Checkpoint A: for each of
+the 12 frozen cases only the frozen `requests` text is scored against the
+frozen five-condition rubric using the guidance emitted under the approved
+configuration (main `447fffb`, the Phase 3 merge: mvp default plus the
+additive D4 v2 coherence guidance). No case text, label, rubric condition,
+metric, or threshold was changed; the results are recorded in the frozen
+template (`phase4Rollout` plus a per-case `rolloutResult`).
+
+| Case kind | Baseline (reconstructed, 146f54a) | Phase 4 rollout (approved configuration) |
+|---|---|---|
+| Multi-file features VS-01…03 | 4/4/4 file-scoped children (12 slices); 0/12 pass all five conditions; 3/3 cases unnecessarily split | unchanged from the Checkpoint A after state: 1/1/1 coherent slices (3 slices); 3/3 pass; 0/3 unnecessarily split |
+| Independent pairs VS-04…06 | 2/2/2 parallel children (6 slices); 6/6 pass; scopes disjoint | unchanged: 2/2/2 parallel children (6 slices); 6/6 pass; scopes disjoint |
+| Shared overlap VS-07…09 | 2/2/2 slices serialized one child at a time (6 slices); 6/6 pass | unchanged serialization (6 slices); never-concurrent invariant present; 6/6 pass |
+| Trivial controls VS-10…12 | 0 children (direct execution/direct answer) | unchanged: 0 children |
+
+- Rubric accounting: 15 produced slices, 15/15 pass all five conditions (3
+  cohesive + 6 parallel + 6 serialized); acceptance ownership stays per slice
+  with the parent verifying the integrated revision; no per-slice publication.
+- Shared-state accounting: zero observed shared-state violations — an absence
+  of observation (no runtime execution occurred), never "guaranteed
+  serialization"; prompt-level scopes are coordination units, not isolation.
+- Executed-run fields — runtime completion, runtime verification, rework
+  loops, review loops, tokens, cost, latency, steps — are `not-collected` and
+  are never estimated. No orchestrator/model was invoked; no transcript exists.
+
+**Rollout comparison — baseline / MVP / Phase 2 strict / Phase 3 v2-advisory
+(deterministic prompt bytes).** UTF-8 bytes; prompts are pure functions of the
+parsed options. Values are the recorded phase-ledger measurements, and each
+phase's "before" column reproduced the previous phase's default bytes exactly
+(the recorded default-preservation evidence).
+
+| Prompt (default-equivalent options) | Baseline (146f54a) | MVP (Phase 1) | Strict (Phase 2) | v2-advisory (Phase 3) |
+|---|---|---|---|---|
+| orchestrator system | 8322 | 9074 | 9839 | 10080 |
+| worker system (implementation) | 6050 | 6799 | 7564 | 7805 |
+| worker system (review) | 6019 | 6736 | not recorded | not recorded |
+| continuation | 5422 | 6052 | 6817 | 7058 |
+| `VERTICAL_SLICE_GUIDANCE` block | 0 (absent) | 629 | 629 (byte-identical) | 629 (byte-identical) |
+| `STRICT_DECOMPOSITION_GUIDANCE` block | 0 (absent) | 0 (absent) | 764 | 0 by default (opt-in only) |
+| `D4_V2_COHERENCE_GUIDANCE` block | 0 (absent) | 0 (absent) | 0 (absent) | 1005 |
+
+The strict column is the Phase 2 measurement basis (strict applied to the
+Phase 2 default, before the v2 block existed); the v2-advisory column is the
+Phase 3 measurement of the current default (mvp) state, in which the v2 block
+is always present. The strict + v2 combined bytes were not measured:
+`not-collected`, never derived by arithmetic.
+
+Command prompts and 12-case totals (Phase 0/1 ledger basis):
+
+| Prompt | Baseline | MVP (Phase 1) | Delta |
+|---|---|---|---|
+| orchestration prompt (12 cases) | 9863 | 11747 | +1884 (+157/case) |
+| continuation prompt (12 cases) | 66671 | 74231 | +7560 (+630/case) |
+| command `orchestrate` (12 cases) | 70259 | 72143 | +1884 (+157/case) |
+| command `run-plan` (12 cases) | 65531 | 65531 | +0 |
+
+- Phases 2 and 3 do not tax command prompts: Phase 2 recorded `orchestrate`
+  +0; Phase 3 recorded `orchestrate` +0 and `goal` +0. (Single-case values are
+  quoted from each phase's own ledger — 5870 in Phase 2, 5874 in Phase 3 —
+  with the recorded invariant being the +0 delta.)
+- 12-case totals for the Phase 2 and Phase 3 states were not measured:
+  `not-collected`, never estimated.
+
+Corpus-protocol comparison across phases (all guidance-derived; no executed
+run exists at any phase, so no executed-run column is populated):
+
+| Phase / state | Produced slices | Rubric | Executed-run fields |
+|---|---|---|---|
+| Baseline reconstruction | 24 slices / 24 dispatches | 12/24 pass; 0/12 on multi-file features | not-collected |
+| MVP default (Phase 1) | 15 slices / 15 dispatches | 15/15 pass; 0/3 multi-file cases unnecessarily split | not-collected |
+| Strict (Phase 2, opt-in) | same guidance-derived decomposition outcomes as MVP default (emphasis only) | unchanged | not-collected |
+| v2-advisory (Phase 3, default-additive) | same guidance-derived decomposition outcomes as MVP default | unchanged | not-collected |
+
+**Review audit (recorded 2026-09-15).** Required areas — slice boundaries,
+shared-state handling, acceptance ownership, prompt compatibility, and the
+review/worktree/GitHub invariants per merged PR — audited against the in-repo
+record: the plan ledgers, the merged PR chain, and the per-PR diff stats.
+Evidence that lives only in the orchestrator/GitHub record (per-PR review
+receipts, managed-worktree lifecycle records) is not observable in this
+docs-only slice; it is recorded as not-observable-here and is never
+fabricated. The GitHub and worktree tool families are orchestrator-owned and
+were not used by this slice.
+
+| PR | Branch | Merge commit | Changed files (vs first parent) | Declared scope |
+|---|---|---|---|---|
+| #22 | `feat/vertical-slices-mvp` | `4c6049f` | `src/core/policy.ts`, `src/core/prompt-builder.ts`, `src/core/prompts.ts`, `src/core/roles.ts`, `README.md`, 4 test files, plan, frozen template (Phase 0 artifact) | Phase 0/1 declared scope — match |
+| #23 | `feat/vertical-slices-checkpoint-a` | `64eb35f` | plan, frozen template | Checkpoint A docs-only scope — match |
+| #24 | `feat/vertical-slices-phase-2` | `2cfbf1f` | `src/core/config.ts`, `src/core/policy.ts`, `src/core/prompts.ts`, `README.md`, `dev/project/opencode.example.jsonc`, 5 test files, plan | Phase 2 declared scope — match |
+| #25 | `feat/vertical-slices-phase-3` | `447fffb` | `src/core/d4v2.ts` (new), `src/core/policy.ts`, `src/core/prompts.ts`, `README.md`, `docs/phase-1/d4-v2-evaluation-template.json` (new), 3 test files, plan | Phase 3 declared scope — match |
+
+- **Slice boundaries:** no merged PR changed a file outside its phase's
+  declared scope, and no file was written by two concurrent slices; each phase
+  ran as one serialized writer scope (changed-file lists above are the
+  authoritative diff stats).
+- **Shared-state handling:** every phase preserved the verbatim invariant
+  ("Unavoidable coupling between files is resolved by sequencing or
+  serialization with integrated parent verification — never by concurrent
+  overlapping writes") and the unknown-coupling-fails-closed rule; the strict
+  and v2 additions were test-locked as never disabling serialization, scope
+  validation, review, worktree lifecycle, or publication preconditions; zero
+  observed shared-state violations (absence of observation, not enforcement).
+- **Acceptance ownership:** each slice carries its own acceptance statement and
+  verification command; the parent verifies the integrated revision; no
+  per-slice publication and one terminal chain per phase.
+- **Prompt compatibility:** the default (mvp) prompts are byte-identical to the
+  prior phase at every step (Phase 2 default preservation; Phase 3's before
+  column reproducing the Phase 2 default), strict/v2 text is appended after
+  the byte-identical Phase 1 block, and command prompts are unchanged by
+  Phases 2–3. D2 v1 (fields, `reviewState`, validation) is unchanged — the
+  Phase 3 D2 flow-through answer is "no", re-verified by the Phase 3 suite.
+- **Review/worktree/GitHub invariants per merged PR:** each PR merged as a
+  merge commit on `main` whose second parent is the pushed feature-branch tip
+  (`e61e02c`, `bb8350d`, `206f727`, `bf425a8`), evidencing the
+  branch → PR → merge chain rather than direct-to-main writes for the chain;
+  each phase's ledger records its worktree environment and green tests.
+  Per-PR review verdicts/receipts and managed-worktree lifecycle records live
+  in the orchestrator/GitHub record, not in this repository's object store, and
+  were not re-fetched or re-verified here. No gate, config ceiling, or
+  authorization was changed by any phase (locked in by the Phase 2/3 contract
+  suites).
+
+**Optionals disposition.** Both optional phases — Phase 2's strict
+decomposition configuration and Phase 3's additive D4 v2 coherence signal —
+landed under the recorded override. **None declined:** no optional item was
+declined, deferred, or left unimplemented. The only conditional item left
+unrealized (a Phase 1 scope-partition helper) was correctly not needed because
+Phase 1 was prompt-only as planned, so it was not a declined optional.
+
+**Human override record.** The Checkpoint A no-go was overridden twice by
+explicit human authorization: (1) Phase 2 — "I approve, go ahead", recorded
+2026-09-15; (2) Phase 3 — the same authorization extended by explicit
+instruction, recorded in the Phase 3 section. Phase 4 proceeds under that same
+recorded override. The override is a recorded human authorization, not a met
+go criterion; no evidence in the Checkpoint A, Phase 2, or Phase 3 records is
+revised, and threshold 4 remains fail-closed.
+
+**Residual limitations (carried forward, unchanged).**
+
+- No live-host run occurred at any phase: tokens / cost / latency / steps
+  remain `not-collected` and are never estimated.
+- Threshold 4 is not met; completion rests on the recorded human override.
+- Baseline decompositions are reconstructions from pre-MVP prompt text at
+  `146f54a`; rollout decompositions are prompt-guidance-derived, not observed
+  model behavior; no transcripts exist.
+- Zero observed shared-state violations is an absence of observation, not
+  evidence of scheduler or filesystem enforcement.
+- The runtime efficacy of the strict strategy and of the D4 v2 coherence
+  signal is unproven; neither claims filesystem isolation, scheduling, or gate
+  enforcement.
+
+**Verification (2026-09-15):** see the Phase 4 evidence ledger below.
+
+**Limitations:** docs-only slice (this plan plus the two frozen evaluation
+templates); no `src/`, `test/`, config, command, schema, or runtime behavior
+changed.
 
 ## Rollback and compatibility
 
@@ -532,18 +717,66 @@ declined optionals recorded as declined.
 
 ## Status
 
-**Phases 0–3 complete; Checkpoint A recorded 2026-09-15 as no-go for
-Phases 2–4 (stop at the prompt-only MVP); the user explicitly overrode that
-gate ("I approve, go ahead", recorded 2026-09-15) and extended it by explicit
-instruction to Phase 3, and Phases 2–3 are complete as prompt-preference-only
-changes (Phase 3 adds one separate advisory v2 classifier surface plus guidance
-text). Phase 4 remains gated, unstarted, and unauthorized, and the overall plan
-is NOT complete.**
-Threshold 4 stays fail-closed, the live-host telemetry probe has still not
-run, and the runtime efficacy of the strict strategy and of the D4 v2 coherence
-signal is unproven. The v2 precondition (rubric repeatability plus a
-demonstrably improving machine-readable signal) is not evidenced; Phase 3
-proceeded under the recorded human override only.
+**Phases 0–4 complete — Phase 4 recorded 2026-09-15 as complete under the
+explicit human override, with residual limitations; the overall plan is
+complete.** Checkpoint A remains recorded as no-go for Phases 2–4 (stop at the
+prompt-only MVP). The user explicitly overrode that gate twice ("I approve, go
+ahead", recorded 2026-09-15): the authorization landed Phase 2 and was
+extended by explicit instruction to Phase 3, and Phase 4 proceeds under that
+same recorded override. The override is a recorded human authorization, not a
+met go criterion: threshold 4 stays fail-closed (no executed run evidences
+runtime completion or verification), the live-host telemetry probe has still
+not run, and the runtime efficacy of the strict strategy and of the D4 v2
+coherence signal is unproven. No prior evidence is revised.
+
+Phase 4 completion accounting (per the Phase 4 requirement):
+
+- **Green tests:** every phase ledger is green; the Phase 4 docs-only slice is
+  green under the full suite of its worktree base (802 tests, 29 files — the
+  Phase 3 tree lands at sync; see the Phase 4 evidence ledger below).
+- **Reviewer approval / review audit:** the review audit — slice boundaries,
+  shared-state handling, acceptance ownership, prompt compatibility, and the
+  review/worktree/GitHub invariants per merged PR #22–#25 — is recorded in the
+  Phase 4 section; each earlier phase landed through its merge/review chain,
+  and the Phase 4 slice remains subject to the standard exact-revision review
+  before publication. No review receipt is fabricated here.
+- **Zero observed shared-state violations:** yes as observed — no concurrent
+  overlapping writes observed in any phase; no runtime execution occurred, so
+  this is an absence of observation, not evidence of enforcement.
+- **Met thresholds:** thresholds 1, 2, 3 (as observed), and 5 as recorded at
+  Checkpoint A and extended by the Phase 2/3 deterministic byte deltas;
+  **threshold 4 is not met** (fail-closed, unchanged). Completion rests on the
+  recorded human override, never on claiming an unmet threshold.
+- **Unavailable telemetry:** tokens / cost / latency / steps remain
+  `not-collected` and are never estimated.
+- **Declined optionals:** none — both optional phases (Phase 2 strict
+  decomposition config; Phase 3 additive D4 v2 coherence signal) landed under
+  the override; no optional item was declined.
+
+### Phase 4 evidence ledger (recorded 2026-09-15)
+
+Environment: docs-only slice in this worktree; the two in-scope docs files
+carry the `origin/main` `447fffb` (Phase 3 merge) content plus the Phase 4
+records, while the worktree tree itself is based on `8bbfc26` (one merge
+behind `origin/main`; the Phase 3 code arrives at the base sync). Pinned
+`@opencode/plugin` / `@opencode/sdk` `0.0.0-beta-19507`; bun 1.3.3;
+`bun install` run in the worktree before verification.
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `bun -e` (JSON.parse of `docs/phase-1/vertical-slice-evaluation-template.json` and `docs/phase-1/d4-v2-evaluation-template.json`) | both templates valid JSON |
+| 2 | frozen-slot integrity check (frozen sections and frozen corpus fields compared against `HEAD`) | `frozenProtocol`, `definitions`, `rubric`, `metricAvailability`, `thresholds`, `perCaseResultsTemplate`, `checkpointARun`, `aggregateResults`, `checkpointA`, `noResultsStatement`, and every frozen corpus field unchanged; only the new result/rollout slots differ |
+| 3 | `bun run typecheck` | pass (`tsc --noEmit`, exit 0) |
+| 4 | `bun test` | 801 pass / 1 skip / 0 fail (802 tests, 29 files) — the worktree-base suite; the Phase 3 30-file suite runs when the sync brings the Phase 3 tree and is not claimed as run here |
+| 5 | `bun run build` | pass; emitted `dist/index.js`, `dist/tui.js`, `dist/commands.js`, `dist/installer.js`, `dist/cli/index.js` |
+| 6 | `git diff --check` | clean (no whitespace errors) |
+| 7 | `git status --short` | exactly the three scope docs files: plan modified, frozen template modified, `d4-v2-evaluation-template.json` added (byte-identical to `origin/main`; no rollout edits there because no executed v2 run exists — its evaluation slots stay `not-collected`) |
+
+Scope note: this slice changed only `.orchestrator/plans/vertical-slices.md`,
+`docs/phase-1/vertical-slice-evaluation-template.json`, and
+`docs/phase-1/d4-v2-evaluation-template.json`. No `src/`, `test/`, config,
+command, schema, or runtime behavior changed; the Phase 3 code files are
+untouched by this slice and arrive through the base sync.
 
 ### Phase 0/1 evidence ledger (recorded 2026-09-15)
 
@@ -675,6 +908,10 @@ chain. Phase 3 later proceeded under the same recorded override extended by
 explicit instruction (see the Phase 3 section and evidence ledger); its
 preconditions (rubric repeatability with a demonstrably improving
 machine-readable signal) remain unmet by evidence, so the override — not a met
-precondition — is what authorized it. Phase 4 remains unauthorized: its
-precondition (the identical corpus executed under an approved configuration)
-is still unmet, and the override does not substitute for it.
+precondition — is what authorized it. Phase 4 remained gated and unauthorized
+at that point (its precondition — the identical corpus executed under an
+approved configuration — still unmet, and the override does not substitute for
+it); Phase 4 later proceeded under the same recorded override (see the Phase 4
+section and evidence ledger), and its precondition remains unmet by execution
+evidence, so the override — not a met precondition — is what authorized the
+closure.

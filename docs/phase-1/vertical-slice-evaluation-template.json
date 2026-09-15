@@ -1,0 +1,674 @@
+{
+  "artifact": "vertical-slice",
+  "name": "Coherent Vertical-Slice Decomposition — Evaluation Template",
+  "version": 1,
+  "status": "design-only",
+  "date": "2026-09-15",
+  "planRef": {
+    "path": ".orchestrator/plans/vertical-slices.md",
+    "phase0": "Freeze the measurement protocol (this artifact).",
+    "phase1": "Prompt-only coherent-slice MVP (no schema, config, or runtime changes)."
+  },
+  "relatedArtifacts": [
+    {
+      "artifact": "D4-evaluation-template",
+      "path": "docs/phase-1/d4-evaluation-template.json",
+      "note": "This template follows the D4 evaluation-template shape: frozen protocol, scorer rubric, per-case result slots, and null / 'not-collected' aggregates. It does not read or modify the D4 corpus."
+    }
+  ],
+  "frozenProtocol": {
+    "version": 1,
+    "frozenDate": "2026-09-15",
+    "amendmentPolicy": "Any change to the rubric, the corpus, a hypothesis label, the metric set, the thresholds, or this protocol requires a version bump and a full re-run of every case. Partial re-runs are not comparable to a frozen baseline and must never be merged into a prior run's aggregate.",
+    "amendmentRules": [
+      "Changing case text, case kind, or a hypothesis label (including the expected decomposition) requires a version bump and a full re-run.",
+      "Changing a rubric condition, meaning, or pass/fail rule requires a version bump and a full re-run.",
+      "Changing a threshold requires a new protocol version; thresholds stay hypotheses until the first baseline run populates them.",
+      "Completed results are frozen with the protocol version they were collected under; runs from different protocol versions are never mixed.",
+      "Adding or removing a case — including an extra trivial control — is an amendment: version bump plus full re-run."
+    ],
+    "runConditions": [
+      "Run in one pinned OpenCode V2 environment (package versions, plugin entrypoint, host API, date) and record that environment with the results.",
+      "Score every case from its own recorded run evidence only; never score from memory, from another run, or from a model self-report.",
+      "Corpus labels and expected decompositions are hypotheses, not truth: the protocol measures rubric agreement and observed behavior, not the correctness of the labels.",
+      "Deterministic inputs only: prompt byte size is a pure function of the parsed options; model-side outcomes are recorded as observed, never inferred.",
+      "Manual collection only: no in-repo instrument measures decomposition quality, and the host delivers no decomposition or delegation feed. Nothing in this protocol gates on telemetry the host may never deliver.",
+      "No case in this design phase has been executed; every result field exists to be filled by a future frozen-protocol run."
+    ],
+    "steps": [
+      "1. Record the environment (plugin versions, entrypoint, host API, date) and the protocol version being run.",
+      "2. For each corpus case: present only the case request text to the pinned orchestrator and record the resulting decomposition (children, files/areas per child, parallel vs serialized, acceptance owner).",
+      "3. Score every produced slice against all five rubric conditions; record pass/fail per condition per slice.",
+      "4. Record per-case metrics: outcome, children count, files/areas per child, acceptance owner, parallel vs serialized, rework loops, review loops, and verification result.",
+      "5. Record safety observations, including any observed shared-state write overlap and exactly how it was resolved.",
+      "6. Record the deterministic prompt byte size for the fixed evaluation inputs, and compare it to the baseline value.",
+      "7. Compare aggregate outcomes against the frozen thresholds; mark every unavailable metric as 'not-collected' rather than estimating it.",
+      "8. Freeze the completed results with the protocol version; never mix runs across versions."
+    ],
+    "evidenceRules": [
+      "Every metric must come from the run's own evidence (prompt byte counts, VCS state, verification command output, review verdicts, or an out-of-band transcript reference).",
+      "Any field that could not be measured is recorded as null or 'not-collected', never estimated.",
+      "No raw secrets, tokens, authorization headers, or credentials may appear in results (SECRET_HANDLING_GUIDANCE).",
+      "No raw transcripts or diffs are inlined into results; reference their out-of-band location instead.",
+      "A failed or unavailable case is recorded as failed or 'not-collected'; scope is never widened after the fact to convert a failure into a pass.",
+      "An observed shared-state violation is recorded as an observed violation; the template never records 'guaranteed serialization', because prompt-level scopes are not an enforcement mechanism."
+    ],
+    "environment": {
+      "requiresPinnedVersions": true,
+      "note": "The repository pins @opencode/plugin and @opencode/sdk for integration tests; evaluation runs must record the same level of detail. Prompt byte size is in-repo computable (prompts are pure functions of options); tokens, cost, latency, and step counts remain unavailable until a live-host probe delivers them."
+    }
+  },
+  "definitions": {
+    "slice": "The unit of delegation the parent assigns: one coherent end-to-end outcome with an explicit ownership scope, its own acceptance statement and verification command(s), and no shared mutable overlap with another slice.",
+    "coherentSlice": "A slice that satisfies all five rubric conditions. A slice is a coordination unit, never a permission or filesystem boundary.",
+    "unnecessarySplit": "A decomposition that creates more than one slice for a single cohesive outcome whose files must change together, or that splits by file or layer without giving each resulting slice its own independently verifiable outcome.",
+    "overlapSerialization": "Two otherwise separate slices claiming the same file, module, command list, config object, state key, storage namespace, fixture, or mutable integration surface. The required resolution is sequencing or serialization with integrated parent verification — never concurrent overlapping writes. Unknown coupling fails closed and serializes.",
+    "isolationBoundary": "Never claimed: prompt-level scopes are advisory coordination units, not filesystem isolation. Atomic child isolation is unavailable in the pinned V2 subagent API and this protocol never records it as present."
+  },
+  "rubric": {
+    "name": "Frozen five-condition vertical-slice rubric",
+    "instructions": [
+      "Score each produced slice against all five conditions with pass or fail, from recorded run evidence.",
+      "A slice is coherent only when all five conditions pass.",
+      "A condition that cannot be evidenced fails closed ('fail' with a note) instead of passing by assumption.",
+      "The whole-case decomposition passes only when every produced slice passes all five conditions and no shared mutable surface is written concurrently.",
+      "Scorers must not consult the hypothesis label before scoring the observed decomposition."
+    ],
+    "conditions": [
+      {
+        "id": "cohesiveUserOutcome",
+        "condition": "Cohesive user outcome",
+        "question": "Does the slice deliver one demonstrable behavior, fix, or visible sub-outcome rather than a file- or layer-sized unit of work?",
+        "pass": "One demonstrable outcome is named, and the slice is the smallest unit that can deliver it.",
+        "fail": "The slice has no demonstrable outcome, or it bundles outcomes that are independent of each other."
+      },
+      {
+        "id": "sharedAcceptanceTests",
+        "condition": "Shared acceptance tests",
+        "question": "Does the slice name an acceptance statement and verification command(s), with code, wiring, and tests that must change together kept in the same slice?",
+        "pass": "The acceptance statement and verification command(s) are named, and every file that must change to prove them is inside the slice.",
+        "fail": "Acceptance is unnamed, unverifiable, or split across slices so that no single slice can prove the outcome."
+      },
+      {
+        "id": "unavoidableFileCoupling",
+        "condition": "Unavoidable file coupling",
+        "question": "Are files grouped because they must change together (API contract, import graph, command registry, config shape, runtime wiring, shared fixture, or behavior-level test)?",
+        "pass": "Every coupled file is in the slice and no file is included for merely superficial reasons.",
+        "fail": "Coupled files are split across slices, or unrelated files are bundled to inflate one slice."
+      },
+      {
+        "id": "explicitOwnershipScope",
+        "condition": "Explicit ownership scope",
+        "question": "Does the parent assign exact writable files or areas plus acceptance responsibility, without broad scope concealing unrelated work?",
+        "pass": "The slice's writable files/areas and acceptance owner are exact and match the observed writes.",
+        "fail": "Ownership is vague, absent, or wider than the work performed; unrelated work is concealed by broad scope."
+      },
+      {
+        "id": "noSharedMutableOverlap",
+        "condition": "No shared mutable overlap with another slice",
+        "question": "Do parallel writable slices share no file, module, command list, config object, state key, storage namespace, fixture, or mutable integration surface?",
+        "pass": "Parallel slices are verified disjoint from repository facts; any overlap or unknown coupling was resolved by sequencing or serialization with integrated parent verification.",
+        "fail": "Parallel slices share a mutable surface, or overlap/unknown coupling was resolved by concurrent overlapping writes."
+      }
+    ],
+    "decisionRules": [
+      "Keep coupled code, tests, wiring, and requested docs in one slice even across several files.",
+      "Split only when every resulting slice has its own outcome, acceptance evidence, ownership, and no hidden dependency.",
+      "Dependent but non-overlapping slices run sequentially with an explicit edge.",
+      "Unknown coupling fails closed: serialize.",
+      "Parallelize only after the parent verifies the rubric from repository facts. Prompt-level scopes are coordination units, never filesystem isolation.",
+      "A reviewer may own cross-slice acceptance, but only when stated explicitly, and the parent still verifies the integrated result."
+    ]
+  },
+  "metricAvailability": {
+    "status": "binding",
+    "note": "Every metric is labeled manual, in-repo computable, or unavailable. No metric in this table is collected at freeze time.",
+    "metrics": [
+      {
+        "metric": "slice_cohesion_rate",
+        "howCollected": "Manual rubric scoring per case",
+        "availability": "manual"
+      },
+      {
+        "metric": "unnecessary_split_rate",
+        "howCollected": "Manual per-case judgment against the baseline run",
+        "availability": "manual"
+      },
+      {
+        "metric": "acceptance_coverage",
+        "howCollected": "Manual per-case check of the named acceptance statement and verification result",
+        "availability": "manual"
+      },
+      {
+        "metric": "parallel_independence_precision",
+        "howCollected": "Manual per-case transcript/VCS check of which children actually ran in parallel and whether their write scopes were disjoint",
+        "availability": "manual"
+      },
+      {
+        "metric": "shared_state_violations",
+        "howCollected": "Manual per-case check of observed concurrent overlapping writes; the target is zero observed violations, never 'guaranteed serialization'",
+        "availability": "manual"
+      },
+      {
+        "metric": "integration_rework_rate",
+        "howCollected": "Manual per-case check of rework after integration",
+        "availability": "manual"
+      },
+      {
+        "metric": "delegation_count",
+        "howCollected": "Manual per-case count of child dispatches",
+        "availability": "manual"
+      },
+      {
+        "metric": "prompt_size_bytes",
+        "howCollected": "Deterministic: prompts are pure functions of options",
+        "availability": "in-repo-computable"
+      },
+      {
+        "metric": "tokens_cost_latency_steps",
+        "howCollected": "Host snapshots replace, never sum; delivery unverified",
+        "availability": "unavailable until live-host probe"
+      }
+    ]
+  },
+  "thresholds": {
+    "status": "hypotheses-until-baseline",
+    "note": "Every threshold below is a hypothesis. It is finalized only after the first baseline run under this frozen protocol populates real results; no threshold is evidence at freeze time.",
+    "hypotheses": [
+      {
+        "id": "unnecessarySplittingReduction",
+        "hypothesis": "At least a 25% relative reduction in unnecessary splitting versus the baseline run.",
+        "measuredBy": "unnecessary_split_rate",
+        "observed": null
+      },
+      {
+        "id": "cohesion",
+        "hypothesis": "At least 80% cohesion on sampled multi-file outcomes.",
+        "measuredBy": "slice_cohesion_rate",
+        "observed": null
+      },
+      {
+        "id": "zeroSharedStateViolations",
+        "hypothesis": "Zero observed shared-state violations per case.",
+        "measuredBy": "shared_state_violations",
+        "observed": null
+      },
+      {
+        "id": "noIndependentRegression",
+        "hypothesis": "No regression in independent-task completion or verification versus the baseline run.",
+        "measuredBy": "parallel_independence_precision and acceptance_coverage",
+        "observed": null
+      },
+      {
+        "id": "promptSizeGrowthRecorded",
+        "hypothesis": "Prompt byte-size growth is recorded; tokens are never asserted.",
+        "measuredBy": "prompt_size_bytes",
+        "observed": null
+      }
+    ]
+  },
+  "corpus": {
+    "status": "hypotheses-only",
+    "frozen": true,
+    "caseCount": 12,
+    "coverage": {
+      "multiFileFeatures": 3,
+      "independentPairs": 3,
+      "independentPairTasks": 6,
+      "sharedOverlap": 3,
+      "trivialControls": 3
+    },
+    "note": "Twelve synthetic, unexecuted cases frozen with protocol version 1. Every hypothesisLabel and expectedDecomposition is a hypothesis, not a measurement; result slots stay null / 'not-collected' until a frozen-protocol run fills them.",
+    "cases": [
+      {
+        "id": "VS-01",
+        "kind": "multi-file-feature",
+        "requests": [
+          "Add cursor-based pagination to /api/items: update the route handler, the query layer, the OpenAPI schema, and the integration tests so the new parameter works end to end."
+        ],
+        "hypothesisLabel": "one-coherent-slice",
+        "hypothesisNote": "Hypothesis: the four files must change together to deliver one outcome, so splitting by file would break acceptance.",
+        "expectedDecomposition": {
+          "slices": 1,
+          "children": 1,
+          "parallelOrSerialized": "not applicable (single slice)",
+          "acceptanceOwner": "the slice owner; the parent verifies the integrated request end to end"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      },
+      {
+        "id": "VS-02",
+        "kind": "multi-file-feature",
+        "requests": [
+          "Add an audit trail for goal updates: record each update through the storage layer, surface it in the status output, and cover the new path with tests plus a short docs note."
+        ],
+        "hypothesisLabel": "one-coherent-slice",
+        "hypothesisNote": "Hypothesis: storage, tool output, tests, and docs are coupled through one behavior and should stay under one owner.",
+        "expectedDecomposition": {
+          "slices": 1,
+          "children": 1,
+          "parallelOrSerialized": "not applicable (single slice)",
+          "acceptanceOwner": "the slice owner; the parent verifies the audit path directly"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      },
+      {
+        "id": "VS-03",
+        "kind": "multi-file-feature",
+        "requests": [
+          "Rename the legacy review_mode option to the nested review.mode shape across the strict schema, prompt builders, installer output, and the tests that pin the old name."
+        ],
+        "hypothesisLabel": "one-coherent-slice",
+        "hypothesisNote": "Hypothesis: a rename is a single atomic change; splitting schema, prompts, installer, and tests would leave a broken intermediate state.",
+        "expectedDecomposition": {
+          "slices": 1,
+          "children": 1,
+          "parallelOrSerialized": "not applicable (single slice; the rename is atomic)",
+          "acceptanceOwner": "the slice owner; the parent verifies the schema, prompts, installer, and tests agree"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      },
+      {
+        "id": "VS-04",
+        "kind": "independent-pair",
+        "requests": [
+          "Fix the broken anchor link in the troubleshooting section of README.md.",
+          "Add a regression test for parseLsRemoteRefSha in the worktree unit test file."
+        ],
+        "hypothesisLabel": "independent-parallel-pair",
+        "hypothesisNote": "Hypothesis: the two tasks touch disjoint files and share no mutable surface, so they are a genuine parallel pair.",
+        "expectedDecomposition": {
+          "slices": 2,
+          "children": 2,
+          "parallelOrSerialized": "parallel (verified disjoint write scopes)",
+          "acceptanceOwner": "each child owns its own files; the parent verifies the integrated result"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      },
+      {
+        "id": "VS-05",
+        "kind": "independent-pair",
+        "requests": [
+          "Add a short --json description to the CLI help text in the CLI entry file.",
+          "Add a unit test that pins the deterministic ordering of the bounded delegation graph summary."
+        ],
+        "hypothesisLabel": "independent-parallel-pair",
+        "hypothesisNote": "Hypothesis: CLI help text and a role-graph unit test are disjoint and can proceed in parallel.",
+        "expectedDecomposition": {
+          "slices": 2,
+          "children": 2,
+          "parallelOrSerialized": "parallel (verified disjoint write scopes)",
+          "acceptanceOwner": "each child owns its own files; the parent verifies the integrated result"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      },
+      {
+        "id": "VS-06",
+        "kind": "independent-pair",
+        "requests": [
+          "Document the existing read-only gates inspection tool in the phase-1 documentation index.",
+          "Add a pure unit test for the gate-status ordering helper in its dedicated unit test file."
+        ],
+        "hypothesisLabel": "independent-parallel-pair",
+        "hypothesisNote": "Hypothesis: documentation and a new isolated unit test share no mutable surface.",
+        "expectedDecomposition": {
+          "slices": 2,
+          "children": 2,
+          "parallelOrSerialized": "parallel (verified disjoint write scopes)",
+          "acceptanceOwner": "each child owns its own files; the parent verifies the integrated result"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      },
+      {
+        "id": "VS-07",
+        "kind": "shared-overlap",
+        "requests": [
+          "Add a new prompting-policy sentence to the shared policy constants.",
+          "Reorder the secret-handling constant in the same shared policy file and update the tests that pin it."
+        ],
+        "hypothesisLabel": "serialize-overlap",
+        "hypothesisNote": "Hypothesis: both tasks write the same shared policy file and its pinned tests, so the required resolution is serialization, never concurrent writes.",
+        "expectedDecomposition": {
+          "slices": 2,
+          "children": 1,
+          "parallelOrSerialized": "serialized (shared writable file; explicit dependency edge)",
+          "acceptanceOwner": "the parent sequences the two slices and verifies the integrated file"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      },
+      {
+        "id": "VS-08",
+        "kind": "shared-overlap",
+        "requests": [
+          "Add an optional field to the structured handoff contract and regenerate the published schema document.",
+          "Update the handoff renderer in the same contract module and extend its contract tests."
+        ],
+        "hypothesisLabel": "serialize-overlap",
+        "hypothesisNote": "Hypothesis: contract module, schema document, and contract tests form one mutable surface; concurrent writers would corrupt it.",
+        "expectedDecomposition": {
+          "slices": 2,
+          "children": 1,
+          "parallelOrSerialized": "serialized (shared module and tests; explicit dependency edge)",
+          "acceptanceOwner": "the parent sequences the slices and verifies the integrated contract"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      },
+      {
+        "id": "VS-09",
+        "kind": "shared-overlap",
+        "requests": [
+          "Change a pinned prompt phrase in the orchestrator system guidance and its unit-test expectations.",
+          "Add a second pinned phrase to the same orchestrator guidance and the same unit-test file."
+        ],
+        "hypothesisLabel": "serialize-overlap",
+        "hypothesisNote": "Hypothesis: both tasks edit the same guidance file and the same pinned-phrase test file; unknown coupling fails closed and serializes.",
+        "expectedDecomposition": {
+          "slices": 2,
+          "children": 1,
+          "parallelOrSerialized": "serialized (same source file and same pinned test file)",
+          "acceptanceOwner": "the parent sequences the slices and verifies the integrated guidance and tests"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      },
+      {
+        "id": "VS-10",
+        "kind": "trivial-control",
+        "requests": [
+          "Fix the misspelled word 'recieve' in one README sentence."
+        ],
+        "hypothesisLabel": "direct-execution-control",
+        "hypothesisNote": "Hypothesis: a single-word fix has no decomposition value; orchestration would add cost without improving the outcome.",
+        "expectedDecomposition": {
+          "slices": 0,
+          "children": 0,
+          "parallelOrSerialized": "not applicable (direct execution)",
+          "acceptanceOwner": "direct execution; no child"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      },
+      {
+        "id": "VS-11",
+        "kind": "trivial-control",
+        "requests": [
+          "Bump the patch version string in the package manifest by one."
+        ],
+        "hypothesisLabel": "direct-execution-control",
+        "hypothesisNote": "Hypothesis: a one-line version bump is a direct-edit control; a slice boundary would be artificial.",
+        "expectedDecomposition": {
+          "slices": 0,
+          "children": 0,
+          "parallelOrSerialized": "not applicable (direct execution)",
+          "acceptanceOwner": "direct execution; no child"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      },
+      {
+        "id": "VS-12",
+        "kind": "trivial-control",
+        "requests": [
+          "Answer which command opens the TUI gate picker."
+        ],
+        "hypothesisLabel": "direct-execution-control",
+        "hypothesisNote": "Hypothesis: a question with an existing answer needs no code change and no delegation.",
+        "expectedDecomposition": {
+          "slices": 0,
+          "children": 0,
+          "parallelOrSerialized": "not applicable (direct answer)",
+          "acceptanceOwner": "direct execution; no child"
+        },
+        "result": {
+          "status": "not-collected",
+          "outcome": null,
+          "childrenCount": null,
+          "children": null,
+          "rubricPassPerSlice": null,
+          "acceptanceOwner": null,
+          "parallelOrSerialized": null,
+          "reworkLoops": null,
+          "reviewLoops": null,
+          "verificationResult": null,
+          "safetyObservations": null,
+          "promptSizeBytes": null,
+          "evidenceRefs": null
+        }
+      }
+    ]
+  },
+  "perCaseResultsTemplate": {
+    "caseId": "",
+    "protocolVersion": null,
+    "runEnvironment": null,
+    "outcome": null,
+    "childrenCount": null,
+    "children": [
+      {
+        "sliceId": null,
+        "outcome": null,
+        "filesAreas": null,
+        "rubric": {
+          "cohesiveUserOutcome": null,
+          "sharedAcceptanceTests": null,
+          "unavoidableFileCoupling": null,
+          "explicitOwnershipScope": null,
+          "noSharedMutableOverlap": null
+        },
+        "acceptanceOwner": null,
+        "parallelOrSerialized": null,
+        "reworkLoops": null,
+        "reviewLoops": null,
+        "verificationCommand": null,
+        "verificationResult": null
+      }
+    ],
+    "reworkLoops": null,
+    "reviewLoops": null,
+    "verificationResult": null,
+    "safetyObservations": null,
+    "evidence": {
+      "promptSizeBytes": null,
+      "promptSizeTokens": null,
+      "delegationCount": null,
+      "latencyMs": null,
+      "failureCount": null,
+      "notes": null
+    }
+  },
+  "aggregateResults": {
+    "status": "not-collected",
+    "note": "Design phase only. No case has been run under this protocol; every aggregate metric is null or 'not-collected' by design. This template defines what will be recorded, not what has been measured.",
+    "runFrozenProtocolVersion": null,
+    "environment": null,
+    "totals": {
+      "cases": null,
+      "multiFileFeatures": null,
+      "independentPairs": null,
+      "sharedOverlap": null,
+      "trivialControls": null,
+      "slices": null,
+      "children": null
+    },
+    "metrics": {
+      "slice_cohesion_rate": null,
+      "unnecessary_split_rate": null,
+      "acceptance_coverage": null,
+      "parallel_independence_precision": null,
+      "shared_state_violations": null,
+      "integration_rework_rate": null,
+      "delegation_count": null,
+      "prompt_size_bytes": null,
+      "tokens_cost_latency_steps": null
+    },
+    "thresholdEvaluation": {
+      "status": "not-collected",
+      "unnecessarySplittingReduction": null,
+      "cohesionOnSampledMultiFileOutcomes": null,
+      "sharedStateViolationsObserved": null,
+      "independentTaskRegression": null,
+      "promptSizeBytesDelta": null,
+      "notes": null
+    }
+  },
+  "checkpointA": {
+    "status": "pending-manual-baseline-vs-after",
+    "requires": "Manual baseline-vs-after comparison under this frozen protocol: lower unnecessary splitting with no decline in acceptance coverage or verification, zero observed shared-state violations, continued parallelism for rubric-permitted independent work, no safety/publication regression, and a demonstrated user need for an explicit override.",
+    "baselineRunCollected": false,
+    "afterRunCollected": false,
+    "liveTelemetryProbe": "pending: tokens, cost, latency, and step counts remain unavailable until a live-host probe delivers them; they are never estimated",
+    "decision": null
+  },
+  "noResultsStatement": "This design phase contains no collected results and no telemetry. All result fields are null or 'not-collected' and must remain so until a frozen-protocol run fills them with real evidence. Checkpoint A stays pending until the manual baseline-vs-after comparison is recorded here."
+}

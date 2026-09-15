@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: in-progress
 title: Prefer coherent end-to-end vertical slices
 taskId: vertical-slices
 created: 2026-09-14
@@ -84,6 +84,13 @@ Decision rules:
 
 ## Phase 0 — Freeze the measurement protocol (docs-only)
 
+**Status: complete (2026-09-15).** Artifact created at
+`docs/phase-1/vertical-slice-evaluation-template.json` (protocol version 1,
+frozen date 2026-09-15): five-condition rubric, 12 hypothesis-marked corpus
+cases, per-case null/`not-collected` result slots, the binding metric
+availability table, and thresholds labeled hypotheses until the first baseline
+run. No results collected and no telemetry claimed.
+
 **Purpose:** Make future claims falsifiable before changing any behavior.
 
 **Scope:** New docs artifacts only. No source, config, schema, or test edits.
@@ -131,6 +138,13 @@ yet for the new artifact; add a structural test only if the repo pattern
 requires it (d4 corpus is read at test runtime — do not couple to it).
 
 ## Phase 1 — Prompt-guidance MVP (no schema changes)
+
+**Status: complete (2026-09-15).** Prompt-only MVP landed in `src/core/policy.ts`
+(`VERTICAL_SLICE_GUIDANCE` + child-task contract fold), `src/core/roles.ts`,
+`src/core/prompts.ts` (orchestrator rules, worker system, continuation),
+`src/core/prompt-builder.ts`, and `README.md`. No config, D2/D4 schema,
+validation/tools schema, observability, worktree/GitHub, command, installer,
+doctor, or TUI change; no runtime scheduler and no isolation claim.
 
 **Purpose:** Prefer vertical slices without touching configuration, schemas,
 runtime scheduling, or persisted state.
@@ -200,6 +214,11 @@ template.
 
 ## Checkpoint A — Decide whether to proceed
 
+**Status: pending manual baseline-vs-after evidence (not yet decided).** The
+frozen corpus has not been run, the manual baseline-vs-after comparison has not
+been recorded, and the live telemetry probe for tokens/cost/latency/steps has
+not run. No phase-2+ work is authorized by this checkpoint.
+
 Go beyond the MVP only if the manual baseline-vs-after comparison shows
 lower unnecessary splitting with no decline in acceptance coverage or
 verification, zero observed shared-state violations, continued parallelism
@@ -248,6 +267,64 @@ declined optionals recorded as declined.
 
 ## Status
 
-Proposed. Phase 0 not started. No implementation authorized by this plan
-alone; each phase executes through the standard implementer → review →
-publication chain.
+**Phases 0 and 1 complete; Checkpoint A pending manual baseline-vs-after
+evidence; the overall plan is NOT complete.** Phases 2–4 remain gated,
+unstarted, and unauthorized.
+
+### Phase 0/1 evidence ledger (recorded 2026-09-15)
+
+Environment: this slice's working tree on top of HEAD `146f54a`; pinned
+`@opencode/plugin` / `@opencode/sdk` `0.0.0-beta-19507`; `bun install` run in
+the worktree before verification.
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `bun test test/unit/prompt-builder.test.ts` | 10 pass / 0 fail |
+| 2 | `bun test test/unit/core.test.ts` | 51 pass / 0 fail |
+| 3 | `bun test test/unit/agents.test.ts` | 13 pass / 0 fail |
+| 4 | `bun test test/contract/plugin.test.ts` | 2 pass / 0 fail |
+| 5 | `bun run typecheck` | pass (`tsc --noEmit`, exit 0) |
+| 6 | `bun test` | 790 pass / 1 skip / 0 fail (791 tests, 29 files) |
+| 7 | `bun run build` | pass; emitted `dist/index.js`, `dist/tui.js`, `dist/commands.js`, `dist/installer.js`, `dist/cli/index.js` |
+| 8 | `git diff --check` | clean (no whitespace errors) |
+| 9 | `git status --short` | only the Phase 0/1 scope files are modified/added |
+| 10 | `bun -e "JSON.parse(await Bun.file('docs/phase-1/vertical-slice-evaluation-template.json').text()); console.log('valid')"` | `valid` |
+
+Prompt byte-size delta (deterministic, measured against the same HEAD sources
+with identical inputs; prompts are pure functions of options):
+
+| Prompt | Before | After | Delta |
+|---|---|---|---|
+| orchestrator system | 8322 | 9074 | +752 |
+| worker system (implementation) | 6050 | 6799 | +749 |
+| continuation | 5422 | 6052 | +630 |
+| command `orchestrate` | 5717 | 5874 | +157 |
+| command `run-plan` | 5325 | 5325 | +0 |
+
+Requirement coverage in this slice:
+
+- T1: pinned-phrase suites extended with the slice guidance and the exact
+  anti-overlap invariant (`test/unit/core.test.ts`,
+  `test/unit/prompt-builder.test.ts`, `test/unit/agents.test.ts`,
+  `test/contract/plugin.test.ts`).
+- T2: negative-content tests assert no positive isolation or scheduling claim
+  while the advisory caveats stay verbatim.
+- T3: no scope-partition helper landed (prompt-only Phase 1, as planned), so the
+  overlap ⇒ serialize, unknown ⇒ serialize, and disjoint ⇒ parallel rules are
+  covered by prompt-text assertions on `orchestrationRules`, worker, and
+  continuation prompts.
+- T4: contracts/validation suites are green unchanged (full `bun test`); the
+  locked-in O5 foreign-file `blocked-unknown` case remains green in
+  `test/unit/orchestration-tools.test.ts` (out of this slice's write scope and
+  untouched). The D4 corpus is unchanged.
+- T5: `bun run typecheck && bun test && bun run build` green (rows 5–7).
+
+Pending at Checkpoint A (not evidence, and never to be estimated):
+
+- The manual baseline-vs-after corpus run under the frozen protocol.
+- The live-host telemetry probe for tokens / cost / latency / steps.
+- Checkpoint A's decision and any Phase 2–4 authorization.
+
+No implementation beyond Phases 0–1 is authorized by this plan alone; each
+later phase must execute through the standard implementer → review →
+publication chain after Checkpoint A passes.

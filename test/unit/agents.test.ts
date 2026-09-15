@@ -286,6 +286,51 @@ describe("agent transform feature permissions", () => {
     // The universal boundary stays present with or without the features.
     expect(plain).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
   })
+
+  test("worker and orchestrator prompts carry coherent-slice guidance with the safeguards intact", () => {
+    const draft = draftWith({
+      orchestrator: { mode: "primary" },
+      planner: { mode: "subagent" },
+      explore: { mode: "subagent" },
+      implementer: { mode: "subagent" },
+      reviewer: { mode: "subagent" },
+    })
+    applyAgentTransform(draft, options)
+
+    // The implementer description and system prompt prefer coherent
+    // end-to-end slices over file-sized edits.
+    expect(draft.get("implementer")!.description).toContain("coherent end-to-end slices with focused ownership")
+    const implementer = draft.get("implementer")!.system!
+    expect(implementer).toContain("coherent end-to-end slices with focused ownership")
+    expect(implementer).toContain("Prefer the smallest coherent end-to-end implementation slice over the smallest file or layer")
+    expect(implementer).toContain(
+      "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
+    )
+    expect(implementer).toContain("A slice is a coordination unit, never a permission or filesystem boundary")
+    expect(implementer).toContain("unknown coupling fails closed and serializes")
+
+    // Safety wording is unchanged: the disjoint child-scope rule and the
+    // parent-accountability contract stay verbatim, and the slice invariant
+    // adds no isolation claim.
+    expect(implementer).toContain("keep child write scopes disjoint")
+    expect(implementer).toContain("disjoint from other children")
+    expect(implementer).toContain("files that must change together for one outcome stay with one owner in the same child")
+    expect(implementer).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
+    expect(implementer).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
+
+    // The orchestrator system prompt and worker prompts all restate the same
+    // slice invariant; no slice claims isolation or a scheduler.
+    const orchestrator = draft.get("orchestrator")!.system!
+    expect(orchestrator).toContain("prefer coherent end-to-end slices")
+    expect(orchestrator).toContain("never by concurrent overlapping writes")
+    expect(orchestrator).toContain("The parent stays accountable for every delegated child")
+    expect(orchestrator).toContain("Require an exact disjoint write scope from every child before any parallel write")
+    expect(orchestrator).toContain("Serialize implementation tasks when file ownership overlaps")
+    for (const prompt of [orchestrator, implementer, draft.get("reviewer")!.system!]) {
+      expect(prompt).not.toMatch(/scheduler|semaphore/i)
+      expect(prompt).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
+    }
+  })
 })
 
 function draftWith(agents: Record<string, Partial<MutableAgent>>): AgentDraftLike {

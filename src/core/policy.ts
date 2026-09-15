@@ -29,7 +29,7 @@ export const CHILD_TASK_CONTRACT = [
   "Every child prompt must be explicit and self-contained, covering:",
   "Task: the concrete work to perform.",
   "Expected outcome: the definition of done for this child.",
-  "Scope/file ownership: the exact files or areas the child may touch, disjoint from other children.",
+  "Scope/file ownership: the exact files or areas the child may touch, disjoint from other children; files that must change together for one outcome stay with one owner in the same child.",
   "Must do: the required steps, constraints, and verification commands.",
   "Must not do: forbidden actions, including editing out-of-scope files or delegating outside the child's own role graph.",
   "Verification: the checks and commands that prove the work.",
@@ -47,6 +47,21 @@ export const DELEGATION_GRAPH_GUIDANCE = [
   `Bounded nested delegation graph: ${delegationGraphSummary()}.`,
   "A worker that delegates stays accountable for its children: compose each child prompt from the child-task contract, keep child write scopes disjoint, verify child claims directly, and own the integrated result.",
   "Delegating outside your role graph is forbidden even when the host would allow it; if a permitted delegation is refused or unavailable, stop and report honestly instead of substituting an unauthorized path.",
+].join("\n")
+
+/**
+ * Coherent vertical-slice decomposition guidance, embedded verbatim in the
+ * orchestrator rules, the worker system prompt, and continuation prompts.
+ * It prefers the smallest coherent end-to-end slice over the smallest file or
+ * layer, and it keeps the fail-closed anti-overlap rule explicit: coupling and
+ * unknown coupling are resolved by sequencing or serialization with integrated
+ * parent verification, never by concurrent overlapping writes. A slice is a
+ * coordination unit, never a permission or filesystem boundary.
+ */
+export const VERTICAL_SLICE_GUIDANCE = [
+  "Prefer the smallest coherent end-to-end implementation slice over the smallest file or layer: keep coupled code, tests, wiring, and requested docs under one owner, and split only at a verified boundary where every resulting slice has its own outcome, acceptance evidence, and no hidden dependency.",
+  "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
+  "A slice is a coordination unit, never a permission or filesystem boundary; unknown coupling fails closed and serializes, and prompt-level scopes are advisory, not isolation.",
 ].join("\n")
 
 /**
@@ -267,6 +282,7 @@ export function orchestrationRules(
     CHILD_TASK_CONTRACT,
     "Require an exact disjoint write scope from every child before any parallel write; no two children may claim the same file or area.",
     "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes.",
+    VERTICAL_SLICE_GUIDANCE,
     "Separate established facts from assumptions: label every assumption explicitly and verify it before relying on it.",
     PROMPTING_POLICY_GUIDANCE,
     TOOL_AVAILABILITY_GUIDANCE,

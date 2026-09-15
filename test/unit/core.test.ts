@@ -20,6 +20,7 @@ import {
   SECRET_HANDLING_GUIDANCE,
   STRUCTURED_HANDOFF_GUIDANCE,
   TOOL_AVAILABILITY_GUIDANCE,
+  VERTICAL_SLICE_GUIDANCE,
   WORKTREE_BOUNDARY_GUIDANCE,
   WORKTREE_LIFECYCLE_GUIDANCE,
   orchestrationCapabilities,
@@ -213,6 +214,74 @@ describe("prompts", () => {
     expect(prompt).toContain("Worker handoff format:")
   })
 
+  test("vertical-slice guidance reaches orchestration, worker, and continuation prompts", () => {
+    const system = buildOrchestratorSystem(parseOptions({}))
+    const worker = buildWorkerSystem("implementation")
+    const continuation = buildContinuationPrompt("objective", 1)
+    const kinds: Array<[string, string]> = [
+      ["orchestrator system", system],
+      ["worker system", worker],
+      ["continuation", continuation],
+    ]
+    for (const [name, prompt] of kinds) {
+      expect(prompt, name).toContain("Prefer the smallest coherent end-to-end implementation slice over the smallest file or layer")
+      expect(prompt, name).toContain(
+        "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
+      )
+      expect(prompt, name).toContain("A slice is a coordination unit, never a permission or filesystem boundary")
+      expect(prompt, name).toContain("unknown coupling fails closed and serializes")
+      expect(prompt.split(VERTICAL_SLICE_GUIDANCE).length - 1, name).toBe(1)
+    }
+    // The worker role guidance prefers coherent slices over file-sized edits,
+    // and the orchestrator role guidance states the same preference.
+    expect(worker).toContain("coherent end-to-end slices with focused ownership")
+    for (const role of ["planning", "research", "implementation", "review"] as const) {
+      expect(buildWorkerSystem(role), role).toContain(VERTICAL_SLICE_GUIDANCE)
+    }
+    expect(system).toContain("prefer coherent end-to-end slices")
+    // The child-task contract folds the coupled-file ownership rule, so a
+    // coherent slice keeps must-change-together files in one child.
+    const coupledFileRule = "files that must change together for one outcome stay with one owner in the same child"
+    expect(system).toContain(coupledFileRule)
+    expect(worker).toContain(coupledFileRule)
+  })
+
+  test("slice serialization rules cover overlap, unknown coupling, and disjoint parallelism", () => {
+    const rules = orchestrationRules(4, true)
+    expect(rules).toContain(
+      "Require an exact disjoint write scope from every child before any parallel write; no two children may claim the same file or area.",
+    )
+    expect(rules).toContain(
+      "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes.",
+    )
+    expect(rules).toContain("unknown coupling fails closed and serializes")
+    expect(rules).toContain("never by concurrent overlapping writes")
+    // The same fail-closed rules are restated to workers and continuations.
+    for (const prompt of [buildWorkerSystem("implementation"), buildContinuationPrompt("objective", 2)]) {
+      expect(prompt).toContain("never by concurrent overlapping writes")
+      expect(prompt).toContain("unknown coupling fails closed and serializes")
+    }
+  })
+
+  test("slice guidance never claims isolation or runtime concurrency enforcement", () => {
+    expect(VERTICAL_SLICE_GUIDANCE).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
+    expect(VERTICAL_SLICE_GUIDANCE).not.toMatch(/guarantee/i)
+    expect(VERTICAL_SLICE_GUIDANCE).not.toMatch(/scheduler|semaphore|runtime enforc/i)
+    for (const prompt of [
+      buildOrchestratorSystem(parseOptions({})),
+      buildWorkerSystem("implementation"),
+      buildContinuationPrompt("objective", 1),
+      buildCommandPrompt("orchestrate", "scope"),
+    ]) {
+      // The advisory boundary caveats stay verbatim; a slice is never sold as
+      // a sandbox or a runtime scheduler.
+      expect(prompt).toContain("Prompt-level rules are advisory and do not enforce filesystem isolation")
+      expect(prompt).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
+      expect(prompt).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
+      expect(prompt).not.toMatch(/scheduler|semaphore/i)
+    }
+  })
+
   test("structured handoff guidance lists the version-1 envelope and the callable validation tools", () => {
     expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("version: 1")
     for (const field of [
@@ -386,6 +455,13 @@ describe("remote orchestration policy", () => {
 
   function allPromptKinds(): Array<[string, string]> {
     return promptKinds(DEFAULT)
+  }
+
+  // Coherent-slice guidance is embedded once in the orchestration, worker, and
+  // continuation prompt kinds. It is deliberately NOT added to the shared
+  // command `common` section that taxes every dispatch.
+  function expectedSliceGuidanceCount(name: string): number {
+    return name === "orchestrator system" || name.startsWith("worker") || name === "continuation" ? 1 : 0
   }
 
   test("every prompt kind uses only exposed host-configured GitHub tools and requires preflight", () => {
@@ -641,6 +717,7 @@ describe("remote orchestration policy", () => {
   test("role policy keeps native delegation and retains every configured role", () => {
     const rules = orchestrationRules(4, true)
     expect(rules).toContain("exact disjoint write scope")
+    expect(rules).toContain(VERTICAL_SLICE_GUIDANCE)
     expect(rules).toContain("Route by the configured semantic role map")
     expect(rules).toContain("safe delegation is allowed whenever isolation is not required")
     expect(rules).toContain("Do not claim automated GitHub issue or pull request coordination")
@@ -669,7 +746,7 @@ describe("remote orchestration policy", () => {
 
   test("the guidance appears exactly once per prompt, not duplicated per section", () => {
     for (const options of [DEFAULT, WORKTREE, GITHUB, BOTH]) {
-      for (const [, prompt] of promptKinds(options)) {
+      for (const [name, prompt] of promptKinds(options)) {
         expect(prompt.split("inspect the tool catalog").length - 1).toBe(1)
         expect(prompt.split("Never request, resolve, log, paste, or copy").length - 1).toBe(1)
         expect(prompt.split("plugin-controlled atomic worktree").length - 1).toBe(1)
@@ -677,6 +754,14 @@ describe("remote orchestration policy", () => {
         expect(prompt.split("Bounded nested delegation graph").length - 1).toBe(1)
         expect(prompt.split("Follow through autonomously").length - 1).toBe(1)
         expect(prompt.split("Verify in proportion to risk").length - 1).toBe(1)
+        // Coherent-slice guidance: once in orchestration/worker/continuation
+        // prompts, absent from every command prompt's shared section.
+        expect(prompt.split("Prefer the smallest coherent end-to-end implementation slice over the smallest file or layer").length - 1, name).toBe(
+          expectedSliceGuidanceCount(name),
+        )
+        expect(prompt.split("A slice is a coordination unit, never a permission or filesystem boundary").length - 1, name).toBe(
+          expectedSliceGuidanceCount(name),
+        )
         // Feature lifecycle sections are embedded at most once each.
         expect(prompt.split("Worktree lifecycle is mandatory").length - 1).toBe(options.worktree.enabled ? 1 : 0)
         expect(prompt.split("preflight with orchestrator_github_capabilities").length - 1).toBe(

@@ -44,13 +44,13 @@ export function delegationGraphSummary(): string {
 
 export const ROLE_GUIDANCE: Record<RoleName | "orchestrator", string> = {
   orchestrator:
-    "Coordinates the work. Explore first, delegate by role, keep write scopes disjoint, verify every claim, and own the final result. You may delegate to every configured role.",
+    "Coordinates the work. Explore first, prefer coherent end-to-end slices, delegate by role, keep write scopes disjoint, verify every claim, and own the final result. You may delegate to every configured role.",
   planning:
     "Builds an executable plan from repository facts. Do not edit files. You may delegate only the research role; never launch any other agent.",
   research:
     "Maps relevant code, tests, constraints, and documentation using webfetch and websearch directly. Do not edit files and never launch subagents; report findings yourself instead of delegating.",
   implementation:
-    "Makes only the requested changes, keeps edits focused, runs targeted verification, and reports evidence. You may delegate only the planning and research roles; never launch any other agent.",
+    "Makes only the requested changes as coherent end-to-end slices with focused ownership, runs targeted verification, and reports evidence. You may delegate only the planning and research roles; never launch any other agent.",
   review:
     "Audits correctness, security, regressions, scope, and missing tests. Do not edit files. You may delegate only the research role; never launch any other agent.",
 }
@@ -58,7 +58,7 @@ export const ROLE_GUIDANCE: Record<RoleName | "orchestrator", string> = {
 export const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
   planning: "Plans work from repository facts without editing; may delegate research only.",
   research: "Maps code, tests, constraints, and documentation with direct web lookups; never delegates.",
-  implementation: "Implements focused changes and reports verification; may delegate planning and research only.",
+  implementation: "Implements coherent end-to-end slices with focused ownership and reports verification; may delegate planning and research only.",
   review: "Independently reviews correctness, security, regressions, and tests; may delegate research only.",
 }
 

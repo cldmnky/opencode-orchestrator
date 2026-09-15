@@ -1,7 +1,7 @@
 export type OrchestrationPromptInput = { objective: string; clarifyEnabled?: boolean }
 
 const COORDINATION_LINE =
-  "Coordinate this task end to end. Start with repository facts, delegate independent work in parallel only with exact disjoint write scopes, integrate the results, and verify the final state directly."
+  "Coordinate this task end to end. Start with repository facts, prefer the smallest coherent end-to-end slice over a file-by-file or layer-by-layer split, delegate independent work in parallel only with exact disjoint write scopes, integrate the results, and verify the final state directly."
 
 const CLARIFICATION_SECTION = [
   "",
@@ -19,7 +19,7 @@ export function buildOrchestrationPrompt(input: OrchestrationPromptInput): strin
     "",
     `Task: ${objective.length > 0 ? objective : "(no arguments)"}`,
     "",
-    "Gather repository facts before decomposition and separate established facts from assumptions.",
+    "Gather repository facts before decomposition and separate established facts from assumptions; split only at a verified boundary and serialize unknown coupling.",
   ]
   if (input.clarifyEnabled === true) sections.push(...CLARIFICATION_SECTION)
   return sections.join("\n")

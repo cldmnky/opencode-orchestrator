@@ -2,7 +2,7 @@
   "artifact": "vertical-slice",
   "name": "Coherent Vertical-Slice Decomposition — Evaluation Template",
   "version": 1,
-  "status": "design-only",
+  "status": "checkpoint-a-evaluated",
   "date": "2026-09-15",
   "planRef": {
     "path": ".orchestrator/plans/vertical-slices.md",
@@ -172,38 +172,38 @@
     ]
   },
   "thresholds": {
-    "status": "hypotheses-until-baseline",
-    "note": "Every threshold below is a hypothesis. It is finalized only after the first baseline run under this frozen protocol populates real results; no threshold is evidence at freeze time.",
+    "status": "evaluated-first-frozen-run",
+    "note": "Evaluated once in the first frozen-protocol run (2026-09-15, manual prompt-guidance-derived baseline-vs-after). Hypothesis text is unchanged; observed values are recorded per threshold. Any change to a threshold still requires a protocol version bump.",
     "hypotheses": [
       {
         "id": "unnecessarySplittingReduction",
         "hypothesis": "At least a 25% relative reduction in unnecessary splitting versus the baseline run.",
         "measuredBy": "unnecessary_split_rate",
-        "observed": null
+        "observed": "met (reconstruction basis): baseline 3/3 multi-file-feature cases unnecessarily split -> after 0/3 (100% relative reduction versus the >=25% hypothesis); live baseline transcript not collected"
       },
       {
         "id": "cohesion",
         "hypothesis": "At least 80% cohesion on sampled multi-file outcomes.",
         "measuredBy": "slice_cohesion_rate",
-        "observed": null
+        "observed": "met: after 3/3 coherent slices on the three multi-file features (100%); baseline reconstruction 0/12 (0%); hypothesis >=80%"
       },
       {
         "id": "zeroSharedStateViolations",
         "hypothesis": "Zero observed shared-state violations per case.",
         "measuredBy": "shared_state_violations",
-        "observed": null
+        "observed": "0 observed concurrent overlapping writes in both states; no runtime execution occurred, so this is an absence of observed violations, not evidence of enforcement"
       },
       {
         "id": "noIndependentRegression",
         "hypothesis": "No regression in independent-task completion or verification versus the baseline run.",
         "measuredBy": "parallel_independence_precision and acceptance_coverage",
-        "observed": null
+        "observed": "not-met (fail-closed): guidance-level comparison shows no regression (3/3 independent pairs remain parallel-permitted with disjoint scopes; acceptance ownership unchanged), but runtime completion and verification results are not-collected because no model run occurred"
       },
       {
         "id": "promptSizeGrowthRecorded",
         "hypothesis": "Prompt byte-size growth is recorded; tokens are never asserted.",
         "measuredBy": "prompt_size_bytes",
-        "observed": null
+        "observed": "met: orchestrator system +752 bytes, worker system (implementation) +749, worker system (review) +717, guidance block +629; per-case orchestration +157, continuation +630, run-plan +0; tokens never asserted"
       }
     ]
   },
@@ -235,19 +235,166 @@
           "acceptanceOwner": "the slice owner; the parent verifies the integrated request end to end"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "One coherent slice: cursor-based pagination works end to end on /api/items (the route handler accepts and forwards the cursor, the query layer executes it, the OpenAPI schema documents it, and the integration tests prove it).",
+          "sliceCount": 1,
+          "childrenCount": 1,
+          "childDispatchCount": 1,
+          "children": [
+            {
+              "sliceId": "VS-01-S1",
+              "outcome": "Pagination is implemented and provable end to end for /api/items.",
+              "filesAreas": [
+                "route handler for /api/items",
+                "query layer",
+                "OpenAPI schema",
+                "integration tests"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "the slice owner (one implementation child); the parent verifies the integrated request directly",
+              "parallelOrSerialized": "not applicable (single slice)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the slice-owned integration-test command covering the new pagination parameter (named by the child prompt under the emitted contract; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "1/1 slice passes all five conditions",
+          "acceptanceOwner": "the slice owner (one implementation child); the parent verifies the integrated request directly",
+          "parallelOrSerialized": "not applicable (single slice)",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "promptSizeBytes": 1006,
+          "evidenceRefs": [
+            "corpus:VS-01:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=1006;sha256_16=550a91e486f83a0b",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 1 slice / 1 child"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a: no slice preference, no coupling-preservation rule, and the child-task contract asked only for 'the exact files or areas the child may touch, disjoint from other children'. No live baseline transcript was collected, so this is the guidance-permitted pattern, not an observed model run; the reconstruction's concurrency is not determinable from prompt text alone.",
+          "outcome": "Reconstructed file/layer-scoped split: four children, one per component named in the request, so no single child can prove the end-to-end request.",
+          "sliceCount": 4,
+          "childrenCount": 4,
+          "childDispatchCount": 4,
+          "children": [
+            {
+              "sliceId": "VS-01-B1",
+              "outcome": "Update only route handler for /api/items.",
+              "filesAreas": [
+                "route handler for /api/items"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-01-B2",
+              "outcome": "Update only query layer.",
+              "filesAreas": [
+                "query layer"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-01-B3",
+              "outcome": "Update only OpenAPI schema.",
+              "filesAreas": [
+                "OpenAPI schema"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-01-B4",
+              "outcome": "Update only integration tests.",
+              "filesAreas": [
+                "integration tests"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "0/4 slices pass all five conditions (each fails cohesiveUserOutcome, sharedAcceptanceTests, unavoidableFileCoupling and passes explicitOwnershipScope + noSharedMutableOverlap at file level)",
+          "acceptanceOwner": "one child per file/area; no slice can prove the end-to-end request; the parent would have to reconstruct acceptance after integration",
+          "parallelOrSerialized": "parallel (reconstructed; the named components are distinct files, so the unchanged disjoint-scope rule permits it)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). Pre-MVP text had no coupling-preservation rule, so the reconstructed split leaves hidden cross-slice dependencies; this is an absence of observed violations, not evidence of enforcement.",
+          "promptSizeBytes": 849,
+          "evidenceRefs": [
+            "corpus:VS-01:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=849;sha256_16=f0b7bb5e950a1403",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "mismatch: the frozen hypothesis expects 1 coherent slice; the reconstruction records the file-scoped split this MVP targets"
         }
       },
       {
@@ -265,19 +412,166 @@
           "acceptanceOwner": "the slice owner; the parent verifies the audit path directly"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "One coherent slice: goal updates are recorded through the storage layer, surfaced in the status output, covered by tests, and noted in the docs.",
+          "sliceCount": 1,
+          "childrenCount": 1,
+          "childDispatchCount": 1,
+          "children": [
+            {
+              "sliceId": "VS-02-S1",
+              "outcome": "The goal-update audit path exists and is visible in the status output.",
+              "filesAreas": [
+                "storage layer for goal updates",
+                "status output",
+                "tests",
+                "short docs note"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "the slice owner (one implementation child); the parent verifies the audit path directly",
+              "parallelOrSerialized": "not applicable (single slice)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the slice-owned storage/status test covering the new audit path (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "1/1 slice passes all five conditions",
+          "acceptanceOwner": "the slice owner (one implementation child); the parent verifies the audit path directly",
+          "parallelOrSerialized": "not applicable (single slice)",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "promptSizeBytes": 1009,
+          "evidenceRefs": [
+            "corpus:VS-02:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=1009;sha256_16=0e1adb8d9821a68e",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 1 slice / 1 child"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a: no slice preference, no coupling-preservation rule, and the child-task contract asked only for 'the exact files or areas the child may touch, disjoint from other children'. No live baseline transcript was collected, so this is the guidance-permitted pattern, not an observed model run; the reconstruction's concurrency is not determinable from prompt text alone.",
+          "outcome": "Reconstructed file/layer-scoped split: four children (storage, status output, tests, docs), so the audit behavior is not provable in one slice.",
+          "sliceCount": 4,
+          "childrenCount": 4,
+          "childDispatchCount": 4,
+          "children": [
+            {
+              "sliceId": "VS-02-B1",
+              "outcome": "Update only storage layer for goal updates.",
+              "filesAreas": [
+                "storage layer for goal updates"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-02-B2",
+              "outcome": "Update only status output.",
+              "filesAreas": [
+                "status output"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-02-B3",
+              "outcome": "Update only tests.",
+              "filesAreas": [
+                "tests"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-02-B4",
+              "outcome": "Update only short docs note.",
+              "filesAreas": [
+                "short docs note"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "0/4 slices pass all five conditions (each fails cohesiveUserOutcome, sharedAcceptanceTests, unavoidableFileCoupling and passes explicitOwnershipScope + noSharedMutableOverlap at file level)",
+          "acceptanceOwner": "one child per file/area; no slice can prove the end-to-end request; the parent would have to reconstruct acceptance after integration",
+          "parallelOrSerialized": "parallel (reconstructed; the named components are distinct files, so the unchanged disjoint-scope rule permits it)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). Pre-MVP text had no coupling-preservation rule, so the reconstructed split leaves hidden cross-slice dependencies; this is an absence of observed violations, not evidence of enforcement.",
+          "promptSizeBytes": 852,
+          "evidenceRefs": [
+            "corpus:VS-02:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=852;sha256_16=9f319537dde5af6b",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "mismatch: the frozen hypothesis expects 1 coherent slice; the reconstruction records the file-scoped split this MVP targets"
         }
       },
       {
@@ -295,19 +589,166 @@
           "acceptanceOwner": "the slice owner; the parent verifies the schema, prompts, installer, and tests agree"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "One coherent slice: the legacy review_mode option is renamed to the nested review.mode shape across the strict schema, prompt builders, installer output, and the tests that pin the old name, as one atomic change.",
+          "sliceCount": 1,
+          "childrenCount": 1,
+          "childDispatchCount": 1,
+          "children": [
+            {
+              "sliceId": "VS-03-S1",
+              "outcome": "The nested review.mode rename is complete and consistent; the legacy name is gone everywhere it was pinned.",
+              "filesAreas": [
+                "strict schema",
+                "prompt builders",
+                "installer output",
+                "tests pinning the old name"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "the slice owner (one implementation child); the parent verifies that schema, prompts, installer, and tests agree",
+              "parallelOrSerialized": "not applicable (single slice)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the strict-schema parse test plus the prompt/installer tests pinning the new nested name (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "1/1 slice passes all five conditions",
+          "acceptanceOwner": "the slice owner (one implementation child); the parent verifies that schema, prompts, installer, and tests agree",
+          "parallelOrSerialized": "not applicable (single slice)",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "promptSizeBytes": 1002,
+          "evidenceRefs": [
+            "corpus:VS-03:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=1002;sha256_16=879188110ae3326b",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 1 slice / 1 child"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a: no slice preference, no coupling-preservation rule, and the child-task contract asked only for 'the exact files or areas the child may touch, disjoint from other children'. No live baseline transcript was collected, so this is the guidance-permitted pattern, not an observed model run; the reconstruction's concurrency is not determinable from prompt text alone.",
+          "outcome": "Reconstructed file/layer-scoped split: four children (schema, prompts, installer, pinned tests); each step leaves a broken intermediate state that the pre-MVP text does not prevent.",
+          "sliceCount": 4,
+          "childrenCount": 4,
+          "childDispatchCount": 4,
+          "children": [
+            {
+              "sliceId": "VS-03-B1",
+              "outcome": "Update only strict schema.",
+              "filesAreas": [
+                "strict schema"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-03-B2",
+              "outcome": "Update only prompt builders.",
+              "filesAreas": [
+                "prompt builders"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-03-B3",
+              "outcome": "Update only installer output.",
+              "filesAreas": [
+                "installer output"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-03-B4",
+              "outcome": "Update only tests pinning the old name.",
+              "filesAreas": [
+                "tests pinning the old name"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "fail",
+                "sharedAcceptanceTests": "fail",
+                "unavoidableFileCoupling": "fail",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Pre-MVP text permits this file/layer unit and cannot force the coupled components under one owner: no slice preference and no coupling clause in the child-task contract. No independently demonstrable user outcome; end-to-end acceptance is split across slices; coupled files are split. Ownership is exact and no two reconstructed children claim the same file.",
+              "acceptanceOwner": "the file/area owner; end-to-end acceptance is not provable in this slice",
+              "parallelOrSerialized": "parallel (disjoint file; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "component-level check only; the end-to-end integration check lives in another slice",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "0/4 slices pass all five conditions (each fails cohesiveUserOutcome, sharedAcceptanceTests, unavoidableFileCoupling and passes explicitOwnershipScope + noSharedMutableOverlap at file level)",
+          "acceptanceOwner": "one child per file/area; no slice can prove the end-to-end request; the parent would have to reconstruct acceptance after integration",
+          "parallelOrSerialized": "parallel (reconstructed; the named components are distinct files, so the unchanged disjoint-scope rule permits it)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). Pre-MVP text had no coupling-preservation rule, so the reconstructed split leaves hidden cross-slice dependencies; this is an absence of observed violations, not evidence of enforcement.",
+          "promptSizeBytes": 845,
+          "evidenceRefs": [
+            "corpus:VS-03:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=845;sha256_16=81e701875111ec69",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "mismatch: the frozen hypothesis expects 1 atomic slice; the reconstruction records the file-scoped split this MVP targets"
         }
       },
       {
@@ -326,19 +767,142 @@
           "acceptanceOwner": "each child owns its own files; the parent verifies the integrated result"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "Two independent slices in parallel: the README anchor fix and the parseLsRemoteRefSha regression test share no mutable surface.",
+          "sliceCount": 2,
+          "childrenCount": 2,
+          "childDispatchCount": 2,
+          "children": [
+            {
+              "sliceId": "VS-04-S1",
+              "outcome": "The broken anchor link in the README troubleshooting section is fixed.",
+              "filesAreas": [
+                "README.md troubleshooting section"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (write scopes verified disjoint from the case text)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "targeted anchor/link check named by the child (not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            },
+            {
+              "sliceId": "VS-04-S2",
+              "outcome": "A regression test for parseLsRemoteRefSha exists in the worktree unit test file.",
+              "filesAreas": [
+                "worktree unit test file"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (write scopes verified disjoint from the case text)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the unit test command for the worktree test file (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions",
+          "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+          "parallelOrSerialized": "parallel: two children with write scopes verified disjoint from the case text (README troubleshooting section vs worktree unit test file); no shared file, module, or fixture.",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "promptSizeBytes": 985,
+          "evidenceRefs": [
+            "corpus:VS-04:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=985;sha256_16=f3d83729816b500b",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a; no live baseline transcript was collected. The independent tasks already had exact disjoint scopes under the unchanged baseline rules.",
+          "outcome": "Reconstructed: two independent slices in parallel with disjoint files (unchanged from the after guidance).",
+          "sliceCount": 2,
+          "childrenCount": 2,
+          "childDispatchCount": 2,
+          "children": [
+            {
+              "sliceId": "VS-04-S1",
+              "outcome": "The broken anchor link in the README troubleshooting section is fixed.",
+              "filesAreas": [
+                "README.md troubleshooting section"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Each task has its own demonstrable outcome and acceptance, and the files are disjoint; the pre-MVP text already required exact disjoint write scopes before any parallel write.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (disjoint files verified from the case text; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "targeted anchor/link check named by the child (not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-04-S2",
+              "outcome": "A regression test for parseLsRemoteRefSha exists in the worktree unit test file.",
+              "filesAreas": [
+                "worktree unit test file"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Each task has its own demonstrable outcome and acceptance, and the files are disjoint; the pre-MVP text already required exact disjoint write scopes before any parallel write.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (disjoint files verified from the case text; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "the unit test command for the worktree test file (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions",
+          "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+          "parallelOrSerialized": "parallel (disjoint files verified from the case text; reconstructed)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). Pre-MVP text had no coupling-preservation rule, so the reconstructed split leaves hidden cross-slice dependencies; this is an absence of observed violations, not evidence of enforcement.",
+          "promptSizeBytes": 828,
+          "evidenceRefs": [
+            "corpus:VS-04:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=828;sha256_16=65e4cf0fe66fa148",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children"
         }
       },
       {
@@ -357,19 +921,142 @@
           "acceptanceOwner": "each child owns its own files; the parent verifies the integrated result"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "Two independent slices in parallel: the CLI help-text addition and the delegation-graph ordering test share no mutable surface.",
+          "sliceCount": 2,
+          "childrenCount": 2,
+          "childDispatchCount": 2,
+          "children": [
+            {
+              "sliceId": "VS-05-S1",
+              "outcome": "A short --json description is added to the CLI help text in the CLI entry file.",
+              "filesAreas": [
+                "CLI entry file help text"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (write scopes verified disjoint from the case text)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "CLI help output check named by the child (not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            },
+            {
+              "sliceId": "VS-05-S2",
+              "outcome": "A unit test pins the deterministic ordering of the bounded delegation graph summary.",
+              "filesAreas": [
+                "unit test file for the bounded delegation graph summary"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (write scopes verified disjoint from the case text)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the unit test command for that test file (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions",
+          "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+          "parallelOrSerialized": "parallel: two children with write scopes verified disjoint from the case text (CLI entry file vs role-graph unit test file).",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "promptSizeBytes": 1004,
+          "evidenceRefs": [
+            "corpus:VS-05:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=1004;sha256_16=74b9e1952844eeb1",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a; no live baseline transcript was collected. The independent tasks already had exact disjoint scopes under the unchanged baseline rules.",
+          "outcome": "Reconstructed: two independent slices in parallel with disjoint files (unchanged from the after guidance).",
+          "sliceCount": 2,
+          "childrenCount": 2,
+          "childDispatchCount": 2,
+          "children": [
+            {
+              "sliceId": "VS-05-S1",
+              "outcome": "A short --json description is added to the CLI help text in the CLI entry file.",
+              "filesAreas": [
+                "CLI entry file help text"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Each task has its own demonstrable outcome and acceptance, and the files are disjoint; the pre-MVP text already required exact disjoint write scopes before any parallel write.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (disjoint files verified from the case text; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "CLI help output check named by the child (not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-05-S2",
+              "outcome": "A unit test pins the deterministic ordering of the bounded delegation graph summary.",
+              "filesAreas": [
+                "unit test file for the bounded delegation graph summary"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Each task has its own demonstrable outcome and acceptance, and the files are disjoint; the pre-MVP text already required exact disjoint write scopes before any parallel write.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (disjoint files verified from the case text; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "the unit test command for that test file (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions",
+          "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+          "parallelOrSerialized": "parallel (disjoint files verified from the case text; reconstructed)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). Pre-MVP text had no coupling-preservation rule, so the reconstructed split leaves hidden cross-slice dependencies; this is an absence of observed violations, not evidence of enforcement.",
+          "promptSizeBytes": 847,
+          "evidenceRefs": [
+            "corpus:VS-05:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=847;sha256_16=623ea1d59e4787fa",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children"
         }
       },
       {
@@ -388,19 +1075,142 @@
           "acceptanceOwner": "each child owns its own files; the parent verifies the integrated result"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "Two independent slices in parallel: the docs-index entry and the gate-status ordering unit test share no mutable surface.",
+          "sliceCount": 2,
+          "childrenCount": 2,
+          "childDispatchCount": 2,
+          "children": [
+            {
+              "sliceId": "VS-06-S1",
+              "outcome": "The existing read-only gates inspection tool is documented in the phase-1 documentation index.",
+              "filesAreas": [
+                "phase-1 documentation index"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (write scopes verified disjoint from the case text)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "documentation index/readme check named by the child (not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            },
+            {
+              "sliceId": "VS-06-S2",
+              "outcome": "A pure unit test for the gate-status ordering helper exists in its dedicated unit test file.",
+              "filesAreas": [
+                "gate-status ordering helper unit test file"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (write scopes verified disjoint from the case text)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the unit test command for that test file (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions",
+          "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+          "parallelOrSerialized": "parallel: two children with write scopes verified disjoint from the case text (documentation index vs dedicated unit test file).",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). The target remains zero observed violations, never 'guaranteed serialization'; a slice is a coordination unit, not a filesystem boundary.",
+          "promptSizeBytes": 1015,
+          "evidenceRefs": [
+            "corpus:VS-06:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=1015;sha256_16=319569b9ab5a7fdf",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a; no live baseline transcript was collected. The independent tasks already had exact disjoint scopes under the unchanged baseline rules.",
+          "outcome": "Reconstructed: two independent slices in parallel with disjoint files (unchanged from the after guidance).",
+          "sliceCount": 2,
+          "childrenCount": 2,
+          "childDispatchCount": 2,
+          "children": [
+            {
+              "sliceId": "VS-06-S1",
+              "outcome": "The existing read-only gates inspection tool is documented in the phase-1 documentation index.",
+              "filesAreas": [
+                "phase-1 documentation index"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Each task has its own demonstrable outcome and acceptance, and the files are disjoint; the pre-MVP text already required exact disjoint write scopes before any parallel write.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (disjoint files verified from the case text; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "documentation index/readme check named by the child (not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-06-S2",
+              "outcome": "A pure unit test for the gate-status ordering helper exists in its dedicated unit test file.",
+              "filesAreas": [
+                "gate-status ordering helper unit test file"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Each task has its own demonstrable outcome and acceptance, and the files are disjoint; the pre-MVP text already required exact disjoint write scopes before any parallel write.",
+              "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+              "parallelOrSerialized": "parallel (disjoint files verified from the case text; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "the unit test command for that test file (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions",
+          "acceptanceOwner": "each child owns its slice and acceptance; the parent verifies the integrated result",
+          "parallelOrSerialized": "parallel (disjoint files verified from the case text; reconstructed)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). Pre-MVP text had no coupling-preservation rule, so the reconstructed split leaves hidden cross-slice dependencies; this is an absence of observed violations, not evidence of enforcement.",
+          "promptSizeBytes": 858,
+          "evidenceRefs": [
+            "corpus:VS-06:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=858;sha256_16=c57a9f07e5c04f71",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices / 2 parallel children"
         }
       },
       {
@@ -419,19 +1229,146 @@
           "acceptanceOwner": "the parent sequences the two slices and verifies the integrated file"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "Two slices, serialized: both tasks write the same shared policy file, so one child runs at a time with an explicit dependency edge.",
+          "sliceCount": 2,
+          "childrenCount": 1,
+          "childDispatchCount": 2,
+          "childrenCountBasis": "Frozen-corpus semantics: childrenCount is the maximum concurrent children for a serialized case; both slices are dispatched sequentially (childDispatchCount 2).",
+          "children": [
+            {
+              "sliceId": "VS-07-S1",
+              "outcome": "A new prompting-policy sentence is added to the shared policy constants.",
+              "filesAreas": [
+                "shared policy constants file"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "the parent sequences the two slices and verifies the integrated file",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the pinned policy test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            },
+            {
+              "sliceId": "VS-07-S2",
+              "outcome": "The secret-handling constant is reordered in the same shared policy file and the pinned tests are updated.",
+              "filesAreas": [
+                "shared policy constants file",
+                "tests that pin the secret-handling constant"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "the parent sequences the two slices and verifies the integrated file",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the same pinned policy test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions (the shared writable surface is resolved by serialization, never by concurrent writes)",
+          "acceptanceOwner": "the parent sequences the two slices and verifies the integrated file",
+          "parallelOrSerialized": "serialized (shared writable file; explicit dependency edge; one child at a time)",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "Overlap is known (same file). The emitted after-MVP guidance requires sequencing/serialization with integrated parent verification and states the anti-overlap invariant ('never by concurrent overlapping writes'; unknown coupling fails closed and serializes). Zero concurrent overlapping writes observed (no runtime execution).",
+          "promptSizeBytes": 1005,
+          "evidenceRefs": [
+            "corpus:VS-07:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=1005;sha256_16=44fc8429c2013d22",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a; no live baseline transcript was collected. Known same-file overlap was already serialized by the unchanged baseline rule; the after state adds the explicit never-concurrent invariant.",
+          "outcome": "Reconstructed: two slices serialized because both tasks write the same shared policy file; already required by the unchanged baseline overlap rule.",
+          "sliceCount": 2,
+          "childrenCount": 1,
+          "childDispatchCount": 2,
+          "childrenCountBasis": "Frozen-corpus semantics: childrenCount is the maximum concurrent children for a serialized case; both slices are dispatched sequentially (childDispatchCount 2).",
+          "children": [
+            {
+              "sliceId": "VS-07-S1",
+              "outcome": "A new prompting-policy sentence is added to the shared policy constants.",
+              "filesAreas": [
+                "shared policy constants file"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "The pre-MVP text already required serialization when file ownership overlaps ('Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes'); the shared file is resolved by sequencing, never by concurrent writes.",
+              "acceptanceOwner": "the parent sequences the two slices and verifies the integrated file",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "the pinned policy test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-07-S2",
+              "outcome": "The secret-handling constant is reordered in the same shared policy file and the pinned tests are updated.",
+              "filesAreas": [
+                "shared policy constants file",
+                "tests that pin the secret-handling constant"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "The pre-MVP text already required serialization when file ownership overlaps ('Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes'); the shared file is resolved by sequencing, never by concurrent writes.",
+              "acceptanceOwner": "the parent sequences the two slices and verifies the integrated file",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "the same pinned policy test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions (shared file resolved by sequencing, reconstructed)",
+          "acceptanceOwner": "the parent sequences the two slices and verifies the integrated file",
+          "parallelOrSerialized": "serialized (shared writable file; explicit dependency edge; one child at a time; reconstructed)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). Pre-MVP text had no coupling-preservation rule, so the reconstructed split leaves hidden cross-slice dependencies; this is an absence of observed violations, not evidence of enforcement.",
+          "promptSizeBytes": 848,
+          "evidenceRefs": [
+            "corpus:VS-07:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=848;sha256_16=daeebabce82e4f90",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time"
         }
       },
       {
@@ -450,19 +1387,148 @@
           "acceptanceOwner": "the parent sequences the slices and verifies the integrated contract"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "Two slices, serialized: the contract module, the published schema document, and the contract tests form one mutable surface.",
+          "sliceCount": 2,
+          "childrenCount": 1,
+          "childDispatchCount": 2,
+          "childrenCountBasis": "Frozen-corpus semantics: childrenCount is the maximum concurrent children for a serialized case; both slices are dispatched sequentially (childDispatchCount 2).",
+          "children": [
+            {
+              "sliceId": "VS-08-S1",
+              "outcome": "An optional field is added to the structured handoff contract and the published schema document is regenerated.",
+              "filesAreas": [
+                "structured handoff contract module",
+                "published schema document"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "the parent sequences the slices and verifies the integrated contract",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the contract/schema test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            },
+            {
+              "sliceId": "VS-08-S2",
+              "outcome": "The handoff renderer in the same contract module is updated and its contract tests are extended.",
+              "filesAreas": [
+                "structured handoff contract module",
+                "contract tests"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "the parent sequences the slices and verifies the integrated contract",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the same contract test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions (the shared writable surface is resolved by serialization, never by concurrent writes)",
+          "acceptanceOwner": "the parent sequences the slices and verifies the integrated contract",
+          "parallelOrSerialized": "serialized (shared module and tests; explicit dependency edge; one child at a time)",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "Overlap is known (same contract module and tests). The emitted after-MVP guidance serializes the slices and states the anti-overlap invariant; concurrent writers would corrupt the surface. Zero concurrent overlapping writes observed (no runtime execution).",
+          "promptSizeBytes": 1025,
+          "evidenceRefs": [
+            "corpus:VS-08:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=1025;sha256_16=4338d8c3cf915804",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a; no live baseline transcript was collected. Known same-file overlap was already serialized by the unchanged baseline rule; the after state adds the explicit never-concurrent invariant.",
+          "outcome": "Reconstructed: two slices serialized because both tasks write the same contract module and contract tests; already required by the unchanged baseline overlap rule.",
+          "sliceCount": 2,
+          "childrenCount": 1,
+          "childDispatchCount": 2,
+          "childrenCountBasis": "Frozen-corpus semantics: childrenCount is the maximum concurrent children for a serialized case; both slices are dispatched sequentially (childDispatchCount 2).",
+          "children": [
+            {
+              "sliceId": "VS-08-S1",
+              "outcome": "An optional field is added to the structured handoff contract and the published schema document is regenerated.",
+              "filesAreas": [
+                "structured handoff contract module",
+                "published schema document"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "The pre-MVP text already required serialization when file ownership overlaps ('Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes'); the shared file is resolved by sequencing, never by concurrent writes.",
+              "acceptanceOwner": "the parent sequences the slices and verifies the integrated contract",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "the contract/schema test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-08-S2",
+              "outcome": "The handoff renderer in the same contract module is updated and its contract tests are extended.",
+              "filesAreas": [
+                "structured handoff contract module",
+                "contract tests"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "The pre-MVP text already required serialization when file ownership overlaps ('Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes'); the shared file is resolved by sequencing, never by concurrent writes.",
+              "acceptanceOwner": "the parent sequences the slices and verifies the integrated contract",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "the same contract test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions (shared file resolved by sequencing, reconstructed)",
+          "acceptanceOwner": "the parent sequences the slices and verifies the integrated contract",
+          "parallelOrSerialized": "serialized (shared module and tests; explicit dependency edge; one child at a time; reconstructed)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). Pre-MVP text had no coupling-preservation rule, so the reconstructed split leaves hidden cross-slice dependencies; this is an absence of observed violations, not evidence of enforcement.",
+          "promptSizeBytes": 868,
+          "evidenceRefs": [
+            "corpus:VS-08:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=868;sha256_16=54fa6ed6f1daf5b9",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time"
         }
       },
       {
@@ -481,19 +1547,148 @@
           "acceptanceOwner": "the parent sequences the slices and verifies the integrated guidance and tests"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "Two slices, serialized: both tasks edit the same orchestrator guidance file and the same pinned-phrase test file; unknown coupling fails closed.",
+          "sliceCount": 2,
+          "childrenCount": 1,
+          "childDispatchCount": 2,
+          "childrenCountBasis": "Frozen-corpus semantics: childrenCount is the maximum concurrent children for a serialized case; both slices are dispatched sequentially (childDispatchCount 2).",
+          "children": [
+            {
+              "sliceId": "VS-09-S1",
+              "outcome": "A pinned prompt phrase is changed in the orchestrator system guidance and its unit-test expectations.",
+              "filesAreas": [
+                "orchestrator system guidance file",
+                "unit-test expectations"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "the parent sequences the slices and verifies the integrated guidance and tests",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the pinned-phrase unit test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            },
+            {
+              "sliceId": "VS-09-S2",
+              "outcome": "A second pinned phrase is added to the same orchestrator guidance and the same unit-test file.",
+              "filesAreas": [
+                "same orchestrator system guidance file",
+                "same unit-test file"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "Emitted after-MVP guidance keeps coupled code, tests, wiring, and requested docs under one owner; the child-task contract requires files that must change together for one outcome to stay with one owner in the same child, and requires the 'Expected outcome' and 'Verification' sections in the same child.",
+              "acceptanceOwner": "the parent sequences the slices and verifies the integrated guidance and tests",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge)",
+              "reworkLoops": "not-collected (no runtime execution)",
+              "reviewLoops": "not-collected (no runtime execution)",
+              "verificationCommand": "the same pinned-phrase unit test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions (the shared writable surface is resolved by serialization, never by concurrent writes)",
+          "acceptanceOwner": "the parent sequences the slices and verifies the integrated guidance and tests",
+          "parallelOrSerialized": "serialized (same source file and same pinned test file; one child at a time)",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "Same source file and same pinned test file; the emitted after-MVP guidance fails closed and serializes unknown coupling, and states the anti-overlap invariant. Zero concurrent overlapping writes observed (no runtime execution).",
+          "promptSizeBytes": 1023,
+          "evidenceRefs": [
+            "corpus:VS-09:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=1023;sha256_16=c4668f9789018148",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a; no live baseline transcript was collected. Known same-file overlap was already serialized by the unchanged baseline rule; the after state adds the explicit never-concurrent invariant.",
+          "outcome": "Reconstructed: two slices serialized because both tasks edit the same guidance file and the same pinned test file; already required by the unchanged baseline overlap rule.",
+          "sliceCount": 2,
+          "childrenCount": 1,
+          "childDispatchCount": 2,
+          "childrenCountBasis": "Frozen-corpus semantics: childrenCount is the maximum concurrent children for a serialized case; both slices are dispatched sequentially (childDispatchCount 2).",
+          "children": [
+            {
+              "sliceId": "VS-09-S1",
+              "outcome": "A pinned prompt phrase is changed in the orchestrator system guidance and its unit-test expectations.",
+              "filesAreas": [
+                "orchestrator system guidance file",
+                "unit-test expectations"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "The pre-MVP text already required serialization when file ownership overlaps ('Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes'); the shared file is resolved by sequencing, never by concurrent writes.",
+              "acceptanceOwner": "the parent sequences the slices and verifies the integrated guidance and tests",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "the pinned-phrase unit test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            },
+            {
+              "sliceId": "VS-09-S2",
+              "outcome": "A second pinned phrase is added to the same orchestrator guidance and the same unit-test file.",
+              "filesAreas": [
+                "same orchestrator system guidance file",
+                "same unit-test file"
+              ],
+              "rubric": {
+                "cohesiveUserOutcome": "pass",
+                "sharedAcceptanceTests": "pass",
+                "unavoidableFileCoupling": "pass",
+                "explicitOwnershipScope": "pass",
+                "noSharedMutableOverlap": "pass"
+              },
+              "rubricBasis": "The pre-MVP text already required serialization when file ownership overlaps ('Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes'); the shared file is resolved by sequencing, never by concurrent writes.",
+              "acceptanceOwner": "the parent sequences the slices and verifies the integrated guidance and tests",
+              "parallelOrSerialized": "serialized (one child at a time; explicit dependency edge; reconstructed)",
+              "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+              "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+              "verificationCommand": "the same pinned-phrase unit test command (named by the child; not executed in this evaluation)",
+              "verificationResult": "not-collected (reconstruction; no runtime execution)"
+            }
+          ],
+          "rubricPassPerSlice": "2/2 slices pass all five conditions (shared file resolved by sequencing, reconstructed)",
+          "acceptanceOwner": "the parent sequences the slices and verifies the integrated guidance and tests",
+          "parallelOrSerialized": "serialized (same source file and same pinned test file; one child at a time; reconstructed)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "Zero observed concurrent overlapping writes (no runtime execution occurred). Pre-MVP text had no coupling-preservation rule, so the reconstructed split leaves hidden cross-slice dependencies; this is an absence of observed violations, not evidence of enforcement.",
+          "promptSizeBytes": 866,
+          "evidenceRefs": [
+            "corpus:VS-09:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=866;sha256_16=6dab788c3a181c79",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 2 slices serialized, 1 child at a time"
         }
       },
       {
@@ -511,19 +1706,56 @@
           "acceptanceOwner": "direct execution; no child"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "Direct execution: fix the misspelled word 'recieve' in one README sentence; no slice boundary exists (single-word fix).",
+          "sliceCount": 0,
+          "childrenCount": 0,
+          "childDispatchCount": 0,
+          "children": [],
+          "rubricPassPerSlice": "not applicable (no slice produced; direct execution control)",
+          "acceptanceOwner": "direct execution by the orchestrator; no child",
+          "parallelOrSerialized": "not applicable (direct execution)",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "No delegation and no writes observed (no runtime execution).",
+          "promptSizeBytes": 893,
+          "evidenceRefs": [
+            "corpus:VS-10:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=893;sha256_16=18f57fdb52cd52a6",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct execution control)"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a; no live baseline transcript was collected. No slice boundary exists for this control under either state.",
+          "outcome": "Reconstructed direct execution: no slice boundary exists for a single-word fix under either state.",
+          "sliceCount": 0,
+          "childrenCount": 0,
+          "childDispatchCount": 0,
+          "children": [],
+          "rubricPassPerSlice": "not applicable (no slice produced; direct execution control)",
+          "acceptanceOwner": "direct execution by the orchestrator; no child",
+          "parallelOrSerialized": "not applicable (direct execution)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "No delegation and no writes observed (no runtime execution).",
+          "promptSizeBytes": 736,
+          "evidenceRefs": [
+            "corpus:VS-10:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=736;sha256_16=04e9a54cfbda1172",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct execution control)"
         }
       },
       {
@@ -541,19 +1773,56 @@
           "acceptanceOwner": "direct execution; no child"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "Direct execution: bump the patch version string in the package manifest by one; no slice boundary exists (one-line bump).",
+          "sliceCount": 0,
+          "childrenCount": 0,
+          "childDispatchCount": 0,
+          "children": [],
+          "rubricPassPerSlice": "not applicable (no slice produced; direct execution control)",
+          "acceptanceOwner": "direct execution by the orchestrator; no child",
+          "parallelOrSerialized": "not applicable (direct execution)",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "No delegation and no writes observed (no runtime execution).",
+          "promptSizeBytes": 897,
+          "evidenceRefs": [
+            "corpus:VS-11:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=897;sha256_16=4a20b90ec33e19d2",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct execution control)"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a; no live baseline transcript was collected. No slice boundary exists for this control under either state.",
+          "outcome": "Reconstructed direct execution: no slice boundary exists for a one-line version bump under either state.",
+          "sliceCount": 0,
+          "childrenCount": 0,
+          "childDispatchCount": 0,
+          "children": [],
+          "rubricPassPerSlice": "not applicable (no slice produced; direct execution control)",
+          "acceptanceOwner": "direct execution by the orchestrator; no child",
+          "parallelOrSerialized": "not applicable (direct execution)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "No delegation and no writes observed (no runtime execution).",
+          "promptSizeBytes": 740,
+          "evidenceRefs": [
+            "corpus:VS-11:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=740;sha256_16=040dbd31bdad3960",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct execution control)"
         }
       },
       {
@@ -571,19 +1840,56 @@
           "acceptanceOwner": "direct execution; no child"
         },
         "result": {
-          "status": "not-collected",
-          "outcome": null,
-          "childrenCount": null,
-          "children": null,
-          "rubricPassPerSlice": null,
-          "acceptanceOwner": null,
-          "parallelOrSerialized": null,
-          "reworkLoops": null,
-          "reviewLoops": null,
-          "verificationResult": null,
-          "safetyObservations": null,
-          "promptSizeBytes": null,
-          "evidenceRefs": null
+          "status": "observed-prompt-guidance-derived",
+          "state": "after-mvp",
+          "outcome": "Direct answer: which command opens the TUI gate picker; no code change and no delegation. Existing documentation answers it.",
+          "sliceCount": 0,
+          "childrenCount": 0,
+          "childDispatchCount": 0,
+          "children": [],
+          "rubricPassPerSlice": "not applicable (no slice produced; direct execution control)",
+          "acceptanceOwner": "direct execution by the orchestrator; no child",
+          "parallelOrSerialized": "not applicable (direct execution)",
+          "reworkLoops": "not-collected (no runtime execution)",
+          "reviewLoops": "not-collected (no runtime execution)",
+          "verificationResult": "not-collected (deterministic prompt-guidance evaluation only; no runtime execution)",
+          "safetyObservations": "No delegation and no writes observed (no runtime execution).",
+          "promptSizeBytes": 883,
+          "evidenceRefs": [
+            "corpus:VS-12:requests (frozen protocol v1)",
+            "prompt-after:orchestrate:bytes=883;sha256_16=24dd551b42370787",
+            "prompt-after:orchestrator-system:bytes=9074;sha256_16=6ab8fa0c3ddf69b8",
+            "prompt-after:worker-system-implementation:bytes=6799;sha256_16=29237a437ab2fde1"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct answer control)"
+        },
+        "baselineResult": {
+          "status": "reconstructed-prompt-guidance-derived",
+          "state": "baseline-pre-mvp",
+          "reconstructionBasis": "Reconstructed from the pre-MVP prompt text at 146f54a; no live baseline transcript was collected. No slice boundary exists for this control under either state.",
+          "outcome": "Reconstructed direct answer: no code change and no delegation under either state.",
+          "sliceCount": 0,
+          "childrenCount": 0,
+          "childDispatchCount": 0,
+          "children": [],
+          "rubricPassPerSlice": "not applicable (no slice produced; direct execution control)",
+          "acceptanceOwner": "direct execution by the orchestrator; no child",
+          "parallelOrSerialized": "not applicable (direct execution)",
+          "reworkLoops": "not-collected (reconstruction; no runtime execution)",
+          "reviewLoops": "not-collected (reconstruction; no runtime execution)",
+          "verificationResult": "not-collected (reconstruction; no runtime execution)",
+          "safetyObservations": "No delegation and no writes observed (no runtime execution).",
+          "promptSizeBytes": 726,
+          "evidenceRefs": [
+            "corpus:VS-12:requests (frozen protocol v1)",
+            "prompt-baseline:orchestrate:bytes=726;sha256_16=e847062e6b81730b",
+            "prompt-baseline:orchestrator-system:bytes=8322;sha256_16=54ec810bf7d072a0",
+            "prompt-baseline:worker-system-implementation:bytes=6050;sha256_16=c4343561d81b4e72",
+            "git:146f54a:src/core/policy.ts",
+            "git:146f54a:src/core/prompt-builder.ts",
+            "git:146f54a:src/core/roles.ts"
+          ],
+          "hypothesisAgreement": "match: frozen hypothesis expects 0 slices / 0 children (direct answer control)"
         }
       }
     ]
@@ -627,48 +1933,570 @@
       "notes": null
     }
   },
+  "checkpointARun": {
+    "runId": "vertical-slice-protocol-v1-baseline-vs-after",
+    "date": "2026-09-15",
+    "protocolVersionRun": 1,
+    "evaluationType": "manual baseline-vs-after prompt-guidance evaluation",
+    "method": {
+      "baselineState": "Pre-MVP source tree at commit 146f54a (parent of 11f92ac 'feat: prefer coherent vertical slices'), extracted read-only with `git archive 146f54a` into a temp directory; the identical case request texts were rendered through the baseline prompt builders.",
+      "afterState": "Current MVP source tree in the Checkpoint A worktree on top of main 4c6049f ('Merge pull request #22 from cldmnky/feat/vertical-slices-mvp').",
+      "howDecompositionsWereDerived": "Deterministic prompt-guidance evaluation: for each case, only the frozen `requests` text was rendered through the pinned prompt builders (orchestration prompt, orchestrator system, implementation worker system, continuation, `orchestrate` and `run-plan` command prompts) in both states; the recorded decomposition is the decomposition the emitted guidance directs when the frozen decision rules are applied to the case text. No orchestrator/model was invoked, no transcript exists, and model-side runtime behavior is not-collected.",
+      "scoring": "Every produced slice was scored against all five frozen rubric conditions from the recorded guidance evidence; conditions that could not be evidenced fail closed. The whole-case decomposition is coherent only when every produced slice passes all five conditions and no shared mutable surface is written concurrently.",
+      "blindScoring": "Not a blind execution: the scorer had read the frozen corpus (including hypothesis labels) as part of Checkpoint A setup. Decompositions were derived from the case request text and the emitted guidance; hypothesis labels were compared only after the rubric scoring.",
+      "evidenceClasses": [
+        "Deterministic prompt text, byte sizes, and SHA-256 prefixes (prompts are pure functions of options).",
+        "Repository source text at 146f54a versus the current worktree (VCS).",
+        "No runtime transcripts, no case execution, no telemetry: runtime metrics remain not-collected and are never estimated."
+      ]
+    },
+    "environment": {
+      "date": "2026-09-15",
+      "plugin": "@opencode/plugin 0.0.0-beta-19507",
+      "sdk": "@opencode/sdk 0.0.0-beta-19507",
+      "runtime": "bun 1.3.3",
+      "repository": "opencode-v2-agent-orchestrator",
+      "baselineRef": "146f54a (pre-MVP; parent of 11f92ac)",
+      "afterRef": "4c6049f (main) plus the Checkpoint A worktree changes in this run's two-file scope",
+      "baseForPublication": "main",
+      "protocolVersion": 1,
+      "promptOptions": "default-equivalent parsed options: max_parallel 4, require_review true, roles planner/explore/implementer/reviewer, clarify auto, review prompt, budget advisory, publish/worktree/github disabled"
+    },
+    "telemetry": {
+      "promptSizeBytes": "collected (deterministic; see deterministicPromptBytes)",
+      "tokens": "not-collected: no live-host probe was run",
+      "cost": "not-collected: no live-host probe was run",
+      "latency": "not-collected: no live-host probe was run",
+      "steps": "not-collected: no live-host probe was run",
+      "modelTranscripts": "not-collected: no orchestrator/model run was performed; none are claimed or invented"
+    },
+    "deterministicPromptBytes": {
+      "unit": "UTF-8 bytes of the emitted prompt text; prompts are pure functions of options",
+      "perCaseResultField": "result.promptSizeBytes / baselineResult.promptSizeBytes record the per-case orchestration prompt bytes (objective = the case `requests` joined by newline).",
+      "fixedPrompts": [
+        {
+          "prompt": "orchestrator system",
+          "baselineBytes": 8322,
+          "afterBytes": 9074,
+          "delta": 752,
+          "baselineSha256_16": "54ec810bf7d072a0",
+          "afterSha256_16": "6ab8fa0c3ddf69b8"
+        },
+        {
+          "prompt": "worker system (implementation)",
+          "baselineBytes": 6050,
+          "afterBytes": 6799,
+          "delta": 749,
+          "baselineSha256_16": "c4343561d81b4e72",
+          "afterSha256_16": "29237a437ab2fde1"
+        },
+        {
+          "prompt": "worker system (review)",
+          "baselineBytes": 6019,
+          "afterBytes": 6736,
+          "delta": 717,
+          "baselineSha256_16": "3966b8f43210da47",
+          "afterSha256_16": "89fd85d420424388"
+        },
+        {
+          "prompt": "VERTICAL_SLICE_GUIDANCE block",
+          "baselineBytes": 0,
+          "afterBytes": 629,
+          "delta": 629,
+          "note": "Absent in the baseline tree (the constant does not exist at 146f54a)."
+        }
+      ],
+      "perCasePromptTotals": [
+        {
+          "prompt": "orchestration prompt (12 cases)",
+          "baselineBytes": 9863,
+          "afterBytes": 11747,
+          "delta": 1884
+        },
+        {
+          "prompt": "continuation prompt (12 cases)",
+          "baselineBytes": 66671,
+          "afterBytes": 74231,
+          "delta": 7560
+        },
+        {
+          "prompt": "command `orchestrate` (12 cases)",
+          "baselineBytes": 70259,
+          "afterBytes": 72143,
+          "delta": 1884
+        },
+        {
+          "prompt": "command `run-plan` (12 cases)",
+          "baselineBytes": 65531,
+          "afterBytes": 65531,
+          "delta": 0
+        }
+      ],
+      "perCasePromptBytes": {
+        "unit": "UTF-8 bytes",
+        "note": "objective = case requests joined by newline; default-equivalent options",
+        "cases": [
+          {
+            "caseId": "VS-01",
+            "orchestration": {
+              "baseline": 849,
+              "after": 1006
+            },
+            "continuation": {
+              "baseline": 5583,
+              "after": 6213
+            },
+            "commandOrchestrate": {
+              "baseline": 5882,
+              "after": 6039
+            },
+            "commandRunPlan": {
+              "baseline": 5488,
+              "after": 5488
+            }
+          },
+          {
+            "caseId": "VS-02",
+            "orchestration": {
+              "baseline": 852,
+              "after": 1009
+            },
+            "continuation": {
+              "baseline": 5586,
+              "after": 6216
+            },
+            "commandOrchestrate": {
+              "baseline": 5885,
+              "after": 6042
+            },
+            "commandRunPlan": {
+              "baseline": 5491,
+              "after": 5491
+            }
+          },
+          {
+            "caseId": "VS-03",
+            "orchestration": {
+              "baseline": 845,
+              "after": 1002
+            },
+            "continuation": {
+              "baseline": 5579,
+              "after": 6209
+            },
+            "commandOrchestrate": {
+              "baseline": 5878,
+              "after": 6035
+            },
+            "commandRunPlan": {
+              "baseline": 5484,
+              "after": 5484
+            }
+          },
+          {
+            "caseId": "VS-04",
+            "orchestration": {
+              "baseline": 828,
+              "after": 985
+            },
+            "continuation": {
+              "baseline": 5562,
+              "after": 6192
+            },
+            "commandOrchestrate": {
+              "baseline": 5861,
+              "after": 6018
+            },
+            "commandRunPlan": {
+              "baseline": 5467,
+              "after": 5467
+            }
+          },
+          {
+            "caseId": "VS-05",
+            "orchestration": {
+              "baseline": 847,
+              "after": 1004
+            },
+            "continuation": {
+              "baseline": 5581,
+              "after": 6211
+            },
+            "commandOrchestrate": {
+              "baseline": 5880,
+              "after": 6037
+            },
+            "commandRunPlan": {
+              "baseline": 5486,
+              "after": 5486
+            }
+          },
+          {
+            "caseId": "VS-06",
+            "orchestration": {
+              "baseline": 858,
+              "after": 1015
+            },
+            "continuation": {
+              "baseline": 5592,
+              "after": 6222
+            },
+            "commandOrchestrate": {
+              "baseline": 5891,
+              "after": 6048
+            },
+            "commandRunPlan": {
+              "baseline": 5497,
+              "after": 5497
+            }
+          },
+          {
+            "caseId": "VS-07",
+            "orchestration": {
+              "baseline": 848,
+              "after": 1005
+            },
+            "continuation": {
+              "baseline": 5582,
+              "after": 6212
+            },
+            "commandOrchestrate": {
+              "baseline": 5881,
+              "after": 6038
+            },
+            "commandRunPlan": {
+              "baseline": 5487,
+              "after": 5487
+            }
+          },
+          {
+            "caseId": "VS-08",
+            "orchestration": {
+              "baseline": 868,
+              "after": 1025
+            },
+            "continuation": {
+              "baseline": 5602,
+              "after": 6232
+            },
+            "commandOrchestrate": {
+              "baseline": 5901,
+              "after": 6058
+            },
+            "commandRunPlan": {
+              "baseline": 5507,
+              "after": 5507
+            }
+          },
+          {
+            "caseId": "VS-09",
+            "orchestration": {
+              "baseline": 866,
+              "after": 1023
+            },
+            "continuation": {
+              "baseline": 5600,
+              "after": 6230
+            },
+            "commandOrchestrate": {
+              "baseline": 5899,
+              "after": 6056
+            },
+            "commandRunPlan": {
+              "baseline": 5505,
+              "after": 5505
+            }
+          },
+          {
+            "caseId": "VS-10",
+            "orchestration": {
+              "baseline": 736,
+              "after": 893
+            },
+            "continuation": {
+              "baseline": 5470,
+              "after": 6100
+            },
+            "commandOrchestrate": {
+              "baseline": 5769,
+              "after": 5926
+            },
+            "commandRunPlan": {
+              "baseline": 5375,
+              "after": 5375
+            }
+          },
+          {
+            "caseId": "VS-11",
+            "orchestration": {
+              "baseline": 740,
+              "after": 897
+            },
+            "continuation": {
+              "baseline": 5474,
+              "after": 6104
+            },
+            "commandOrchestrate": {
+              "baseline": 5773,
+              "after": 5930
+            },
+            "commandRunPlan": {
+              "baseline": 5379,
+              "after": 5379
+            }
+          },
+          {
+            "caseId": "VS-12",
+            "orchestration": {
+              "baseline": 726,
+              "after": 883
+            },
+            "continuation": {
+              "baseline": 5460,
+              "after": 6090
+            },
+            "commandOrchestrate": {
+              "baseline": 5759,
+              "after": 5916
+            },
+            "commandRunPlan": {
+              "baseline": 5365,
+              "after": 5365
+            }
+          }
+        ]
+      },
+      "perCaseDelta": "Every case shows the same deterministic deltas because the request text is identical in both states: orchestration +157, continuation +630, command `orchestrate` +157, command `run-plan` +0.",
+      "ledgerReproduction": "The Phase 0/1 evidence-ledger deltas are reproduced exactly by this run: orchestrator system +752, worker system (implementation) +749, continuation +630, command `orchestrate` +157, command `run-plan` +0.",
+      "tokenNote": "Prompt bytes are not tokens; token, cost, latency, and step counts remain not-collected."
+    },
+    "guidancePresence": {
+      "baseline": {
+        "slicePreferencePhrase": false,
+        "workerSlicePreferencePhrase": false,
+        "couplingClause": false,
+        "antiOverlapInvariant": false,
+        "unknownCouplingSerializes": false,
+        "advisoryNotIsolationCaveat": false,
+        "legacyFocusedEditsWording": true
+      },
+      "after": {
+        "slicePreferencePhrase": false,
+        "workerSlicePreferencePhrase": true,
+        "couplingClause": true,
+        "antiOverlapInvariant": true,
+        "unknownCouplingSerializes": true,
+        "advisoryNotIsolationCaveat": true,
+        "legacyFocusedEditsWording": false
+      },
+      "unchangedFailClosedLines": [
+        "Require an exact disjoint write scope from every child before any parallel write; no two children may claim the same file or area. (present in both states)",
+        "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes. (present in both states)",
+        "At most 4 independent child tasks may run at once. (present in both states)"
+      ]
+    },
+    "decompositionSummary": {
+      "multiFileFeatures": {
+        "baselineReconstructed": "VS-01/02/03: 4/4/4 file-scoped children (12 slices, 12 dispatches); 0/12 slices pass all five conditions; 3/3 cases unnecessarily split.",
+        "afterObserved": "VS-01/02/03: 1/1/1 coherent slices (3 slices, 3 dispatches); 3/3 slices pass all five conditions; 0/3 cases unnecessarily split."
+      },
+      "independentPairs": {
+        "baselineReconstructed": "VS-04/05/06: 2/2/2 parallel children (6 slices); 6/6 slices pass all five conditions.",
+        "afterObserved": "VS-04/05/06: unchanged at 2/2/2 parallel children (6 slices); 6/6 slices pass all five conditions."
+      },
+      "sharedOverlap": {
+        "baselineReconstructed": "VS-07/08/09: 2/2/2 slices serialized one child at a time (6 slices); 6/6 slices pass all five conditions under the unchanged baseline overlap rule.",
+        "afterObserved": "VS-07/08/09: unchanged serialization (6 slices, one child at a time); the explicit anti-overlap invariant and the unknown-coupling-serializes rule are now present; 6/6 slices pass all five conditions."
+      },
+      "trivialControls": {
+        "baselineReconstructed": "VS-10/11/12: 0 children (direct execution/direct answer).",
+        "afterObserved": "VS-10/11/12: unchanged at 0 children."
+      }
+    },
+    "limitations": [
+      "No orchestrator/model was invoked for any case: decompositions are derived from the pinned prompt text and the frozen decision rules. Model-side behavior, transcripts, and runtime verification are not-collected and are never invented.",
+      "Baseline decompositions are reconstructions from pre-MVP prompt text at 146f54a (git archive); no live baseline transcript was collected, and the exact concurrency of a baseline run is not determinable from prompt text alone.",
+      "The run is not blind: the scorer had read the frozen corpus (including hypothesis labels) as part of Checkpoint A setup; hypothesis labels were compared only after rubric scoring.",
+      "Zero observed shared-state violations is an absence of observation (no runtime execution occurred), not evidence of scheduler or filesystem enforcement; prompt-level scopes are coordination units, not isolation.",
+      "Prompt byte sizes are UTF-8 bytes, not tokens; tokens, cost, latency, and step counts remain unavailable until a live-host probe delivers them.",
+      "Thresholds 1 and 2 are met on reconstructed/guidance-derived evidence; only a live execution closes threshold 4 and the telemetry gap."
+    ]
+  },
   "aggregateResults": {
-    "status": "not-collected",
-    "note": "Design phase only. No case has been run under this protocol; every aggregate metric is null or 'not-collected' by design. This template defines what will be recorded, not what has been measured.",
-    "runFrozenProtocolVersion": null,
-    "environment": null,
+    "status": "collected-prompt-guidance-derived",
+    "note": "First frozen-protocol (v1) evaluation of the 12-case corpus. Collected: deterministic prompt-guidance-derived baseline-vs-after comparison with per-slice rubric scoring. Not collected: live model execution, runtime verification, review loops, tokens, cost, latency, and steps. Nothing here is estimated.",
+    "runFrozenProtocolVersion": 1,
+    "environment": "2026-09-15; @opencode/plugin and @opencode/sdk 0.0.0-beta-19507; bun 1.3.3; baseline 146f54a (git archive) vs after worktree on main 4c6049f; default-equivalent parsed options",
     "totals": {
-      "cases": null,
-      "multiFileFeatures": null,
-      "independentPairs": null,
-      "sharedOverlap": null,
-      "trivialControls": null,
-      "slices": null,
-      "children": null
+      "cases": 12,
+      "multiFileFeatures": 3,
+      "independentPairs": 3,
+      "sharedOverlap": 3,
+      "trivialControls": 3,
+      "slices": {
+        "baselineReconstructed": 24,
+        "afterObserved": 15
+      },
+      "children": {
+        "baselineReconstructed": 24,
+        "afterObserved": 15
+      },
+      "childDispatches": {
+        "baselineReconstructed": 24,
+        "afterObserved": 15
+      },
+      "childrenCountBasis": "children counts the maximum concurrent children (frozen corpus semantics); serialized overlap cases dispatch two slices sequentially, one child at a time."
     },
     "metrics": {
-      "slice_cohesion_rate": null,
-      "unnecessary_split_rate": null,
-      "acceptance_coverage": null,
-      "parallel_independence_precision": null,
-      "shared_state_violations": null,
-      "integration_rework_rate": null,
-      "delegation_count": null,
-      "prompt_size_bytes": null,
-      "tokens_cost_latency_steps": null
+      "slice_cohesion_rate": {
+        "baselineReconstructed": 0.5,
+        "afterObserved": 1,
+        "definition": "slices that pass all five rubric conditions / all produced slices",
+        "multiFileOutcomesOnly": {
+          "baselineReconstructed": 0,
+          "afterObserved": 1
+        }
+      },
+      "unnecessary_split_rate": {
+        "baselineReconstructed": 1,
+        "afterObserved": 0,
+        "relativeReduction": 1,
+        "definition": "multi-file-feature cases whose decomposition splits one cohesive outcome / multi-file-feature cases",
+        "basis": "baseline reconstructed from pre-MVP prompt text; after observed from emitted MVP guidance"
+      },
+      "acceptance_coverage": {
+        "baselineReconstructed": 0.667,
+        "afterObserved": 1,
+        "definition": "cases producing slices where every produced slice carries its own acceptance statement and verification command / cases producing slices (9 cases; 3 direct-execution controls excluded)",
+        "runtimeVerificationResults": "not-collected (no runtime execution)"
+      },
+      "parallel_independence_precision": {
+        "baselineReconstructed": 1,
+        "afterObserved": 1,
+        "definition": "independent-pair cases whose parallel children have write scopes verified disjoint from the case text / independent-pair cases",
+        "runtimeParallelismObserved": "not-collected (no model execution)"
+      },
+      "shared_state_violations": {
+        "baselineReconstructed": 0,
+        "afterObserved": 0,
+        "definition": "observed concurrent overlapping writes per case",
+        "limitation": "No runtime execution occurred; zero observed is an absence of observation, not evidence of enforcement. The template never records 'guaranteed serialization'."
+      },
+      "integration_rework_rate": {
+        "baselineReconstructed": "not-collected",
+        "afterObserved": "not-collected",
+        "reason": "no runtime integration occurred"
+      },
+      "delegation_count": {
+        "baselineReconstructed": 24,
+        "afterObserved": 15,
+        "basis": "guidance-derived child dispatches (each slice dispatched once; serialized cases dispatch both slices sequentially)"
+      },
+      "prompt_size_bytes": {
+        "orchestratorSystem": {
+          "baseline": 8322,
+          "after": 9074,
+          "delta": 752
+        },
+        "workerSystemImplementation": {
+          "baseline": 6050,
+          "after": 6799,
+          "delta": 749
+        },
+        "workerSystemReview": {
+          "baseline": 6019,
+          "after": 6736,
+          "delta": 717
+        },
+        "verticalSliceGuidanceBlock": {
+          "baseline": 0,
+          "after": 629,
+          "delta": 629
+        },
+        "casePromptTotals": {
+          "orchestration": {
+            "baseline": 9863,
+            "after": 11747,
+            "delta": 1884
+          },
+          "continuation": {
+            "baseline": 66671,
+            "after": 74231,
+            "delta": 7560
+          },
+          "commandOrchestrate": {
+            "baseline": 70259,
+            "after": 72143,
+            "delta": 1884
+          },
+          "commandRunPlan": {
+            "baseline": 65531,
+            "after": 65531,
+            "delta": 0
+          }
+        },
+        "perCaseDelta": "orchestration +157/case, continuation +630/case, command `orchestrate` +157/case, command `run-plan` +0/case",
+        "tokensNote": "prompt bytes are not tokens; tokens are never asserted"
+      },
+      "tokens_cost_latency_steps": {
+        "status": "not-collected",
+        "reason": "no live-host probe was run; never estimated"
+      }
     },
     "thresholdEvaluation": {
-      "status": "not-collected",
-      "unnecessarySplittingReduction": null,
-      "cohesionOnSampledMultiFileOutcomes": null,
-      "sharedStateViolationsObserved": null,
-      "independentTaskRegression": null,
-      "promptSizeBytesDelta": null,
-      "notes": null
-    }
+      "status": "evaluated",
+      "unnecessarySplittingReduction": {
+        "status": "met",
+        "confidence": "baseline reconstructed from pre-MVP prompt text (146f54a); live baseline transcript not collected",
+        "observed": "100% of multi-file-feature cases unnecessarily split in the baseline reconstruction; 0% after (3/3 -> 0/3 cases), a 100% relative reduction versus the >=25% hypothesis"
+      },
+      "cohesionOnSampledMultiFileOutcomes": {
+        "status": "met",
+        "observed": "3/3 after slices pass all five conditions on the three multi-file features (100%); baseline reconstruction 0/12 (0%)"
+      },
+      "sharedStateViolationsObserved": {
+        "status": "met-as-observed",
+        "observed": "0 observed concurrent overlapping writes in both states; no runtime execution occurred, so this is an absence of observed violations, not evidence of enforcement"
+      },
+      "independentTaskRegression": {
+        "status": "not-met",
+        "confidence": "fail-closed on missing runtime evidence",
+        "observed": "Guidance-level comparison shows no regression (3/3 independent pairs remain parallel-permitted with disjoint scopes; acceptance ownership unchanged; fail-closed lines unchanged), but runtime completion and verification results are not-collected because no model run occurred, so the hypothesis cannot be evidenced"
+      },
+      "promptSizeBytesDelta": {
+        "status": "met",
+        "observed": "orchestrator system +752 bytes, worker system (implementation) +749, worker system (review) +717, guidance block +629; per-case orchestration +157, continuation +630, run-plan +0; tokens never asserted"
+      },
+      "notes": "Threshold 4 is the only hypothesis not closed. Together with the checkpoint criteria (demonstrated user need for an explicit override, no decline in acceptance coverage or verification), this drives the no-go decision in checkpointA.decision."
+    },
+    "notes": "Baseline results are reconstructions from pre-MVP prompt text, not live runs; after results are prompt-guidance-derived from the MVP tree, not live model behavior. Every unavailable metric is recorded as not-collected."
   },
   "checkpointA": {
-    "status": "pending-manual-baseline-vs-after",
+    "status": "decided-no-go",
     "requires": "Manual baseline-vs-after comparison under this frozen protocol: lower unnecessary splitting with no decline in acceptance coverage or verification, zero observed shared-state violations, continued parallelism for rubric-permitted independent work, no safety/publication regression, and a demonstrated user need for an explicit override.",
-    "baselineRunCollected": false,
-    "afterRunCollected": false,
-    "liveTelemetryProbe": "pending: tokens, cost, latency, and step counts remain unavailable until a live-host probe delivers them; they are never estimated",
-    "decision": null
+    "baselineRunCollected": true,
+    "baselineRunBasis": "reconstructed from pre-MVP prompt text at 146f54a (git archive); no live baseline transcript collected",
+    "afterRunCollected": true,
+    "afterRunBasis": "prompt-guidance-derived from the current MVP tree; no live model transcript collected",
+    "liveTelemetryProbe": "not run: tokens, cost, latency, and step counts remain not-collected and are never estimated",
+    "decision": {
+      "verdict": "no-go",
+      "scope": "Phases 2, 3, and 4",
+      "recorded": "2026-09-15",
+      "outcome": "Stop at the prompt-only MVP. Phases 2-4 remain gated, unstarted, and unauthorized; the overall plan remains in-progress and NOT complete.",
+      "rationale": [
+        "Threshold 4 (no regression in independent-task completion or verification) fails closed: no model execution occurred, so runtime completion and verification results are not-collected, and the after decomposition cannot be evidenced at runtime.",
+        "The checkpoint's go criteria require a demonstrated user need for an explicit strategy override; none is demonstrated by this run.",
+        "Phase 3's preconditions (rubric repeatability and a machine-readable signal that demonstrably improves classification) are not demonstrated by a single prompt-guidance run.",
+        "Phase 4 requires the identical corpus executed under an approved configuration; that executed run does not exist."
+      ],
+      "evidenceSummary": "Guidance-level comparison is directionally positive: unnecessary splitting 100% -> 0% on the reconstructed baseline; multi-file cohesion 0% -> 100%; independent-pair parallelism retained (3/3); overlap serialization retained (3/3); deterministic prompt byte deltas recorded and the Phase 0/1 ledger deltas reproduced exactly; zero observed shared-state violations (no runtime execution). No rollback of the prompt-only MVP is indicated.",
+      "revisitConditions": [
+        "A live-host executed protocol run collects real baseline/after transcripts and runtime verification, closing threshold 4 and the telemetry gap.",
+        "Recorded user requests demonstrate a need for an explicit decomposition override.",
+        "Repeated live runs show rubric repeatability and any proposed D4 coherence signal demonstrably improves classification."
+      ]
+    }
   },
-  "noResultsStatement": "This design phase contains no collected results and no telemetry. All result fields are null or 'not-collected' and must remain so until a frozen-protocol run fills them with real evidence. Checkpoint A stays pending until the manual baseline-vs-after comparison is recorded here."
+  "noResultsStatement": "The 2026-09-15 Checkpoint A run (protocol v1) populated this artifact with a manual, prompt-guidance-derived baseline-vs-after evaluation: per-case after results observed from the current MVP prompt text, per-case baseline results reconstructed from the pre-MVP prompt text at 146f54a. No orchestrator/model was invoked, no runtime transcript exists, and tokens, cost, latency, and step counts remain not-collected and are never estimated. The Checkpoint A decision (no-go for Phases 2-4; stop at the prompt-only MVP) is recorded in the checkpointA object."
 }

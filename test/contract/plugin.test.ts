@@ -219,6 +219,17 @@ describe("server plugin contract", () => {
     expect(agents.get("orchestrator")?.system).toContain("conductor")
     expect(agents.get("orchestrator")?.system).toContain("Expected outcome")
     expect(agents.get("orchestrator")?.system).toContain("exact disjoint write scope")
+    // The prompt-only vertical-slice MVP folds guidance into existing prompt
+    // kinds: no new tool, command, schema, or gate surface is registered.
+    const orchestratorSystem = agents.get("orchestrator")?.system ?? ""
+    expect(orchestratorSystem).toContain("Prefer the smallest coherent end-to-end implementation slice over the smallest file or layer")
+    expect(orchestratorSystem).toContain(
+      "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
+    )
+    expect(orchestratorSystem).toContain("A slice is a coordination unit, never a permission or filesystem boundary")
+    expect(orchestratorSystem).toContain("prefer coherent end-to-end slices")
+    expect(orchestratorSystem).not.toMatch(/scheduler|semaphore/i)
+    expect(orchestratorSystem).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
 
     const contextText: string[] = []
     contextHook?.({
@@ -264,6 +275,10 @@ describe("server plugin contract", () => {
     await commands[0]?.execute({ sessionID: "session", prompt: { text: "fix the bug" }, delivery: "queue" })
     expect(switches).toEqual(["agent:orchestrator", "model:orchestrator-model"])
     expect(prompts[0].text).toContain("fix the bug")
+    // The orchestrate prompt built by the prompt builder prefers a coherent
+    // end-to-end slice before delegating parallel work.
+    expect(prompts[0].text).toContain("prefer the smallest coherent end-to-end slice over a file-by-file or layer-by-layer split")
+    expect(prompts[0].text).toContain("split only at a verified boundary and serialize unknown coupling")
     expect(prompts[0].delivery).toBe("queue")
 
     await cleanup?.()

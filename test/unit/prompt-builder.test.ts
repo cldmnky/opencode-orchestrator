@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { buildOrchestrationPrompt } from "../../src/core/prompt-builder.js"
 
 const COORDINATION_SENTENCE =
-  "Coordinate this task end to end. Start with repository facts, delegate independent work in parallel only with exact disjoint write scopes, integrate the results, and verify the final state directly."
+  "Coordinate this task end to end. Start with repository facts, prefer the smallest coherent end-to-end slice over a file-by-file or layer-by-layer split, delegate independent work in parallel only with exact disjoint write scopes, integrate the results, and verify the final state directly."
+
+const SLICE_PREFERENCE_PHRASE = "prefer the smallest coherent end-to-end slice over a file-by-file or layer-by-layer split"
+const SERIALIZATION_PHRASE = "split only at a verified boundary and serialize unknown coupling"
 
 const CLARIFICATION_PHRASES = [
   "use the native ask tool",
@@ -47,6 +50,23 @@ describe("buildOrchestrationPrompt", () => {
     expect(prompt).toContain("separate established facts from assumptions")
   })
 
+  test("prefers a coherent end-to-end slice before delegating parallel work", () => {
+    const prompt = buildOrchestrationPrompt({ objective: "add pagination to /api/items with tests" })
+    expect(prompt).toContain(SLICE_PREFERENCE_PHRASE)
+    expect(prompt).toContain(SERIALIZATION_PHRASE)
+    // The slice preference precedes the parallel-delegation instruction, so
+    // the prompt never invites a file-by-file split before checking cohesion.
+    expect(prompt.indexOf(SLICE_PREFERENCE_PHRASE)).toBeGreaterThan(-1)
+    expect(prompt.indexOf(SLICE_PREFERENCE_PHRASE)).toBeLessThan(
+      prompt.indexOf("delegate independent work in parallel only with exact disjoint write scopes"),
+    )
+    // The builder itself states the preference and the serialization rule; the
+    // shared no-isolation caveat is asserted on the composed command prompt in
+    // the policy suite. Never a positive isolation or scheduling claim here.
+    expect(prompt).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
+    expect(prompt).not.toMatch(/scheduler|semaphore|automatic(?:ally)? enforc/i)
+  })
+
   test("includes the clarification section when clarifyEnabled is true", () => {
     const prompt = buildOrchestrationPrompt({ objective: "audit the auth flow", clarifyEnabled: true })
     for (const phrase of CLARIFICATION_PHRASES) {
@@ -72,6 +92,8 @@ describe("buildOrchestrationPrompt", () => {
     const prompt = buildOrchestrationPrompt({ objective: "triage the failures", clarifyEnabled: true })
     expect(countOccurrences(prompt, COORDINATION_SENTENCE)).toBe(1)
     expect(countOccurrences(prompt, "Task:")).toBe(1)
+    expect(countOccurrences(prompt, SLICE_PREFERENCE_PHRASE)).toBe(1)
+    expect(countOccurrences(prompt, SERIALIZATION_PHRASE)).toBe(1)
     for (const phrase of CLARIFICATION_PHRASES) {
       expect(countOccurrences(prompt, phrase)).toBe(1)
     }
@@ -85,6 +107,9 @@ describe("buildOrchestrationPrompt", () => {
     for (const prompt of prompts) {
       expect(prompt).not.toMatch(/github\.[a-z_]+/i)
       expect(prompt).not.toMatch(/claude/i)
+      // Never a positive isolation or runtime-scheduling claim.
+      expect(prompt).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
+      expect(prompt).not.toMatch(/scheduler|semaphore|\bisolated\b/i)
       for (const forbidden of FORBIDDEN_STRINGS) {
         expect(prompt).not.toContain(forbidden)
       }

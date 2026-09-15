@@ -4,14 +4,15 @@
 
 Give the orchestrator a task in plain English — it breaks the work down, delegates to specialists, runs work in parallel where safe, and brings back tested, reviewed code. You stay in control while the plugin handles the choreography.
 
-> **Conductor, not worker:** the orchestrator plans and coordinates — specialist subagents do the focused edits.
+> **Conductor, not worker:** the orchestrator plans and coordinates — specialist subagents do the implementation work in coherent slices.
 
 ---
 
 ## What it does for you
 
 - **Describe what you want, not how to do it.** `“Add validation to the checkout form and cover it with tests”` Just ask — the orchestrator creates a plan, assigns work, and verifies the result.
-- **Parallel where safe, serialized where it matters.** Read-only research runs in parallel. Non-overlapping file scopes coordinate edits so agents avoid working on the same files.
+- **Coherent slices, not file-sized chores.** The orchestrator prefers the smallest end-to-end slice — coupled code, tests, wiring, and docs under one owner — and splits only at a verified boundary where each resulting slice has its own outcome, acceptance evidence, and no hidden dependency.
+- **Parallel where safe, serialized where it matters.** Read-only research runs in parallel. Disjoint write scopes coordinate parallel edits, and any overlap or unknown coupling is serialized — never written concurrently.
 - **Built-in review.** Every implementation is audited by a dedicated reviewer before you see the final result.
 - **Asks before it guesses.** When a request is ambiguous, the orchestrator asks you a few targeted questions — with answer options — before breaking the work down. It explores repository facts first and workers never ask on your behalf; this is prompt guidance, not a hard runtime gate. Disable with `"clarify": { "mode": "off" }`.
 - **Goals that survive idle.** Start a long-running objective and let it continue during idle periods in the same OpenCode session.
@@ -25,7 +26,7 @@ Give the orchestrator a task in plain English — it breaks the work down, deleg
 | **orchestrator** | Your main partner. Understands your request, plans the work, delegates, and verifies everything. |
 | **planner** | Breaks down complex tasks without editing code. |
 | **explore** | Maps your codebase, tests, and docs — fast, read-only research with direct `webfetch`/`websearch`. |
-| **implementer** | Makes focused code changes within an assigned file scope. |
+| **implementer** | Makes coherent end-to-end changes within an assigned slice scope. |
 | **reviewer** | Audits the combined changes before they’re presented to you. |
 
 You only talk to the orchestrator. It handles the rest.
@@ -144,7 +145,7 @@ Then in the TUI:
 /orchestrate add input validation to the user form and cover it with tests
 ```
 
-The orchestrator will research the codebase, plan the changes, delegate non-overlapping file scopes to `implementer` agents, run a `reviewer`, and report back with verification.
+The orchestrator will research the codebase, plan the changes, delegate coherent end-to-end slices with disjoint write scopes to `implementer` agents, run a `reviewer`, and report back with verification.
 
 ---
 
@@ -164,7 +165,7 @@ flowchart LR
     U([You]) --> O{orchestrator}
     O --> P[planner<br/>breaks down task]
     O --> E[explore<br/>maps codebase]
-    O --> I[implementer<br/>focused edits]
+    O --> I[implementer<br/>coherent slices]
     O --> R[reviewer<br/>audits changes]
     I -. bounded .-> P
     I -. bounded .-> E
@@ -523,7 +524,7 @@ OpenCode’s native `experimental.subagent_depth` defaults to 1, which prevents 
 <summary>How the orchestration works (for the curious)</summary>
 
 - **Roles are prompt policy, not hard sandboxing.** `explore` is told not to use shell, `planner`/`reviewer` not to edit, and nested delegation is bounded to the role graph (implementer→planner/explore, planner→explore, reviewer→explore, explore never delegates) — the installer writes matching permission rules, but V2’s plugin API doesn’t enforce this at the filesystem level. Treat it as strong instructions plus config-level permissions.
-- **File ownership coordinates agents.** The orchestrator assigns non-overlapping file scopes to each `implementer`, but those prompt-level scopes are not filesystem isolation. `max_parallel` (default 4) caps concurrency.
+- **Slices coordinate agents; file ownership is advisory.** The orchestrator prefers the smallest coherent end-to-end slice — tightly coupled code, tests, wiring, and docs under one owner — and splits only at a verified boundary where each resulting slice has its own outcome, acceptance evidence, and no hidden dependency. Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification, never concurrent overlapping writes; unknown coupling fails closed and serializes. Those prompt-level scopes are coordination units, **not** filesystem isolation, and a slice never becomes a permission boundary. `max_parallel` (default 4) caps concurrency.
 - **Handoffs are structured.** Workers return a five-field summary (`Outcome / Files / Verification / Risks / Follow-up`) plus a version-1 JSON envelope. The orchestrator can run `orchestrator_handoff_validate` for deterministic checks before using a handoff. Inter-agent messages — parent→child prompts and child→parent handoffs alike — are expected to be explicit, self-contained, and legible on their own.
 - **Review is prompt-based by default.** `require_review: true` means the orchestrator *asks* a reviewer. There’s no hard runtime gate — `bounded` review adds an explicit `review_get` / `review_transition` flow with a circuit breaker if you need it.
 - **Publication is capability policy.** `/publish` toggles a durable, project-scoped authorization record (never caller identity). When the config master gate is on and the record is enabled, the orchestrator may pass `confirm: true` without re-prompting for push / draft PR create / ready / best-effort approve / merge (merge is autonomous, ignores `confirm`, and never requires a GitHub approval) — never issue creation. Every step still requires the mandatory sync → verify → exact-revision review sequence and fails closed otherwise, and a per-session `/gates` narrowing can turn any step off for the current session.

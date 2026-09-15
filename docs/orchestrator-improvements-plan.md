@@ -20,6 +20,7 @@ Constraints:
 - The semantic role model (`planner`, `explore`, `implementer`, `reviewer`) is unchanged, but the first improvement wave landed the **evidence-contract foundation**: structured handoffs (D2), an advisory complexity classifier (D4), a callable two-level validator with admission vocabulary (V2), typed evidence on GitHub/worktree results (V3), opt-in trace/budget controls (S3), and bounded maker-checker review with a circuit breaker (V1-bounded).
 - Beyond the original plan, the repo now ships an orchestrator-owned worktree lifecycle with safe-boundary session entry, a fail-closed autonomous publication chain (push → draft PR → ready → best-effort approve → merge → verify), per-session gates with a TUI picker and RPC, durable worker model selection, bounded nested delegation, and a read-only TUI orchestrator-sessions sidebar.
 - The dominant remaining weakness is unchanged in kind but now fixable in practice: most delegation constraints are still **prompt-only** or gated only at **plugin-owned dispatch surfaces**. The pinned beta-19507 contract now exposes `session.hook("prompt")`, `permission.hook("evaluate")`, `permission.rules` (inherited by child sessions at creation), and a native `ctx.worktree` domain — the host-side primitives needed for real runtime admission enforcement (N1), real worker containment (N2), and a documented worktree path (N3).
+- The orchestrator's **language is its weakest user-facing surface**: operational policy strings are 400–850-character single sentences, the agent has a functional description but no voice or tone contract, and clarification guidance covers only initial task ambiguity. User-visible output inherits this density. G3 targets plain-language communication, a helpful personality, and restatement/summary loops.
 - `max_parallel` is still prompted, not scheduled: no DAG scheduler or concurrency semaphore exists (A4 remains true).
 - Durable per-step checkpoints, append-only lifecycle logs, and materialized projections remain unimplemented (S1/S2); the TUI sidebar is a volatile projection only.
 
@@ -62,6 +63,17 @@ Constraints:
 - `require_review=true` remains prompt-level in the default `prompt` review mode.
 - `review.mode: "bounded"` adds `orchestrator_review_get`/`orchestrator_review_transition` with a version-1 review schema (states `pending`/`approved`/`changes-requested`/`blocked`/`tripped`, fixed reason codes, deterministic transitions); tripped/blocked records stop goal auto-continuation. Still no automatic completion gate and no model-tier escalation.
 - `orchestrator_handoff_validate` performs deterministic D2 + V2 checks including parent-side `ctx.vcs` state, path existence, realpath, and redaction; it is callable, not automatic. Worker-declared verification passes are never upgraded.
+
+### Conversation and Tone
+
+**Observed limitation (user-reported, source-confirmed):** the orchestrator's generated language is complex and hard to understand.
+
+- `src/core/policy.ts` embeds multiple 400–850-character single-sentence guidance strings (e.g. the worktree/publication/review policies); the runtime context injection in `src/opencode-v2/plugin.ts` (`session.hook("context")`) contains 556–858-character sentences. Instruction density propagates into model output.
+- `buildOrchestratorSystem` (`src/core/prompts.ts`) contains only operational policy; the orchestrator agent's description is "Coordinates specialized agents and verifies their work." — there is no voice, tone, or audience contract.
+- `CLARIFY_GUIDANCE` (`clarify.auto`) covers only initial task ambiguity, in one dense sentence. There is no restatement-before-start, no plain-language status at phase boundaries, and no end-of-run summary contract.
+- Status messages (`emitStatus` in `commands/runtime.ts`) are terse and mechanical (e.g. "Dispatch blocked by configured controls: …") with no what-it-means / what-next layering; `/handover` emits a raw redacted section dump rather than a readable summary.
+
+G3 (below) plans the fix.
 
 ### Goal Continuation
 
@@ -149,6 +161,7 @@ Everything in this section shipped after the 2026-08-30 draft (issues #8/#10/#14
 |---|---|---|---|---|---:|---:|---|
 | P0 | N2 | Runtime Authority | Worker containment via `permission.rules` | Child sessions inherit rules at creation — the first real host-enforced authority boundary; closes the V4 containment gap | M | High | Over-blocking legitimate work; rule drift |
 | P0 | N1 | Runtime Authority | Admission enforcement via `session.hook("prompt")` + `permission.hook("evaluate")` | Makes D4/V2/V1 enforceable at runtime on plugin-owned dispatch, opt-in and fail-closed | M | High | Prompt hooks are not exactly-once; false blocks |
+| P0 | G3 | DX & Governance | Plain-language communication, helpful personality, clarification/summary loop | Policy strings run 400–850 chars in single sentences; no voice/tone spec; clarify covers only initial ambiguity; user output inherits the density | M | High | Losing precision in safety-critical instructions |
 | P1 | N3 | Worktree & Isolation | Migrate managed worktrees onto native `ctx.worktree` (supersedes W1/W2) | Documented domain with ownership, refresh, `worktree.updated`, `Worktree.OperationError`; unlocks per-worker isolation on a supported path | L | High | Behavior drift during migration; canonical-config coupling |
 | P1 | N4 | Verification & Safety | Sessionless deterministic checks via `ctx.generate.text` | Semantic handoff lint, review-rubric parsing, complexity adjudication without child sessions | S | Medium | Nondeterministic model output; cost |
 | P1 | V4 | Verification & Safety | Redaction centralization + authority recording | One tested redactor; evidence marked safe/redacted/unavailable; effective authority = intersection (now expressible via N2 rules) | M | High | False security |
@@ -310,6 +323,41 @@ Still blocked on host primitives: the pinned contract has no `promptAsync`, pare
 
 Unchanged in goal, now with a concrete delivery surface: publish the effective profile as a local reference via `ctx.reference.transform` (handbook-style), report it through `doctor` and `/handover`, and derive it from the existing strict config blocks (trace/budget/review/clarify/publish/gates). List every field as advisory, enforced, unsupported, or host-dependent; no secrets.
 
+#### G3 — Plain-Language Communication and a Helpful Orchestrator Personality
+
+**Problem**
+
+The orchestrator's language is hard to read (see [Conversation and Tone](#conversation-and-tone)). Dense compound instructions shape both model behavior and user-visible output; there is no personality or audience contract; clarification exists only for initial ambiguity; and status/handover output is mechanical. Users should not need to parse gate names, admission states, and semicolon chains to follow what the orchestrator is doing.
+
+**Proposal**
+
+1. **Layered communication contract.**
+   - *User-facing rendering*: plain language, short sentences (one instruction per sentence, target ≤ 25 words), jargon glossed on first use ("a gate — a safety step you can turn off for this session"), and status messages structured as **what happened / what it means / what happens next or what you can do**.
+   - *Model-facing contracts stay precise*: D2 envelopes, evidence records, and fail-closed preconditions are unchanged. Where a policy sentence would reach the user (status text, handover), render through the plain-language template instead of pasting the policy string.
+2. **Helpful-personality spec** appended to the orchestrator system prompt:
+   - Friendly, concise, proactive; explains the plan in one or two sentences before starting non-trivial work.
+   - **Restates the request** in 2–3 bullets before starting multi-worker work and lists the assumptions it will proceed under; asks the existing native ask tool when scope, success criteria, or verification is ambiguous (extends `clarify.auto`, which remains the mechanism — this adds restatement and an ask budget so the orchestrator does not stall on endless questions).
+   - Announces phase transitions in one plain line (plan → delegate → review → publish) and never presents internal state (admission states, SHAs, gate names) without a plain gloss.
+   - **Ends runs with a summary**: outcome, what changed, how it was verified, what is left — structured from the D2 handoff fields so user summaries and worker handoffs share one skeleton.
+3. **Restructure the dense strings**: rewrite the 400–850-character single sentences in `policy.ts`/`plugin.ts` runtime injection into short bulleted sentences. This improves model compliance and any user-visible reuse. Fail-closed preconditions keep byte-equivalent semantics, enforced by tests.
+4. **Readability guardrails**: length/structure assertions for user-facing strings (extend the existing status-text tests) and a before/after examples page under `docs/`.
+
+**Constraints:** no safety-language weakening — restructuring may split sentences but must not drop a fail-closed precondition; equivalence is test-enforced. Workers keep their focused operational prompts; the personality spec is orchestrator-only so worker output stays task-shaped.
+
+**Files affected (candidate)**
+
+- `src/core/policy.ts` · `src/core/prompts.ts` (restructure dense strings; personality, restatement, and summary sections)
+- `src/opencode-v2/agents.ts` (orchestrator description/voice)
+- `src/opencode-v2/commands/runtime.ts` (status templates, readable `/handover` summary)
+- `src/opencode-v2/plugin.ts` (runtime context injection restructure)
+- `test/unit/{core,runtime,prompt-builder}.test.ts` (readability assertions)
+
+**Effort:** M · **Impact:** High · **Risk:** Precision loss in safety-critical instructions; tone drift.
+
+**Next step**
+
+Write the plain-language template and personality spec as a short design note; pilot on status messages and the finish summary with readability assertions; then roll out to the agent prompt and runtime injection.
+
 ## Non-Goals / Out of Scope
 
 - Replacing OpenCode's native V2 session or plugin architecture.
@@ -329,6 +377,7 @@ Unchanged in goal, now with a concrete delivery surface: publish the effective p
 | Over-orchestration increases cost and latency | D4 routing (shipped), budgets/step limits (shipped, opt-in), direct-execution path |
 | Bad decomposition amplifies errors | Two-level validation (shipped, callable), bounded review (shipped), D1 DAG validation (planned) |
 | Runtime enforcement false-blocks legitimate work (N1/N2) | Opt-in modes, defaults byte-identical, truthful refusal messages, deny-is-final preserved, hook test matrix first |
+| Plain-language rewrite drops a safety precondition (G3) | Layered rendering; fail-closed strings restructured with test-enforced semantic equivalence; readability fixtures |
 | Native worktree migration drift (N3) | Adapter with fallback, dual-record comparison, compatibility probe before cutover |
 | Child rule inheritance differs across hosts (N2) | Pin-level probe (A16), rules recorded and reported, never the only boundary |
 | Storage is not transactional or durable enough | Idempotency keys, no exactly-once claims, append/replay design (S1/S2), scan-cursor hydration |
@@ -340,6 +389,13 @@ Unchanged in goal, now with a concrete delivery surface: publish the effective p
 | Doctor creates false confidence | Authority/freshness per capability, local checks advisory, `ctx.integration` signal optional |
 
 ## Next Steps
+
+### Phase 0 — Conversation Quality (G3, quick win)
+
+- Write the plain-language template (what happened / what it means / what's next) and the personality, restatement, and finish-summary spec as a short design note.
+- Pilot on status messages and the end-of-run summary; add readability assertions to the existing status-text tests.
+- Restructure the dense `policy.ts`/runtime-injection strings into short bulleted sentences with test-enforced semantic equivalence for every fail-closed precondition.
+- Exit evidence: readability fixtures green; before/after examples page; user summary derived from the D2 handoff fields.
 
 ### Phase A — Runtime Authority (N1, N2)
 

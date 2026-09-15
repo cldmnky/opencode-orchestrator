@@ -8,6 +8,9 @@ import {
   type D4Recommendation,
   classifyTaskComplexity,
 } from "../../src/core/d4.js"
+// Imported so this suite proves the additive v2 module loads without changing
+// any v1 behavior (Phase 3 freeze guard).
+import { D4V2InputSchema } from "../../src/core/d4v2.js"
 
 // ---------------------------------------------------------------------------
 // Corpus fixture: read the frozen design artifact at test runtime so the
@@ -329,5 +332,35 @@ describe("corpus conformance (docs/phase-1/d4-task-corpus.json)", () => {
   test("every other corpus case matches its referenceRecommendation", () => {
     const non006 = corpus.cases.filter((c) => c.caseId !== "d4-case-006")
     expect(non006.every((c) => classifyTaskComplexity(c.features).recommendation === c.referenceRecommendation)).toBe(true)
+  })
+})
+
+describe("D4 v1 freeze guard for the additive v2 surface", () => {
+  test("the eight v1 dimensions and strict schema are unchanged while the v2 module is loaded", () => {
+    expect(Object.keys(D4InputSchema.shape).sort()).toEqual([...D4_DIMENSIONS].sort())
+    expect("coherence" in D4InputSchema.shape).toBe(false)
+    expect("coherence" in D4V2InputSchema.shape).toBe(true)
+    expect(() => classifyTaskComplexity({ ...fullInput, coherence: "independent" })).toThrow(
+      /Invalid D4 complexity input/,
+    )
+  })
+
+  test("v1 corpus conformance and the documented case-006 mismatch are unchanged", () => {
+    const mismatches = corpus.cases
+      .filter((c) => classifyTaskComplexity(c.features).recommendation !== c.referenceRecommendation)
+      .map((c) => c.caseId)
+    expect(mismatches).toEqual(["d4-case-006"])
+    expect(caseById.get("d4-case-006")?.referenceRecommendation).toBe("orchestrate-candidate")
+  })
+
+  test("v1 results keep exactly the frozen version-1 shape with no v2 fields", () => {
+    const result = classifyTaskComplexity(fullInput)
+    expect(result.version).toBe(1)
+    expect(Object.keys(result).sort()).toEqual(
+      ["advisory", "basis", "features", "recommendation", "rule", "unknownDimensions", "version"].sort(),
+    )
+    expect("coherence" in result).toBe(false)
+    expect("sliceMetadata" in result).toBe(false)
+    expect("missingFacts" in result).toBe(false)
   })
 })

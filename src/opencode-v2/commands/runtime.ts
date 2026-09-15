@@ -8,6 +8,7 @@ import type { OrchestratorOptions } from "../../core/config.js"
 import { buildCommandPrompt } from "../../core/prompts.js"
 import { HANDOFF_SUMMARY_FIELDS } from "../../core/policy.js"
 import type { DispatchGate } from "../observability/runtime.js"
+import { authorityDispatchMetadata } from "../authority/runtime.js"
 import { redact } from "../process/redact.js"
 import { formatModelReference } from "../../core/model-reference.js"
 import { parseWorkerModelAssignment, type WorkerModelRuntime } from "../worker-models/runtime.js"
@@ -195,6 +196,12 @@ export async function runCommand(
       sessionID: input.sessionID,
       text: buildCommandPrompt(name, commandArguments, options),
       delivery: input.delivery,
+      // Phase A N1: a plugin-created command dispatch carries the bounded
+      // authority marker only in enforce mode. The pinned `CommandInvocation`
+      // prompt has no metadata field, so there is no caller metadata to merge
+      // here; `withAuthorityDispatchMetadata` preserves caller keys where a
+      // caller supplies them.
+      ...(options.authority.mode === "enforce" ? { metadata: authorityDispatchMetadata("command") } : {}),
       // Rebuild the prompt instead of spreading input.prompt: the native command
       // invocation carries explicit undefined arrays for files/agents/skills, which
       // the SessionPrompt schema rejects, and the rewritten text invalidates any

@@ -1,6 +1,7 @@
 import type { OrchestratorOptions } from "../../core/config.js"
 import { buildContinuationPrompt } from "../../core/prompts.js"
 import type { DispatchGate } from "../observability/runtime.js"
+import { authorityDispatchMetadata, type AuthorityMetadataValue } from "../authority/runtime.js"
 import {
   goalStorageKey,
   readAutomationStop,
@@ -24,7 +25,12 @@ export type ContinuationContext = {
   storage: StorageLike
   session: {
     get(input: { sessionID: string }): Promise<unknown>
-    prompt(input: { sessionID: string; text: string; delivery: "queue" }): Promise<unknown>
+    prompt(input: {
+      sessionID: string
+      text: string
+      delivery: "queue"
+      metadata?: { [key: string]: AuthorityMetadataValue }
+    }): Promise<unknown>
   }
 }
 
@@ -180,6 +186,10 @@ export function startGoalContinuation(
       sessionID,
       text: buildContinuationPrompt(reserved.goal.objective, reserved.goal.continuationCount, options, reserved.run?.plan),
       delivery: "queue",
+      // Phase A N1: a plugin-created goal continuation carries the bounded
+      // authority marker only in enforce mode, so the admission hook can
+      // re-consult the dispatch gate at admission time.
+      ...(options.authority.mode === "enforce" ? { metadata: authorityDispatchMetadata("continuation") } : {}),
     })
   }
 }

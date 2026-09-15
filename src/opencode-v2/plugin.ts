@@ -18,6 +18,7 @@ import { addObservabilityTools } from "./observability/tools.js"
 import { addPublishTools } from "./publish/tools.js"
 import { addPeerTools } from "./peers/tools.js"
 import { createDispatchGate, shouldStartObservability, startObservability } from "./observability/runtime.js"
+import { shouldStartAuthority, startAuthority } from "./authority/runtime.js"
 import { startWorktreeEventSync } from "./worktree/events.js"
 import { SpawnRunner } from "./process/runner.js"
 import { createSessionMoveCoordinator } from "./session/move-coordinator.js"
@@ -78,6 +79,14 @@ export const orchestratorPlugin = (Plugin.define as any)({
     if (observability) registrations.push({ dispose: () => observability.dispose() })
     const controlGate = createDispatchGate({ options, storage: ctx.storage, location: ctx.location, runtime: observability })
     const moveCoordinator = createSessionMoveCoordinator()
+
+    // Phase A runtime authority (opt-in): N1 admission/permission enforcement
+    // and N2 child-only containment. `authority.mode: "off"` (the default)
+    // registers nothing and leaves the default setup byte-identical.
+    const authority = shouldStartAuthority(options)
+      ? await startAuthority({ options, gate: controlGate, session: ctx.session, permission: ctx.permission })
+      : undefined
+    if (authority) registrations.push({ dispose: () => authority.dispose() })
 
     try {
       registrations.push(

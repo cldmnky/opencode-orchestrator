@@ -164,6 +164,21 @@ describe("configuration", () => {
     expect(() => parseOptions({ decomposition: { strategy: true } })).toThrow()
   })
 
+  test("authority mode defaults to off and validates its strict block", () => {
+    expect(parseOptions({}).authority).toEqual({ mode: "off" })
+    expect(parseOptions({ authority: {} }).authority).toEqual({ mode: "off" })
+    expect(parseOptions({ authority: { mode: "enforce" } }).authority).toEqual({ mode: "enforce" })
+    // Unknown modes, wrong types, unknown keys, and typos are rejected.
+    expect(() => parseOptions({ authority: { mode: "on" } })).toThrow()
+    expect(() => parseOptions({ authority: { mode: "enforced" } })).toThrow()
+    expect(() => parseOptions({ authority: { mode: true } })).toThrow()
+    expect(() => parseOptions({ authority: { enforced: true } })).toThrow()
+    expect(() => parseOptions({ authority: { mode: "enforce", extra: 1 } })).toThrow()
+    expect(() => parseOptions({ authorty: { mode: "enforce" } })).toThrow()
+    // The explicit default is byte-for-byte the same parse as omitting the key.
+    expect(parseOptions({ authority: { mode: "off" } })).toEqual(parseOptions({}))
+  })
+
   test("existing configs parse unchanged without a decomposition key", () => {
     const prePhase2 = parseOptions({
       orchestrator: "orchestrator",
@@ -182,6 +197,9 @@ describe("configuration", () => {
       clarify: { mode: "off" },
     })
     expect(prePhase2.decomposition).toEqual({ strategy: "mvp" })
+    // Phase A runtime authority is strictly opt-in: a pre-Phase-A config parses
+    // with the default off and unchanged behavior.
+    expect(prePhase2.authority).toEqual({ mode: "off" })
     expect(prePhase2.max_parallel).toBe(4)
     expect(prePhase2.review).toEqual({ mode: "bounded", max_rounds: 3 })
     expect(prePhase2.commands.polish).toBe(false)

@@ -51,17 +51,138 @@ const CHILD_RULE_ACTION = "phase-a.child.admission"
 const CHILD_RULE_FAILURE = "phase-a child rule installer failed"
 const BUILT_ENTRY = fileURLToPath(new URL("../../dist/index.js", import.meta.url))
 
+/**
+ * Production Phase A authority surface under test (mirrors the constants in
+ * `src/opencode-v2/authority/runtime.ts` and `src/core/permissions.ts`).
+ */
+const AUTHORITY_KEY = "opencode-orchestrator.authority"
+const ENFORCED_ACTION = "orchestrator_validation"
+const RECOVERY_ACTION = "orchestrator_observability"
+const PROTECTED_ACTION = "orchestrator_worktree"
+const UNRELATED_ACTION = "phase-a.unrelated"
+const ROLE_CHILD_AGENT = "implementer"
+const CONTAINMENT_ACTIONS = [
+  "orchestrator_goal",
+  "orchestrator_gh",
+  "orchestrator_worktree",
+  "orchestrator_validation",
+  "orchestrator_observability",
+  "orchestrator_publish",
+  "orchestrator_peer",
+  "orchestrator_gates",
+] as const
+/** Enforced, gate-refusing options: no token snapshot exists, so stop-between-steps fails closed. */
+const REFUSING_OPTIONS = {
+  authority: { mode: "enforce" },
+  goal: { auto_continue: false },
+  budget: { mode: "stop-between-steps", max_tokens: 10 },
+}
+/** Enforced options whose gate allows every dispatch (no budget/review refusal). */
+const ALLOWING_OPTIONS = {
+  authority: { mode: "enforce" },
+  goal: { auto_continue: false },
+}
+/** Default-off options: the same refusing gate exists, but authority stays off. */
+const DEFAULT_OFF_OPTIONS = {
+  goal: { auto_continue: false },
+  budget: { mode: "stop-between-steps", max_tokens: 10 },
+}
+
+function authorityMarker(dispatch: "command" | "continuation"): Record<string, unknown> {
+  return { [AUTHORITY_KEY]: { version: 1, dispatch } }
+}
+
+type AuthorityFaults = {
+  /** When set, the production plugin's child-rule write fails for that session. */
+  failRulesFor: string | undefined
+}
+
+/**
+ * Boots the real built plugin with `authority.mode: "enforce"` (and any other
+ * supplied options). The embedded SDK host registers directly-passed plugin
+ * objects without per-plugin options (verified: `ctx.options` is always `{}`),
+ * so the harness wraps the real `setup` with an options-injected context — the
+ * production code path under test is unchanged. The same wrapper can inject a
+ * fault into the plugin's `permission.rules` dependency for one armed session.
+ */
+function wrapAuthorityPlugin(
+  built: unknown,
+  options: Record<string, unknown>,
+  faults: AuthorityFaults,
+): { id: string; setup(ctx: any): Promise<unknown> } {
+  const plugin = built as { id: string; setup(ctx: any): Promise<unknown> }
+  return {
+    id: plugin.id,
+    setup(ctx) {
+      return plugin.setup({
+        ...ctx,
+        options: { ...ctx.options, ...options },
+        permission: {
+          ...ctx.permission,
+          rules: async (input: { sessionID: string; permissions: unknown }) => {
+            if (faults.failRulesFor !== undefined && faults.failRulesFor === input.sessionID) {
+              throw new Error("phase-a authority fault: child rule installation refused")
+            }
+            return ctx.permission.rules(input)
+          },
+        },
+      })
+    },
+  }
+}
+
+async function withAuthorityHost<T>(
+  options: Record<string, unknown>,
+  run: (input: {
+    host: Awaited<ReturnType<typeof OpenCode.create>>
+    directory: string
+    probe: Probe
+    faults: AuthorityFaults
+  }) => Promise<T>,
+): Promise<T> {
+  const directory = mkdtempSync(join(tmpdir(), "orchestrator-phase-a-authority-"))
+  try {
+    const probe = createProbe()
+    const faults: AuthorityFaults = { failRulesFor: undefined }
+    const host = await OpenCode.create({
+      plugins: [wrapAuthorityPlugin(await loadBuiltPlugin(), options, faults) as any, probe.plugin],
+      config: { directory, content: JSON.stringify({ agents: AGENTS }) },
+    })
+    try {
+      await host.plugin.awaitActivation()
+      await waitFor(async () => {
+        const plugins = (await host.plugin.list({ location: { directory } })).data as Array<{
+          id: string
+          status?: string
+          state?: { status?: string }
+        }>
+        return plugins.some(
+          (plugin) => plugin.id === "opencode-orchestrator" && (plugin.status ?? plugin.state?.status) === "active",
+        )
+      })
+      return await run({ host, directory, probe, faults })
+    } finally {
+      await host.close()
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+    expect(existsSync(directory)).toBe(false)
+  }
+}
+
 type PromptCall = {
   sessionID: string
   messageID: string
   text: string
   delivery: string
+  metadata?: Record<string, unknown>
 }
 
 type EvaluateCall = {
   action: string
   effect: string
   resources: readonly string[]
+  message?: string
 }
 
 type ChildRuleMode = "install" | "fail"
@@ -119,6 +240,8 @@ function createProbe() {
           messageID: event.messageID,
           text: event.prompt.text,
           delivery: event.delivery,
+          // Snapshot: a later plugin hook must see an earlier hook's mutation.
+          ...(event.metadata ? { metadata: { ...event.metadata } } : {}),
         })
         event.prompt.text = `${event.prompt.text} ${PROBE_MARK}`
 
@@ -152,6 +275,7 @@ function createProbe() {
           action: event.action,
           effect: event.effect,
           resources: [...event.resources],
+          ...(typeof event.message === "string" ? { message: event.message } : {}),
         })
         if (event.action.startsWith("phase-a.probe.")) event.effect = "deny"
       })
@@ -178,10 +302,26 @@ const AGENTS = {
   orchestrator: { mode: "primary", model: PROBE_MODEL },
   planner: { mode: "subagent", model: PROBE_MODEL },
   explore: { mode: "subagent", model: PROBE_MODEL },
-  implementer: { mode: "subagent", model: PROBE_MODEL },
+  // The implementer carries an explicit allow for the containment target so the
+  // session-rule effect is isolated from the agent-level rule the orchestrator
+  // transform installs for worker agents: without the session deny the child is
+  // allowed the protected action, and only the installed containment deny
+  // changes that decision.
+  implementer: {
+    mode: "subagent",
+    model: PROBE_MODEL,
+    permissions: [
+      { action: "orchestrator_worktree", resource: "*", effect: "allow" },
+      { action: "*", resource: "*", effect: "allow" },
+    ],
+  },
   reviewer: { mode: "subagent", model: PROBE_MODEL },
   build: { mode: "primary", model: PROBE_MODEL },
-  [CHILD_AGENT]: { mode: "subagent", model: PROBE_MODEL },
+  [CHILD_AGENT]: {
+    mode: "subagent",
+    model: PROBE_MODEL,
+    permissions: [{ action: "*", resource: "*", effect: "allow" }],
+  },
 }
 
 let cachedBuiltPlugin: unknown
@@ -254,6 +394,7 @@ async function createChildViaSubagent(
   probe: Probe,
   parentID: string,
   messageID: string,
+  agent: string = CHILD_AGENT,
 ): Promise<string> {
   const editor = probe.getToolEditor()
   expect(editor).toBeDefined()
@@ -263,7 +404,7 @@ async function createChildViaSubagent(
   let childID: string | undefined
   await expect(
     subagentTool.execute(
-      { agent: CHILD_AGENT, description: "phase-a child", prompt: "measurement only", background: true },
+      { agent, description: "phase-a child", prompt: "measurement only", background: true },
       {
         sessionID: parentID,
         agent: "build",
@@ -641,6 +782,321 @@ describe("phase A pinned-host hook contract", () => {
         resources: ["target"],
       })
       expect(parentDecision.effect).toBe("allow")
+
+      expect(probe.modelRequests).toEqual([])
+      expect(probe.httpRequests).toEqual([])
+    })
+  })
+})
+
+/**
+ * Phase A production authority: the same pinned host, booted with the real
+ * built plugin under `authority.mode: "enforce"` (and default-off controls).
+ *
+ * `REFUSING_OPTIONS` configures `stop-between-steps` with a token limit and no
+ * usage snapshot: the shared dispatch gate fails closed deterministically
+ * without any provider call. `ALLOWING_OPTIONS` keeps the gate allowing.
+ * Every admission uses `delivery: "queue"` with `resume: false`, and every
+ * case asserts zero provider activity.
+ */
+describe("phase A production runtime authority (authority.mode enforce)", () => {
+  test("admits a tagged plugin dispatch and appends bounded admission metadata", async () => {
+    await withAuthorityHost(ALLOWING_OPTIONS, async ({ host, directory, probe }) => {
+      const sessionID = await createSession(host, directory, "phase-a authority allow")
+
+      const admitted = await host.session.prompt({
+        sessionID,
+        text: "phase-a authority dispatch",
+        delivery: "queue",
+        resume: false,
+        metadata: { caller: "kept", ...authorityMarker("command") },
+      })
+
+      // Allowed tagged dispatch: caller metadata is preserved and the bounded
+      // admission marker is appended.
+      expect(admitted.payload.text).toBe(`phase-a authority dispatch ${PROBE_MARK}`)
+      expect(admitted.payload.metadata).toEqual({
+        caller: "kept",
+        [AUTHORITY_KEY]: { version: 1, dispatch: "command", admitted: true },
+      })
+      const inbox = (await host.session.inbox.list({ sessionID })) as Array<{ payload: { metadata?: unknown } }>
+      expect(inbox).toHaveLength(1)
+      expect(inbox[0]?.payload.metadata).toEqual(admitted.payload.metadata)
+
+      // The probe's later prompt hook observed the production hook's mutation,
+      // and the parent (non-child) session gained no permission rules.
+      expect(probe.promptCalls).toHaveLength(1)
+      expect(probe.promptCalls[0]?.metadata).toEqual(admitted.payload.metadata)
+      expect((await host.session.get({ sessionID })).permissions ?? []).toEqual([])
+
+      expect(probe.modelRequests).toEqual([])
+      expect(probe.httpRequests).toEqual([])
+    })
+  })
+
+  test("blocks a tagged dispatch at a refusing gate and creates no inbox item", async () => {
+    await withAuthorityHost(REFUSING_OPTIONS, async ({ host, directory, probe }) => {
+      const sessionID = await createSession(host, directory, "phase-a authority block")
+
+      // The hook throws before admission; the pinned host wraps hook failures.
+      const firstError = await host.session
+        .prompt({
+          sessionID,
+          text: "phase-a blocked dispatch",
+          delivery: "queue",
+          resume: false,
+          metadata: authorityMarker("command"),
+        })
+        .catch((error: unknown) => error as Error)
+      expect(firstError).toBeInstanceOf(Error)
+      expect(firstError.message).toBe("UnexpectedStatus")
+      expect(await host.session.inbox.list({ sessionID })).toEqual([])
+
+      // Retries are not an exactly-once boundary: a second tagged attempt is
+      // re-checked at admission and also refused, still with no inbox item.
+      const secondError = await host.session
+        .prompt({
+          sessionID,
+          text: "phase-a blocked dispatch retry",
+          delivery: "queue",
+          resume: false,
+          metadata: authorityMarker("continuation"),
+        })
+        .catch((error: unknown) => error as Error)
+      expect(secondError).toBeInstanceOf(Error)
+      expect(await host.session.inbox.list({ sessionID })).toEqual([])
+      expect(probe.promptCalls.filter((call) => call.sessionID === sessionID)).toHaveLength(0)
+
+      // Enforcement is limited to tagged plugin-owned dispatches: an untagged
+      // prompt is admitted normally even while the gate refuses.
+      const untagged = await host.session.prompt({
+        sessionID,
+        text: "phase-a untagged prompt",
+        delivery: "queue",
+        resume: false,
+      })
+      expect(untagged.payload.text).toBe(`phase-a untagged prompt ${PROBE_MARK}`)
+      expect(await host.session.inbox.list({ sessionID })).toHaveLength(1)
+
+      expect(probe.modelRequests).toEqual([])
+      expect(probe.httpRequests).toEqual([])
+    })
+  })
+
+  test("downgrades selected plugin permission actions with a truthful message and keeps configured denies final", async () => {
+    await withAuthorityHost(REFUSING_OPTIONS, async ({ host, directory, probe }) => {
+      const sessionID = await createSession(host, directory, "phase-a authority permission")
+
+      // Selected action: the production hook flips allow to deny and sets a
+      // bounded truthful message; the later probe hook observes both.
+      const enforced = await host.permission.create({ sessionID, action: ENFORCED_ACTION, resources: ["target"] })
+      expect(enforced.effect).toBe("deny")
+      const enforcedCall = probe.evaluateCalls.find((call) => call.action === ENFORCED_ACTION)
+      expect(enforcedCall?.effect).toBe("deny")
+      expect(enforcedCall?.message).toContain(`denied ${ENFORCED_ACTION}`)
+      expect(enforcedCall?.message).toContain("budget exceeded")
+      expect(enforcedCall?.message).toContain("stop-between-steps fails closed")
+      expect(enforcedCall?.message?.length).toBeLessThanOrEqual(400)
+
+      // Unrelated action: untouched by the production hook and still observed.
+      const unrelated = await host.permission.create({ sessionID, action: UNRELATED_ACTION, resources: ["target"] })
+      expect(unrelated.effect).toBe("allow")
+      expect(probe.evaluateCalls.filter((call) => call.action === UNRELATED_ACTION).map((call) => call.effect)).toEqual([
+        "allow",
+      ])
+
+      // The read-only bounded-review recovery surface stays available on
+      // purpose: an open circuit must remain recoverable.
+      const recovery = await host.permission.create({ sessionID, action: RECOVERY_ACTION, resources: ["target"] })
+      expect(recovery.effect).toBe("allow")
+
+      // Configured deny is final: it bypasses the whole evaluation hook chain,
+      // including the production hook, while the same session's ask action
+      // still reaches the chain.
+      await host.permission.rules({
+        sessionID,
+        permissions: [
+          { action: ENFORCED_ACTION, resource: "*", effect: "deny" },
+          { action: UNRELATED_ACTION, resource: "*", effect: "ask" },
+        ],
+      })
+      const hookCallsBefore = probe.evaluateCalls.filter((call) => call.action === ENFORCED_ACTION).length
+      const configuredDeny = await host.permission.create({ sessionID, action: ENFORCED_ACTION, resources: ["target"] })
+      expect(configuredDeny.effect).toBe("deny")
+      expect(probe.evaluateCalls.filter((call) => call.action === ENFORCED_ACTION)).toHaveLength(hookCallsBefore)
+      const asked = await host.permission.create({ sessionID, action: UNRELATED_ACTION, resources: ["target"] })
+      expect(asked.effect).toBe("ask")
+      expect(probe.evaluateCalls.filter((call) => call.action === UNRELATED_ACTION).length).toBeGreaterThan(1)
+
+      expect(probe.modelRequests).toEqual([])
+      expect(probe.httpRequests).toEqual([])
+    })
+  })
+
+  test("installs child-only containment denies on a configured-role child during its own admission", async () => {
+    await withAuthorityHost(ALLOWING_OPTIONS, async ({ host, directory, probe }) => {
+      const parentID = await createSession(host, directory, "phase-a containment parent")
+      const inherited = [{ action: "phase-a.keep", resource: "*", effect: "allow" as const }]
+      await host.permission.rules({ sessionID: parentID, permissions: inherited })
+
+      const childID = await createChildViaSubagent(host, probe, parentID, "msg_phase_a_role_child", ROLE_CHILD_AGENT)
+      const childBefore = await host.session.get({ sessionID: childID })
+      expect(childBefore.parentID).toBe(parentID)
+      expect(childBefore.agent).toBe(ROLE_CHILD_AGENT)
+      // The child inherited the parent's rule snapshot and is allowed the
+      // protected action before containment is installed.
+      expect(childBefore.permissions).toEqual(inherited)
+      const childBaseline = await host.permission.create({
+        sessionID: childID,
+        action: PROTECTED_ACTION,
+        resources: ["target"],
+      })
+      expect(childBaseline.effect).toBe("allow")
+      expect(probe.evaluateCalls.filter((call) => call.action === PROTECTED_ACTION)).toHaveLength(1)
+
+      const admitted = await host.session.prompt({
+        sessionID: childID,
+        text: "phase-a child containment",
+        delivery: "queue",
+        resume: false,
+      })
+      expect(admitted.payload.text).toBe(`phase-a child containment ${PROBE_MARK}`)
+
+      // Existing child rules are preserved verbatim; exactly the missing exact
+      // denies are appended once each.
+      const childAfter = await host.session.get({ sessionID: childID })
+      const childRules = (childAfter.permissions ?? []) as Array<{ action: string; resource: string; effect: string }>
+      expect(childRules.slice(0, inherited.length)).toEqual(inherited)
+      expect(childRules).toHaveLength(inherited.length + CONTAINMENT_ACTIONS.length)
+      for (const action of CONTAINMENT_ACTIONS) {
+        expect(
+          childRules.filter((rule) => rule.action === action && rule.resource === "*" && rule.effect === "deny"),
+          action,
+        ).toHaveLength(1)
+      }
+
+      // The installed session deny is final for the protected action: deny with
+      // no new evaluation-hook event for that action.
+      const childDecision = await host.permission.create({
+        sessionID: childID,
+        action: PROTECTED_ACTION,
+        resources: ["target"],
+      })
+      expect(childDecision.effect).toBe("deny")
+      expect(probe.evaluateCalls.filter((call) => call.action === PROTECTED_ACTION)).toHaveLength(1)
+
+      // The parent keeps its rule set and its allow decision: no parent rule is
+      // installed or cleared.
+      expect((await host.session.get({ sessionID: parentID })).permissions).toEqual(inherited)
+      const parentDecision = await host.permission.create({
+        sessionID: parentID,
+        action: PROTECTED_ACTION,
+        resources: ["target"],
+      })
+      expect(parentDecision.effect).toBe("allow")
+      expect(probe.evaluateCalls.filter((call) => call.action === PROTECTED_ACTION)).toHaveLength(2)
+
+      // A non-role child (custom agent, still parented) is never touched.
+      const otherChildID = await createChildViaSubagent(host, probe, parentID, "msg_phase_a_nonrole_child")
+      const otherBefore = await host.session.get({ sessionID: otherChildID })
+      expect(otherBefore.parentID).toBe(parentID)
+      expect(otherBefore.agent).toBe(CHILD_AGENT)
+      const otherBaseline = await host.permission.create({
+        sessionID: otherChildID,
+        action: PROTECTED_ACTION,
+        resources: ["target"],
+      })
+      expect(otherBaseline.effect).toBe("allow")
+      await host.session.prompt({
+        sessionID: otherChildID,
+        text: "phase-a non-role child admission",
+        delivery: "queue",
+        resume: false,
+      })
+      expect((await host.session.get({ sessionID: otherChildID })).permissions ?? []).toEqual(inherited)
+
+      // A later new message on the role child is idempotent: identical rule set,
+      // no duplicate denies.
+      await host.session.prompt({
+        sessionID: childID,
+        text: "phase-a child containment 2",
+        delivery: "queue",
+        resume: false,
+      })
+      const childAgain = await host.session.get({ sessionID: childID })
+      expect(childAgain.permissions).toEqual(childAfter.permissions)
+      expect(
+        ((childAgain.permissions ?? []) as Array<{ action: string; resource: string; effect: string }>).filter(
+          (rule) => rule.action === PROTECTED_ACTION && rule.resource === "*" && rule.effect === "deny",
+        ),
+      ).toHaveLength(1)
+
+      expect(probe.modelRequests).toEqual([])
+      expect(probe.httpRequests).toEqual([])
+    })
+  })
+
+  test("blocks child admission and creates no inbox item when containment installation fails", async () => {
+    await withAuthorityHost(ALLOWING_OPTIONS, async ({ host, directory, probe, faults }) => {
+      const parentID = await createSession(host, directory, "phase-a containment failure parent")
+      const inherited = [{ action: "phase-a.keep", resource: "*", effect: "allow" as const }]
+      await host.permission.rules({ sessionID: parentID, permissions: inherited })
+      const childID = await createChildViaSubagent(host, probe, parentID, "msg_phase_a_containment_failure", ROLE_CHILD_AGENT)
+
+      // Fault injection: only this child's rule write inside the production
+      // prompt hook fails.
+      faults.failRulesFor = childID
+
+      const admissionError = await host.session
+        .prompt({ sessionID: childID, text: "phase-a failing containment", delivery: "queue", resume: false })
+        .catch((error: unknown) => error as Error)
+      expect(admissionError).toBeInstanceOf(Error)
+      expect(admissionError.message).toBe("UnexpectedStatus")
+
+      // The failed hook prevented admission: no inbox item and no rule write.
+      expect(await host.session.inbox.list({ sessionID: childID })).toEqual([])
+      expect((await host.session.get({ sessionID: childID })).permissions).toEqual(inherited)
+
+      // The failure is contained to the child; the parent is unchanged.
+      expect((await host.session.get({ sessionID: parentID })).permissions).toEqual(inherited)
+
+      expect(probe.modelRequests).toEqual([])
+      expect(probe.httpRequests).toEqual([])
+    })
+  })
+
+  test("default off registers no authority behavior even with a refusing gate", async () => {
+    await withAuthorityHost(DEFAULT_OFF_OPTIONS, async ({ host, directory, probe }) => {
+      const sessionID = await createSession(host, directory, "phase-a default off")
+
+      // A tagged prompt is admitted unchanged: no production admission marker
+      // is appended and the caller metadata is byte-identical.
+      const tagged = { caller: "kept", ...authorityMarker("command") }
+      const admitted = await host.session.prompt({
+        sessionID,
+        text: "phase-a default-off dispatch",
+        delivery: "queue",
+        resume: false,
+        metadata: tagged,
+      })
+      expect(admitted.payload.metadata).toEqual(tagged)
+      expect(probe.promptCalls[0]?.metadata).toEqual(tagged)
+
+      // No permission downgrade: the selected action stays allow.
+      const enforced = await host.permission.create({ sessionID, action: ENFORCED_ACTION, resources: ["target"] })
+      expect(enforced.effect).toBe("allow")
+      expect(probe.evaluateCalls.find((call) => call.action === ENFORCED_ACTION)?.effect).toBe("allow")
+
+      // No containment rules are installed on a configured-role child.
+      const childID = await createChildViaSubagent(host, probe, sessionID, "msg_phase_a_default_off_child", ROLE_CHILD_AGENT)
+      await host.session.prompt({ sessionID: childID, text: "phase-a default-off child", delivery: "queue", resume: false })
+      expect((await host.session.get({ sessionID: childID })).permissions ?? []).toEqual([])
+      const childDecision = await host.permission.create({
+        sessionID: childID,
+        action: PROTECTED_ACTION,
+        resources: ["target"],
+      })
+      expect(childDecision.effect).toBe("allow")
 
       expect(probe.modelRequests).toEqual([])
       expect(probe.httpRequests).toEqual([])

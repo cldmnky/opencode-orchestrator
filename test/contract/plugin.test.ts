@@ -424,6 +424,124 @@ describe("server plugin contract", () => {
     expect(stream.closed).toBe(true)
   })
 
+  test("authority mode defaults to off and enforce registers exactly the authority hooks and cleans them up", async () => {
+    type Harness = {
+      context: Context
+      disposed: string[]
+      sessionHooks: string[]
+      permissionHooks: string[]
+      ruleWrites: unknown[]
+      stream: AsyncIterable<unknown> & { closed: boolean }
+    }
+    const build = (options: Record<string, unknown>): Harness => {
+      const agents = seedAgents()
+      const disposed: string[] = []
+      const sessionHooks: string[] = []
+      const permissionHooks: string[] = []
+      const ruleWrites: unknown[] = []
+      const stream = eventStream()
+      const registration = (name: string) => ({
+        dispose: async () => {
+          disposed.push(name)
+        },
+      })
+      const draft = {
+        list: () => [...agents.values()],
+        get: (id: string) => agents.get(id),
+        update: (id: string, update: (agent: any) => void) => {
+          const agent = agents.get(id)
+          if (agent) update(agent)
+        },
+      }
+      const storage = new Map<string, unknown>()
+      const context = {
+        options,
+        location: { directory: "/workspace", project: { id: "project" } },
+        agent: {
+          list: async () => [...agents.values()],
+          get: async ({ agentID }: { agentID: string }) => agents.get(agentID),
+          transform: async (callback: (draft: any) => void) => {
+            callback(draft)
+            return registration("agent")
+          },
+        },
+        command: {
+          list: async () => [],
+          transform: async (callback: (draft: { add(definition: unknown): void }) => void) => {
+            callback({ add: () => {} })
+            return registration("command")
+          },
+        },
+        tool: {
+          transform: async (callback: (draft: any) => void) => {
+            callback({ add: () => {}, namespace: () => {}, list: () => [], get: () => undefined })
+            return registration("tool")
+          },
+          hook: async (name: string) => registration(name),
+        },
+        rpc: {
+          register: async () => registration("rpc"),
+        },
+        event: {
+          subscribe: () => stream,
+        },
+        storage: {
+          get: async (key: string) => storage.get(key),
+          set: async (key: string, value: unknown) => void storage.set(key, value),
+          remove: async (key: string) => void storage.delete(key),
+        },
+        session: {
+          hook: async (name: string) => {
+            sessionHooks.push(name)
+            return registration(`session:${name}`)
+          },
+          switchAgent: async () => {},
+          switchModel: async () => {},
+          prompt: async () => {},
+          get: async () => ({}),
+        },
+        permission: {
+          hook: async (name: string) => {
+            permissionHooks.push(name)
+            return registration(`permission:${name}`)
+          },
+          rules: async (input: unknown) => void ruleWrites.push(input),
+        },
+      } as unknown as Context
+      return { context, disposed, sessionHooks, permissionHooks, ruleWrites, stream }
+    }
+
+    // Default: byte-identical to the pre-authority registration surface.
+    const defaultHarness = build({ goal: { auto_continue: false } })
+    const defaultCleanup = await orchestratorPlugin.setup(defaultHarness.context)
+    expect(defaultHarness.sessionHooks).toEqual(["context"])
+    expect(defaultHarness.permissionHooks).toEqual([])
+    expect(defaultHarness.ruleWrites).toEqual([])
+    await defaultCleanup?.()
+    expect(defaultHarness.disposed).toEqual(["execute.after", "session:context", "rpc", "tool", "command", "agent"])
+    expect(defaultHarness.stream.closed).toBe(true)
+
+    // Enforce: exactly one prompt hook and one evaluate hook (registered before
+    // the context hook), both owned and disposed by the plugin cleanup.
+    const enforceHarness = build({ authority: { mode: "enforce" }, goal: { auto_continue: false } })
+    const enforceCleanup = await orchestratorPlugin.setup(enforceHarness.context)
+    expect(enforceHarness.sessionHooks).toEqual(["prompt", "context"])
+    expect(enforceHarness.permissionHooks).toEqual(["evaluate"])
+    expect(enforceHarness.ruleWrites).toEqual([])
+    await enforceCleanup?.()
+    expect(enforceHarness.disposed).toEqual([
+      "execute.after",
+      "session:context",
+      "rpc",
+      "tool",
+      "command",
+      "agent",
+      "permission:evaluate",
+      "session:prompt",
+    ])
+    expect(enforceHarness.stream.closed).toBe(true)
+  })
+
   test("strict decomposition changes prompt emphasis only, never the registered surface", async () => {
     const agents = seedAgents()
     const commands: Array<{ name: string }> = []

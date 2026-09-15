@@ -408,6 +408,17 @@ Delivered as one slice on `feat/g3-phase-0-plain-language`; no gate, tool, schem
 - Ship the hook-semantics test matrix, then opt-in enforcement (N1) and the rule lifecycle around `worktree_enter` (N2).
 - Exit evidence: pinned-host probe results; enforcement mode with byte-identical defaults; containment demonstrated in a contract test.
 
+**Probe progress (2026-09-15) — measurement only; N1 and N2 enforcement remain unimplemented.** The new `test/contract/phase-a-hooks.test.ts` boots the built `dist/index.js` entry in isolated `OpenCode.create` hosts next to a test-only probe plugin and records the pinned beta-19507 host's actual behavior: 5/5 tests green with 52 `expect()` calls (`bun test test/contract/phase-a-hooks.test.ts`), and the full `bun run typecheck` / `bun test` (844 pass, 1 skip, 0 fail) / `bun run build` chain green. The suite imports the built entry, so `bun run build` must run before `bun test`. Measured semantics:
+
+- `session.hook("prompt")` runs once per admission on the owned draft; mutations to `event.prompt.text` become the admitted inbox payload returned to the caller and listed by `session.inbox.list`.
+- Resubmitting an already-admitted (pending) message ID returns the original admission without re-running the hook and without creating a second inbox item.
+- `permission.hook("evaluate")` observes both `allow` (agent rule) and `ask` (session rule, last match wins) decisions; a hook mutation to `deny` is honored in the resulting decision.
+- A configured `deny` rule is final and bypasses the evaluation hook (zero hook events for that action while the same session's `ask` action still reaches the hook).
+- A child session created through the built-in `subagent` tool inherits the parent's `permission.rules` as a creation-time snapshot: the inherited `deny` blocks the tested action for the child, a child created before the rule was set is unaffected, and no rule is written to the child session itself.
+- Harness boundaries recorded for N1/N2: the public `session.create` surface (client and plugin context) silently drops `parentID`, so the probe reaches the host's `Session.create({ parentID })` inheritance path through the built-in `subagent` tool and aborts it at the first progress update — after child creation, before any prompt admission or model dispatch. No provider call is possible in the suite (all agents use unresolvable probe models; prompts are admitted with `delivery: "queue"` and `resume: false`; a throwing `http.request` hook guards every send) and every case asserts zero `model.request`/`http.request` hook events.
+
+Phase A exit evidence is not yet met: there is no N1 enforcement mode, no byte-identical-defaults proof, and no containment contract test. The probe results above are the pinned-host input those items must build on.
+
 ### Phase B — Worktree Migration (N3)
 
 - Compatibility probe of `ctx.worktree` (create/list/refresh/`worktree.updated`, `Worktree.OperationError`) against synthetic clean/dirty/moved/orphaned states.

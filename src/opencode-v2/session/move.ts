@@ -15,6 +15,7 @@ import {
   writeWorktree,
   type StorageLike as WorktreeStorageLike,
 } from "../worktree/state.js"
+import { redact } from "../process/redact.js"
 import type { SessionMoveCoordinator } from "./move-coordinator.js"
 
 /**
@@ -42,6 +43,13 @@ import type { SessionMoveCoordinator } from "./move-coordinator.js"
  * Goal/run/halt state is NOT touched here: those keys are scoped to the
  * plugin's stable origin project, so they remain findable after the move
  * (see `stableProjectID` in `../goal/state.ts`).
+ *
+ * Every human-readable target/session/error text in a failure reason passes
+ * through the canonical process redactor (`../process/redact.js`), so known
+ * secret shapes never reach a transcript. This path threads no caller-known
+ * exact secrets (there is no secret input here); the exact-secret layer runs
+ * only where callers supply one (GitHub/worktree tool deps). See
+ * `docs/v4-redaction-threat-model.md`.
  */
 
 export type MoveSessionDeps = {
@@ -377,8 +385,4 @@ function wait(milliseconds: number): Promise<void> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-function redact(value: string): string {
-  return value.replace(/(api[_-]?key|token|secret|password)\s*[:=]\s*\S+/gi, "$1=[redacted]")
 }

@@ -282,8 +282,81 @@ describe("session move helper", () => {
     if (!outcome.ok) {
       expect(outcome.reason).toContain("session move failed")
       expect(outcome.reason).not.toContain("leaked-value")
-      // The keyed secret value must be redacted even though the key stays.
-      expect(outcome.reason).toMatch(/client_secret=\[redacted\]/)
+      // The canonical redactor keeps the key readable and uses its `key: [redacted]` form.
+      expect(outcome.reason).toContain("client_secret: [redacted]")
+    }
+  })
+
+  test("redacts a github-token-shaped fixture from session.move failures", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-move-"))
+    mkdirSync(join(directory, "app"))
+    const session = sessionFixture({ id: "s1", projectID: "origin", directory })
+    const failing: MoveSessionDeps["session"] = {
+      get: session.get,
+      move: async () => {
+        throw new Error("gh auth failed for ghp_EXAMPLEFAKETOKENFORTEST123456")
+      },
+    }
+    const outcome = await moveSessionToDirectory(buildDeps(failing, memStorage(), directory), {
+      sessionID: "s1",
+      target: "app",
+    })
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      expect(outcome.reason).toContain("session move failed")
+      expect(outcome.reason).not.toContain("ghp_")
+      expect(outcome.reason).not.toContain("EXAMPLEFAKETOKENFORTEST123456")
+      expect(outcome.reason).toContain("[redacted]")
+    }
+  })
+
+  test("redacts a bearer-shaped fixture from the post-move verification failure path", async () => {
+    // The session's own directory carries the fixture so that a projection
+    // that never advances makes the reported location pass through redaction.
+    const root = mkdtempSync(join(tmpdir(), "orchestrator-move-"))
+    const directory = join(root, "Bearer FAKE-BEARER-TOKEN-FOR-TEST")
+    mkdirSync(join(directory, "app"), { recursive: true })
+    const session = sessionFixture({ id: "s1", projectID: "origin", directory })
+    const stuck: MoveSessionDeps["session"] = {
+      get: session.get,
+      move: async () => {
+        // Accepted by the API, but the session projection never advances.
+      },
+    }
+    const outcome = await moveSessionToDirectory(buildDeps(stuck, memStorage(), directory), {
+      sessionID: "s1",
+      target: "app",
+    })
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      expect(outcome.reason).toContain("verification failed")
+      expect(outcome.reason).not.toContain("FAKE-BEARER-TOKEN-FOR-TEST")
+      expect(outcome.reason).toContain("[redacted]")
+    }
+  })
+
+  test("keeps the caller-known exact-secret limitation visible on the move path", async () => {
+    // `moveSessionToDirectory` threads no caller-known secrets, so the
+    // canonical exact-secret layer is unreachable from here. This pins the
+    // current boundary for the V4 threat model: known shapes are redacted, a
+    // caller-only secret that matches no pattern is not.
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-move-"))
+    mkdirSync(join(directory, "app"))
+    const session = sessionFixture({ id: "s1", projectID: "origin", directory })
+    const failing: MoveSessionDeps["session"] = {
+      get: session.get,
+      move: async () => {
+        throw new Error("boom FAKEEXACTONLYSECRETNOTPATTERNED and token=FAKE-KEYED-VALUE")
+      },
+    }
+    const outcome = await moveSessionToDirectory(buildDeps(failing, memStorage(), directory), {
+      sessionID: "s1",
+      target: "app",
+    })
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      expect(outcome.reason).toContain("FAKEEXACTONLYSECRETNOTPATTERNED")
+      expect(outcome.reason).not.toContain("FAKE-KEYED-VALUE")
     }
   })
 

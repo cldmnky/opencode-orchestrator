@@ -113,6 +113,31 @@ const hintsOptions = z
   .default({ mode: "off" })
 
 /**
+ * N5 bounded retry policy mode: `off` (default — no retry hook is registered
+ * and every existing behavior stays byte-identical) or `bounded` (registers
+ * one orchestrator-session `session.hook("retry")` that keeps only
+ * positively-classified host-proposed retries, caps their delays, refuses
+ * ambiguous classes and bursts, and never converts a terminal decision into a
+ * retry).
+ *
+ * The policy only ever narrows what the host proposes: the built-in maximum
+ * attempt count remains a hard limit, a host `retry: false` is never changed
+ * to `true`, and malformed delays are left untouched so the host falls back
+ * to its computed delay. `max_delay_ms` bounds every accepted delay and is
+ * itself bounded by the host's own 15-minute retry-after ceiling.
+ */
+export const RETRY_MODES = ["off", "bounded"] as const
+export type RetryMode = (typeof RETRY_MODES)[number]
+
+const retryOptions = z
+  .object({
+    mode: z.enum(RETRY_MODES).default("off"),
+    max_delay_ms: z.number().int().nonnegative().max(900_000).default(30_000),
+  })
+  .strict()
+  .default({ mode: "off", max_delay_ms: 30_000 })
+
+/**
  * Decomposition strategy: `mvp` (default — the current Phase 1 prompt
  * guidance, unchanged) or `strict` (adds extra prompt-level emphasis on
  * preferring the smallest coherent end-to-end slice). Prompt-preference
@@ -249,6 +274,7 @@ export const OrchestratorOptionsSchema = z
     decomposition: decompositionOptions,
     authority: authorityOptions,
     hints: hintsOptions,
+    retry: retryOptions,
   })
   .strict()
   .superRefine((value, context) => {
@@ -299,6 +325,7 @@ export type DecompositionOptions = z.infer<typeof decompositionOptions>
 export type PublishOptions = z.infer<typeof publishOptions>
 export type AuthorityOptions = z.infer<typeof authorityOptions>
 export type HintsOptions = z.infer<typeof hintsOptions>
+export type RetryOptions = z.infer<typeof retryOptions>
 
 export function parseOptions(value: unknown): OrchestratorOptions {
   const parsed = OrchestratorOptionsSchema.safeParse(value ?? {})

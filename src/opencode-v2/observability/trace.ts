@@ -255,6 +255,98 @@ export function parseGenerationHint(value: unknown): GenerationHintRecord | unde
   return parsed.success ? parsed.data : undefined
 }
 
+/* ------------------------------------------------------------------ */
+/* N5 bounded retry-attempt metadata (opt-in `retry.mode: "bounded"`)  */
+/* ------------------------------------------------------------------ */
+
+export const RETRY_TRACE_RECORD_VERSION = 1
+/**
+ * Fixed retry-class vocabulary shared by the policy and the recorded metadata.
+ * `rate-limited` and `provider-internal` are the classes a bounded policy may
+ * keep; `transport` and `unknown` are ambiguous (the hook cannot verify
+ * delivery or establish the class); `terminal` is never retried.
+ */
+export const RETRY_CLASSES = ["rate-limited", "provider-internal", "transport", "unknown", "terminal"] as const
+export type RetryClass = (typeof RETRY_CLASSES)[number]
+/** Fixed retry-action vocabulary; every recorded attempt carries exactly one. */
+export const RETRY_ACTIONS = ["host-terminal", "keep", "cap-delay", "veto-class", "veto-burst"] as const
+export type RetryAction = (typeof RETRY_ACTIONS)[number]
+/** Schema cap for the recorded physical attempt number (host attempts are tiny). */
+export const RETRY_TRACE_MAX_ATTEMPT = 64
+
+/**
+ * A bounded metadata record describing the retry decisions the N5 policy has
+ * evaluated for ONE session. It is trace-shaped metadata (versioned, strict,
+ * bounded) and carries no prompts, transcripts, error messages, model output,
+ * or credentials: only counts, fixed enum values, and timestamps.
+ */
+export const retryTraceSchema = z
+  .object({
+    version: z.literal(1),
+    sessionID: z.string().min(1),
+    /** Every retry-hook observation, including terminal decisions and vetoes. */
+    attempts: z.number().int().nonnegative(),
+    kept: z.number().int().nonnegative(),
+    capped: z.number().int().nonnegative(),
+    vetoedClass: z.number().int().nonnegative(),
+    vetoedBurst: z.number().int().nonnegative(),
+    /** Most recent host-proposed physical attempt (1-based; first retry is 2). */
+    lastAttempt: z.number().int().min(1).max(RETRY_TRACE_MAX_ATTEMPT).optional(),
+    lastClass: z.enum(RETRY_CLASSES).optional(),
+    lastAction: z.enum(RETRY_ACTIONS).optional(),
+    firstAt: z.number().finite(),
+    lastAt: z.number().finite(),
+    updatedAt: z.number().finite(),
+  })
+  .strict()
+export type RetryTrace = z.infer<typeof retryTraceSchema>
+
+export type RetryTraceInput = { class: RetryClass; action: RetryAction; attempt: number }
+
+export function newRetryTrace(sessionID: string, now = Date.now()): RetryTrace {
+  return {
+    version: RETRY_TRACE_RECORD_VERSION,
+    sessionID,
+    attempts: 0,
+    kept: 0,
+    capped: 0,
+    vetoedClass: 0,
+    vetoedBurst: 0,
+    firstAt: now,
+    lastAt: now,
+    updatedAt: now,
+  }
+}
+
+/** Pure bounded counter update: one observed attempt, clamped to the schema caps. */
+export function recordRetryAction(trace: RetryTrace, input: RetryTraceInput, now = Date.now()): RetryTrace {
+  const attempt = boundedAttempt(input.attempt)
+  return {
+    ...trace,
+    attempts: trace.attempts + 1,
+    kept: trace.kept + (input.action === "keep" ? 1 : 0),
+    capped: trace.capped + (input.action === "cap-delay" ? 1 : 0),
+    vetoedClass: trace.vetoedClass + (input.action === "veto-class" ? 1 : 0),
+    vetoedBurst: trace.vetoedBurst + (input.action === "veto-burst" ? 1 : 0),
+    ...(attempt === undefined ? {} : { lastAttempt: attempt }),
+    lastClass: input.class,
+    lastAction: input.action,
+    lastAt: now,
+    updatedAt: now,
+  }
+}
+
+/** Strict, bounded entry: returns the parsed record or undefined for malformed/unknown data. */
+export function parseRetryTrace(value: unknown): RetryTrace | undefined {
+  const parsed = retryTraceSchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
+}
+
+function boundedAttempt(value: number): number | undefined {
+  if (!Number.isFinite(value) || value < 1) return undefined
+  return Math.min(RETRY_TRACE_MAX_ATTEMPT, Math.trunc(value))
+}
+
 function clampCount(value: number, cap: number): number {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(cap, Math.trunc(value)))
@@ -263,6 +355,11 @@ function clampCount(value: number, cap: number): number {
 /** Storage key for the single bounded current trace record per session. */
 export function traceStorageKey(location: { project: { id: string } }, sessionID: string): string {
   return `trace/v1/${segment(location.project.id)}/${segment(sessionID)}`
+}
+
+/** Storage key for the single bounded N5 retry-attempt record per session. */
+export function retryTraceStorageKey(location: { project: { id: string } }, sessionID: string): string {
+  return `retry-trace/v1/${segment(location.project.id)}/${segment(sessionID)}`
 }
 
 function bumpToolUsage(

@@ -13,11 +13,16 @@ import {
   applyToolCallStart,
   generationHintSchema,
   newGenerationHint,
+  newRetryTrace,
   newTraceSummary,
   parseGenerationHint,
+  parseRetryTrace,
   parseTraceSummary,
+  recordRetry,
+  recordRetryAction,
   recordStep,
   recordUsageSnapshot,
+  retryTraceStorageKey,
   traceStorageKey,
   traceSummarySchema,
   usageTokensTotal,
@@ -107,7 +112,7 @@ function hookFixture(stream: AsyncIterable<unknown>) {
 const tick = () => new Promise((resolve) => setTimeout(resolve, 15))
 
 describe("S3/V1 strict configuration", () => {
-  test("defaults preserve previous behavior: trace off, budget advisory, review prompt with 2 rounds", () => {
+  test("defaults preserve previous behavior: trace off, budget advisory, review prompt with 2 rounds, retry off", () => {
     const options = parseOptions({})
     expect(options.trace).toEqual({ mode: "off" })
     expect(options.budget).toEqual({ mode: "advisory" })
@@ -115,6 +120,9 @@ describe("S3/V1 strict configuration", () => {
       expect(options.budget[name]).toBeUndefined()
     }
     expect(options.review).toEqual({ mode: "prompt", max_rounds: 2 })
+    // N5 defaults preserve previous behavior exactly: off with the documented
+    // bounded cap, and no S3 runtime activation.
+    expect(options.retry).toEqual({ mode: "off", max_delay_ms: 30_000 })
     expect(shouldStartObservability(options)).toBe(false)
   })
 
@@ -144,12 +152,33 @@ describe("S3/V1 strict configuration", () => {
     expect(() => parseOptions({ review: { extra: 1 } })).toThrow()
     expect(() => parseOptions({ review: { max_rounds: 0 } })).toThrow()
     expect(() => parseOptions({ review: { max_rounds: 9 } })).toThrow()
+    // N5 retry block: strict both ways.
+    expect(() => parseOptions({ retry: { mode: "auto" } })).toThrow()
+    expect(() => parseOptions({ retry: { extra: true } })).toThrow()
+    expect(() => parseOptions({ retry: { max_delay_ms: -1 } })).toThrow()
+    expect(() => parseOptions({ retry: { max_delay_ms: 1.5 } })).toThrow()
+    expect(() => parseOptions({ retry: { max_delay_ms: 900_001 } })).toThrow()
+    expect(() => parseOptions({ retry: { max_delay_ms: Number.POSITIVE_INFINITY } })).toThrow()
+    expect(parseOptions({ retry: { mode: "bounded", max_delay_ms: 0 } }).retry).toEqual({
+      mode: "bounded",
+      max_delay_ms: 0,
+    })
   })
 
   test("a single enabled mode is enough to activate the runtime", () => {
     expect(shouldStartObservability(parseOptions({ trace: { mode: "memory" } }))).toBe(true)
     expect(shouldStartObservability(parseOptions({ budget: { mode: "stop-between-steps" } }))).toBe(true)
     expect(shouldStartObservability(parseOptions({ review: { mode: "bounded" } }))).toBe(true)
+  })
+
+  test("retry mode never activates the S3 observability runtime by itself", () => {
+    // N5 owns its hook and its bounded retry trace record; the S3 runtime,
+    // its tool registration, and its event counting are untouched by the
+    // retry configuration and stay off unless their own modes are enabled.
+    const options = parseOptions({ retry: { mode: "bounded" } })
+    expect(shouldStartObservability(options)).toBe(false)
+    const withTrace = parseOptions({ retry: { mode: "bounded" }, trace: { mode: "memory" } })
+    expect(shouldStartObservability(withTrace)).toBe(true)
   })
 })
 
@@ -278,6 +307,29 @@ describe("bounded metadata-only trace summaries", () => {
     summary = recordStep(summary, 1001)
     summary = recordStep(summary, 1002)
     expect(summary.steps).toBe(2)
+  })
+
+  test("the S3 retry counter stays independent from the bounded retry trace record", () => {
+    // S3 `retries` counts host-scheduled retries from `session.retry.scheduled`
+    // events; the N5 record counts policy-observed attempts. They are separate
+    // records under separate keys and never double count each other.
+    let summary = newTraceSummary("s1", "memory", 1000)
+    summary = recordRetry(summary, 1001)
+    summary = recordRetry(summary, 1002)
+    expect(summary.retries).toBe(2)
+
+    const retryTrace = recordRetryAction(
+      newRetryTrace("s1", 1000),
+      { class: "rate-limited", action: "cap-delay", attempt: 2 },
+      1001,
+    )
+    expect(retryTrace.attempts).toBe(1)
+    expect(retryTrace.capped).toBe(1)
+    expect(summary.retries).toBe(2)
+    expect(retryTraceStorageKey(location, "s1")).toBe("retry-trace/v1/project/s1")
+    expect(traceStorageKey(location, "s1")).toBe("trace/v1/project/s1")
+    expect(parseRetryTrace(retryTrace)).toBeDefined()
+    expect(parseTraceSummary(summary)).toBeDefined()
   })
 
   test("strict schema rejects raw payload fields and malformed records", () => {

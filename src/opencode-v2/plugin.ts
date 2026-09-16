@@ -18,6 +18,7 @@ import { addObservabilityTools } from "./observability/tools.js"
 import { addPublishTools } from "./publish/tools.js"
 import { addPeerTools } from "./peers/tools.js"
 import { createDispatchGate, shouldStartObservability, startObservability } from "./observability/runtime.js"
+import { createRetryPolicy, retryPolicyEnabled } from "./observability/retry.js"
 import { shouldStartAuthority, startAuthority } from "./authority/runtime.js"
 import { addAuthorityTools } from "./authority/tools.js"
 import { startWorktreeEventSync } from "./worktree/events.js"
@@ -80,6 +81,15 @@ export const orchestratorPlugin = (Plugin.define as any)({
     if (observability) registrations.push({ dispose: () => observability.dispose() })
     const controlGate = createDispatchGate({ options, storage: ctx.storage, location: ctx.location, runtime: observability })
     const moveCoordinator = createSessionMoveCoordinator()
+
+    // N5 bounded retry policy (opt-in): when `retry.mode: "bounded"` is
+    // configured, one session retry hook is registered below and filtered to
+    // orchestrator sessions. `retry.mode: "off"` (the default) creates no
+    // policy and registers no hook, so every existing behavior stays
+    // byte-identical. The host's own maximum attempt count stays the hard limit.
+    const retryPolicy = retryPolicyEnabled(options)
+      ? createRetryPolicy({ options, storage: ctx.storage, location: ctx.location })
+      : undefined
 
     // Phase A runtime authority (opt-in): N1 admission/permission enforcement
     // and N2 child-only containment. `authority.mode: "off"` (the default)
@@ -267,6 +277,14 @@ export const orchestratorPlugin = (Plugin.define as any)({
           })
         }),
       )
+
+      // N5 bounded retry policy (opt-in): the hook is registered only when
+      // `retry.mode: "bounded"` is configured. It filters to orchestrator
+      // sessions inside the handler and never throws into the model request;
+      // disposal is handled by the shared registration cleanup below.
+      if (retryPolicy) {
+        registrations.push(await ctx.session.hook("retry", (event) => retryPolicy.observe(event)))
+      }
 
       registrations.push(
         await ctx.tool.hook("execute.after", (event) => {

@@ -2,9 +2,11 @@
 
 **Date:** 2026-09-16
 **Status:** Slice 1 implemented (durable per-step receipts, schema + storage helpers,
-goal-continuation wiring, session-end cleanup). This inventory is a **design/reference
+goal-continuation wiring, session-end cleanup), plus the completed-marking follow-up: the
+next idle edge records the previously delivered step as `completed` (best-effort,
+memory-tracked, under the session lock). This inventory is a **design/reference
 artifact**: it classifies existing steps and names the duplicate-PR risk and the
-branch-name pre-check. **Nothing in slice 1 enforces any classification** — the publish
+branch-name pre-check. **Nothing here enforces any classification** — the publish
 chain, admission decisions, and every gate are byte-identical to before.
 
 **Scope:** the publication chain owned by the orchestrator (`worktree_sync` →
@@ -22,8 +24,11 @@ publish behavior change, no exactly-once claim.
 Durable per-step receipts (`step/v1/<project>/<session>/<stepIndex>`,
 `src/opencode-v2/orchestration/step-state.ts`) record what the plugin tried:
 `pending` (reserved), `dispatched` (delivery confirmed), `completed`, `failed`, with an
-idempotency key, attempt number, timestamps, optional cursor, and a bounded/redacted
-error class and message.
+idempotency key, attempt number, timestamps, optional cursor, a bounded/redacted failure
+class and message, and an optional bounded/redacted completion message. The goal
+continuation now writes `completed` at the next idle edge after a delivery — an
+observation that the delivered turn ended, never proof that it succeeded. `failed` is
+still only recorded state for later slices.
 
 A receipt can make a replay **detectable**. It cannot make a replay **safe**: storage
 has no transactions, the session lock is process-local, and the GitHub API is an
@@ -70,7 +75,7 @@ Two standing rules:
 
 | Step | Class | Reasoning |
 |---|---|---|
-| Goal-continuation prompt delivery | ambiguous for side-effecting turns; replay-safe for read-only turns | The receipt distinguishes `pending` (reserved under the session lock) from `dispatched` (prompt queued). It cannot prove the model turn completed or that its side effects are unique; the idle-edge dedupe maps are process-local and volatile. |
+| Goal-continuation prompt delivery | ambiguous for side-effecting turns; replay-safe for read-only turns | The receipt distinguishes `pending` (reserved under the session lock) from `dispatched` (prompt queued), and the next idle edge marks it `completed` from an in-memory per-session index. Completion is an observation that the session went idle after delivery, not proof the turn succeeded or that its side effects are unique; the dedupe/completion maps are process-local and volatile. |
 
 ## 4. Duplicate PR risk and the branch-name pre-check
 
@@ -111,22 +116,37 @@ this slice.
 ## 5. What slice 1 actually adds
 
 - `step/v1/<project>/<session>/<stepIndex>` records with a strict version-1 schema,
-  bounded/redacted error text, and storage helpers (read, write, remove, bounded scan
-  listing with pagination, last-completed lookup, session-prefix removal). Missing
-  `storage.scan` returns empty results, never an error or a completeness claim.
+  bounded/redacted failure and completion text, and storage helpers (read, write, remove,
+  bounded scan listing with pagination, last-completed lookup, session-prefix removal).
+  Missing `storage.scan` returns empty results, never an error or a completeness claim.
 - Goal continuation writes one `pending` receipt for the reserved turn under the same
   session lock as the goal reservation, then updates it to `dispatched` after the prompt
   is queued. Both writes are best-effort: they can never change an admission decision.
+- Completed marking: the continuation remembers the last delivered step index per session
+  **in memory only** and, at the next idle edge, marks that receipt `completed` under the
+  same session lock, before any new admission attempt. The mark is best-effort and never
+  blocks or changes an admission. `completed` and `failed` are sticky terminal records: a
+  completion never rewrites a finished or failed receipt (see §6).
 - `session.deleted` cleanup removes the session's step prefix together with goal/run/halt
-  records, serialized by the same lock.
-- No scheduler, no retry, no resume, no event log, no publish change. `completed` /
-  `failed` / `attempt` / `cursor` are recorded state for later slices.
+  records, serialized by the same lock, and drops the in-memory completion index.
+- No scheduler, no retry, no resume, no event log, no publish change. `attempt` / `cursor`
+  remain recorded state for later slices.
 
 ## 6. Limitations
 
 - Process-local `withSessionLock` only; no CAS, transactions, or cross-process guarantee.
 - Scan-based cleanup and lookups are bounded (`STEP_SCAN_ENTRY_CAP`); a degenerate store
   stops at the cap instead of claiming completeness.
+- Completion is inferred, not proven. The mark means "the session went idle after this
+  step was delivered"; it does not prove the turn succeeded or that its external effects
+  are unique, and it is never a resume or completion gate. The tracked index is
+  process-local, so a plugin restart, a dropped idle edge, or a session that never idles
+  again leaves the receipt at `dispatched` (or `pending` if the dispatched update also
+  failed).
+- Completion writes are best-effort and swallowed after a warning, like every other
+  receipt write; a storage failure leaves the receipt at its previous status and never
+  blocks or retries an admission. The optional completion note is redacted and truncated
+  like a failure message (`STEP_COMPLETED_MESSAGE_MAX_LENGTH`).
 - Receipts are observability records: they are never proof of remote state and never an
   authorization, admission, or completion signal.
 - The classifications above describe the current code and the API shapes it relies on

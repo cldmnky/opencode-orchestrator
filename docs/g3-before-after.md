@@ -1,6 +1,6 @@
 # G3 Before / After Examples
 
-**Status:** Phase 0 evidence page (2026-09-15)
+**Status:** Phase 0 evidence page (2026-09-15); full rollout section added (2026-09-16)
 **Contract:** [docs/g3-communication-contract.md](./g3-communication-contract.md)
 
 Measured per-line word counts use the exported constants directly (split on `\n`, count whitespace-separated tokens per line). "max" is the longest single line; the plain-language target is ≤ 25 words.
@@ -23,6 +23,64 @@ Measured per-line word counts use the exported constants directly (split on `\n`
 | `STRUCTURED_HANDOFF_GUIDANCE` | 6 | 59 | 27.3 | 12 | 24 | 13.6 |
 
 Character totals stay within 1% (for example publication: 4071 → 4108), because the restructure splits and connects sentences instead of dropping safety text. Every restructured constant is now asserted at ≤ 25 words per line in `test/unit/core.test.ts`.
+
+## Full rollout: command and continuation prompts
+
+The full rollout extends the short-bullet rule to the authored command prompts in `buildCommandPrompt` and the plan-ledger rules in `planContinuationGuidance`. Before, each prompt was a single line that joined every instruction with commas; each authored line is now one short sentence.
+
+Counts are per authored prompt block (the command text before the shared sections), measured with `arguments = "scope"`; the plan row covers the `Plan ledger:` block in a plan-aware continuation.
+
+| Prompt | Lines before | Max words before | Max sentence before | Lines after | Max words after | Max sentence after |
+|---|---:|---:|---:|---:|---:|---:|
+| `goal` | 1 | 47 | 24 | 5 | 24 | 24 |
+| `restructure` | 1 | 36 | 29 | 5 | 9 | 9 |
+| `run-plan` | 1 | 43 | 36 | 7 | 9 | 9 |
+| `halt` | 1 | 21 | 10 | 3 | 10 | 10 |
+| `handover` | 1 | 36 | 29 | 6 | 10 | 10 |
+| `polish` | 1 | 30 | 22 | 5 | 9 | 9 |
+| `stress-plan` | 1 | 33 | 27 | 5 | 12 | 12 |
+| `gates` | 1 | 23 | 16 | 3 | 12 | 12 |
+| `planContinuationGuidance` | 3 | 44 | 44 | 8 | 17 | 17 |
+
+Six authored sentences were over the 25-word budget before: four in the command record (`restructure` 29, `run-plan` 36, `handover` 29, `stress-plan` 27) and two in the plan ledger (30 and 44). All six are now split into bullets. `test/unit/core.test.ts` asserts every command and continuation prompt line and sentence is within budget; the only allowed over-budget line is the tracked prompt-builder coordination line.
+
+### Command prompt example: `/run-plan`
+
+**Before** — one 36-word sentence:
+
+```
+Read the complete plan before changing files, follow the plan's phase order, track each step, delegate safe independent work only with disjoint write scopes, verify every step, and audit the aggregate result with the review role.
+```
+
+**After** — one instruction per line, with the pinned wording intact:
+
+```
+Read the complete plan before changing files.
+Follow the plan's phase order.
+Track each step.
+Delegate safe independent work only with disjoint write scopes.
+Verify every step.
+Audit the aggregate result with the review role.
+```
+
+### Plan continuation example: configured breakers
+
+**Before** — one 44-word sentence:
+
+```
+Continue autonomously through the ledger unless a real blocker or a configured breaker applies (halt flag, budget fail-closed, cooldown, max continuations, or an open review circuit); stop and report to the user otherwise, and never mark the goal or plan complete without direct evidence.
+```
+
+**After**:
+
+```
+Continue autonomously through the ledger unless a real blocker or a configured breaker applies.
+Configured breakers: halt flag, budget fail-closed, cooldown, max continuations, or an open review circuit.
+Stop and report to the user otherwise.
+Above all, never mark the goal or plan complete without direct evidence.
+```
+
+Phrases the suite asserts lowercase keep a short lead-in (`Then`, `Above all,`) so the phrase itself stays byte-identical instead of being re-capitalized: `execute the first unfinished item with direct verification`, `update the ledger to record the change`, `never mark the goal or plan complete without direct evidence`, and `redact secrets`.
 
 ## Status message example: blocked dispatch
 
@@ -209,8 +267,8 @@ The restructure keeps every fail-closed precondition with identical meaning. `te
 - 2 orchestrator dispatch rules (`Require an exact disjoint write scope…`, `Serialize implementation tasks…`) in the orchestrator rules block;
 - 3 plugin-owned control preconditions (bounded-review breaker, budget in-flight safety, budget unknown fail-closed) in the orchestrator and continuation prompts, and not in the worker prompt.
 
-Pinned phrases are preserved byte-for-byte inside the restructured lines; where the original phrase was lowercase mid-sentence, a short lead-in keeps the phrase intact rather than re-capitalizing it.
+Pinned phrases are preserved byte-for-byte inside the restructured lines; where the original phrase was lowercase mid-sentence, a short lead-in keeps the phrase intact rather than re-capitalizing it. The full rollout applies the same rule to the command and continuation prompts: pinned wording keeps its exact case inside short bullets, and the new fixtures assert every authored line and sentence is within the budget.
 
 ## Known remaining dense string
 
-`src/core/prompt-builder.ts` is outside the Phase 0 file set, so its 45-word coordination sentence remains. `test/unit/prompt-builder.test.ts` pins the deviation explicitly: any *other* over-25-word line in the built orchestration prompt fails the fixture.
+`src/core/prompt-builder.ts` is outside both file sets, so its coordination line remains: one line, 42 words, whose second sentence is 36 words. Both suites pin the deviation explicitly. `test/unit/prompt-builder.test.ts` asserts any *other* over-25-word line in the built orchestration prompt fails; `test/unit/core.test.ts` asserts the same line is the only over-budget line across every command prompt, so a new dense line in either file fails a fixture.

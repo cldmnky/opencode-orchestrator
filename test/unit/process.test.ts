@@ -135,6 +135,30 @@ describe("redaction", () => {
     expect(redact("plain?mode=read&tokenizer=fast")).toBe("plain?mode=read&tokenizer=fast")
   })
 
+  test("hint-path redaction: advisory-output-shaped text keeps its structure with a no-secret control", () => {
+    // The opt-in generation-hint post-step runs model output through this
+    // exact canonical API before bounding it: known patterns plus caller-known
+    // exact secrets (threaded only where wired), structure preserved.
+    const secret = "FAKE-CALLER-KNOWN-SECRET-01"
+    const output = [
+      "Keep the receipt scoped.",
+      "Authorization: Bearer FAKE-BEARER-TOKEN-FOR-TEST-02",
+      `value=${secret}`,
+      "verified",
+    ].join("\n")
+    const out = redact(output, [secret])
+    expect(out).not.toContain("FAKE-BEARER-TOKEN-FOR-TEST-02")
+    expect(out).not.toContain(secret)
+    expect(out.split("\n")).toHaveLength(4)
+    expect(out).toContain("Keep the receipt scoped.")
+    expect(out).toContain("verified")
+
+    // No-secret control: safe advisory text is unchanged by both layers.
+    const control = "Keep the receipt scoped and verified."
+    expect(redact(control, [secret])).toBe(control)
+    expect(redact(control, [])).toBe(control)
+  })
+
   test("applies known patterns with an empty secret list and skips empty exact secrets", () => {
     expect(redact("token=FAKE-KEYED-VALUE", [])).toBe(redactKnownPatterns("token=FAKE-KEYED-VALUE"))
     expect(redact("token=FAKE-KEYED-VALUE", [])).not.toContain("FAKE-KEYED-VALUE")

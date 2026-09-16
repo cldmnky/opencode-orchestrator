@@ -81,6 +81,38 @@ const authorityOptions = z
   .default({ mode: "off" })
 
 /**
+ * Phase C generation-hint mode: `off` (default — no generation call is ever
+ * made, no hint record is attached, and `handoff_validate` output stays
+ * byte-identical) or `advisory` (after the deterministic D2 checks pass, one
+ * opt-in sessionless `ctx.generate.text` call produces a bounded advisory
+ * hint record).
+ *
+ * Advisory hints are metadata only: they never change a verdict, an admission
+ * state, a gate, a review record, or any other enforcement decision. Prompts
+ * are built from deterministic check verdicts only (never transcripts,
+ * secrets, paths, URLs, or payloads); output is parsed defensively, redacted
+ * with the canonical redactor, and length-capped. `advisory` requires an
+ * explicit model reference because the plugin never guesses a model.
+ */
+export const HINT_MODES = ["off", "advisory"] as const
+export type HintMode = (typeof HINT_MODES)[number]
+
+const hintModelReference = z
+  .object({
+    providerID: z.string().trim().min(1).max(128),
+    id: z.string().trim().min(1).max(128),
+  })
+  .strict()
+
+const hintsOptions = z
+  .object({
+    mode: z.enum(HINT_MODES).default("off"),
+    model: hintModelReference.optional(),
+  })
+  .strict()
+  .default({ mode: "off" })
+
+/**
  * Decomposition strategy: `mvp` (default — the current Phase 1 prompt
  * guidance, unchanged) or `strict` (adds extra prompt-level emphasis on
  * preferring the smallest coherent end-to-end slice). Prompt-preference
@@ -216,6 +248,7 @@ export const OrchestratorOptionsSchema = z
     clarify: clarifyOptions,
     decomposition: decompositionOptions,
     authority: authorityOptions,
+    hints: hintsOptions,
   })
   .strict()
   .superRefine((value, context) => {
@@ -240,6 +273,16 @@ export const OrchestratorOptionsSchema = z
         seen.set(id, role)
       }
     }
+    // Explicit model selection is required: the plugin never falls back to a
+    // host default model (the sessionless surface was measured only with an
+    // explicit model reference).
+    if (value.hints.mode === "advisory" && value.hints.model === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["hints", "model"],
+        message: "hints.model is required when hints.mode is advisory",
+      })
+    }
   })
 
 export type OrchestratorOptions = z.infer<typeof OrchestratorOptionsSchema>
@@ -255,6 +298,7 @@ export type ClarifyOptions = z.infer<typeof clarifyOptions>
 export type DecompositionOptions = z.infer<typeof decompositionOptions>
 export type PublishOptions = z.infer<typeof publishOptions>
 export type AuthorityOptions = z.infer<typeof authorityOptions>
+export type HintsOptions = z.infer<typeof hintsOptions>
 
 export function parseOptions(value: unknown): OrchestratorOptions {
   const parsed = OrchestratorOptionsSchema.safeParse(value ?? {})

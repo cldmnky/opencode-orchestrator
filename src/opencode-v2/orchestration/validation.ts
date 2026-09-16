@@ -8,6 +8,7 @@ import {
   type D2Handoff,
 } from "../../core/contracts.js"
 import type { AdmissionState } from "../../core/admission.js"
+import { GENERATION_HINT_MAX_HINT_CHARS, newGenerationHint, type GenerationHintRecord } from "../observability/trace.js"
 import { redact as defaultRedact } from "../process/redact.js"
 
 /**
@@ -30,6 +31,13 @@ import { redact as defaultRedact } from "../process/redact.js"
  * worker output through it automatically and nothing here enforces a
  * completion gate. It never runs a shell, never persists state, and never
  * accepts typed EvidenceRecord input in this version.
+ *
+ * Opt-in generation hints (`hints.mode: "advisory"`, default off): after the
+ * deterministic checks return a `pass` verdict, the tool may run one
+ * sessionless generation call and attach a bounded, redacted, metadata-only
+ * hint record. Prompts are built from check verdicts only; the record never
+ * changes the verdict, the admission state, or any gate (see the hint
+ * section below and `runHandoffHint`).
  *
  * All filesystem/VCS access is injected (`sessionLocation`, `vcsStatus`,
  * `pathExists`, `realpath`) so unit tests are deterministic; the plugin wiring
@@ -494,6 +502,218 @@ function checkAuthority(handoff: D2Handoff, evidenceFilesVerdict: HandoffCheckVe
     )
   }
   return pass(HANDOFF_CHECK_IDS.o6Authority, "evidence claims reference only local static file refs whose existence was confirmed")
+}
+
+/* ------------------------------------------------------------------ */
+/* Generation hints (Phase C, opt-in `hints.mode: "advisory"`)         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Advisory generation post-step (N4 pilot).
+ *
+ * When `hints.mode: "advisory"` is configured, `handoff_validate` may run ONE
+ * sessionless `ctx.generate.text` call after the deterministic D2 checks have
+ * produced a `pass` verdict. The post-step is metadata only:
+ *
+ * - The prompt is built from check verdicts only (`<check-id>=<verdict>`
+ *   lines). Check *details* are never included, so command strings, paths,
+ *   URLs, payloads, transcripts, and secrets cannot travel into the prompt.
+ * - The output is parsed defensively (exact `{ text }` shape, single-line
+ *   normalization, hard length cap) and passed through the canonical
+ *   credential redactor before a bounded hint is recorded.
+ * - The call is bounded by a prompt cap, an output cap, and an external
+ *   timeout race. The pinned surface has no abort control, so a timeout only
+ *   abandons the wait; it cannot cancel the underlying generation.
+ * - The returned record never changes the validator verdict, the admission
+ *   state, a gate, or any other enforcement decision, and it is never
+ *   persisted by this module.
+ */
+
+/** Hard cap for the built prompt; over-cap prompts are skipped, never truncated. */
+export const HANDOFF_HINT_PROMPT_MAX_CHARS = 1200
+/** Hard cap for the parsed model output before redaction and truncation. */
+export const HANDOFF_HINT_OUTPUT_MAX_CHARS = 600
+/** External timeout race for one generation call (the call is not cancelled). */
+export const HANDOFF_HINT_TIMEOUT_MS = 2000
+
+export type HandoffHintModelReference = { providerID: string; id: string }
+
+export type HandoffHintGenerator = (input: {
+  prompt: string
+  model: HandoffHintModelReference
+}) => Promise<{ text: string }>
+
+export type HandoffHintRunInput = {
+  level: HandoffValidationLevel
+  verdict: HandoffCheckVerdict
+  checks: readonly HandoffCheck[]
+  model?: HandoffHintModelReference
+  /** Absent when the host generation surface is not wired. */
+  generate?: HandoffHintGenerator
+  /** Canonical redactor seam; defaults to the shared credential redactor. */
+  redact?: (text: string) => string
+  timeoutMs?: number
+  now?: () => number
+}
+
+const HINT_CHECK_ID_SET: ReadonlySet<string> = new Set(Object.values(HANDOFF_CHECK_IDS))
+
+/**
+ * Build the generation prompt from check verdicts only. Unknown check ids are
+ * skipped defensively and no check detail, contract field, session value, or
+ * prompt text is ever included.
+ */
+export function handoffHintPrompt(
+  level: HandoffValidationLevel,
+  checks: readonly HandoffCheck[],
+): { ok: true; prompt: string } | { ok: false; promptChars: number } {
+  const verdictLines: string[] = []
+  for (const check of checks) {
+    if (!HINT_CHECK_ID_SET.has(check.id)) continue
+    verdictLines.push(`${check.id}=${check.verdict}`)
+  }
+  const prompt = [
+    "Deterministic handoff checks already ran; every verdict below is final and must not be re-run or changed.",
+    "Reply with exactly one short advisory sentence that helps the orchestrator act on this receipt.",
+    "Do not repeat file paths, commands, URLs, secrets, transcripts, or payloads.",
+    `level=${level}`,
+    "verdict=pass",
+    ...verdictLines,
+  ].join("\n")
+  if (prompt.length > HANDOFF_HINT_PROMPT_MAX_CHARS) return { ok: false, promptChars: prompt.length }
+  return { ok: true, prompt }
+}
+
+/**
+ * Defensive parse of the sessionless generation envelope: exactly `{ text }`
+ * with a non-empty string. Control characters are collapsed, whitespace is
+ * normalized to single spaces, and the result is hard-capped.
+ */
+export function parseHandoffHintOutput(value: unknown): { text: string; truncated: boolean } | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const text = (value as { text?: unknown }).text
+  if (typeof text !== "string") return undefined
+  const normalized = text
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (normalized.length === 0) return undefined
+  if (normalized.length > HANDOFF_HINT_OUTPUT_MAX_CHARS) {
+    return { text: `${normalized.slice(0, HANDOFF_HINT_OUTPUT_MAX_CHARS - 1)}…`, truncated: true }
+  }
+  return { text: normalized, truncated: false }
+}
+
+/**
+ * Run the advisory post-step and return a bounded metadata record. This
+ * function never throws: every failure is folded into a deterministic record
+ * (`failed`/`timeout`/`skipped`), and no error text, prompt text, or raw output
+ * is included anywhere in the record.
+ */
+export async function runHandoffHint(input: HandoffHintRunInput): Promise<GenerationHintRecord> {
+  const now = input.now ?? Date.now
+  const startedAt = now()
+  const modelLabel = input.model ? `${input.model.providerID}/${input.model.id}` : null
+  const base = {
+    level: input.level,
+    verdict: input.verdict,
+    checkCount: input.checks.length,
+    model: modelLabel,
+    promptChars: 0,
+    outputChars: 0,
+    outputRedacted: false,
+    outputTruncated: false,
+    durationMs: 0,
+    capturedAt: startedAt,
+  }
+  try {
+    if (input.verdict !== "pass") {
+      return newGenerationHint({ ...base, status: "skipped", reason: "verdict-not-pass" })
+    }
+    if (!input.generate) {
+      return newGenerationHint({ ...base, status: "skipped", reason: "generate-unavailable" })
+    }
+    if (!input.model) {
+      return newGenerationHint({ ...base, status: "skipped", reason: "no-model" })
+    }
+
+    const built = handoffHintPrompt(input.level, input.checks)
+    if (!built.ok) {
+      return newGenerationHint({ ...base, status: "skipped", reason: "prompt-too-large", promptChars: built.promptChars })
+    }
+
+    const outcome = await raceHintGeneration(
+      input.generate({ prompt: built.prompt, model: input.model }),
+      input.timeoutMs ?? HANDOFF_HINT_TIMEOUT_MS,
+    )
+    const durationMs = Math.max(0, now() - startedAt)
+    if (outcome.kind === "timeout") {
+      return newGenerationHint({ ...base, promptChars: built.prompt.length, durationMs, status: "timeout", reason: "timed-out" })
+    }
+    if (outcome.kind === "error") {
+      return newGenerationHint({ ...base, promptChars: built.prompt.length, durationMs, status: "failed", reason: "provider-failed" })
+    }
+
+    const parsed = parseHandoffHintOutput(outcome.value)
+    if (!parsed) {
+      return newGenerationHint({ ...base, promptChars: built.prompt.length, durationMs, status: "failed", reason: "invalid-output" })
+    }
+
+    const redactor = input.redact ?? defaultRedact
+    const redacted = redactor(parsed.text)
+    const bounded =
+      redacted.length > GENERATION_HINT_MAX_HINT_CHARS
+        ? `${redacted.slice(0, GENERATION_HINT_MAX_HINT_CHARS - 1)}…`
+        : redacted
+    const hint = bounded.replace(/\s+/g, " ").trim()
+    if (hint.length === 0) {
+      return newGenerationHint({ ...base, promptChars: built.prompt.length, durationMs, status: "failed", reason: "invalid-output" })
+    }
+    return newGenerationHint({
+      ...base,
+      promptChars: built.prompt.length,
+      outputChars: parsed.text.length,
+      outputRedacted: redacted !== parsed.text,
+      outputTruncated: parsed.truncated || bounded !== redacted,
+      durationMs,
+      status: "completed",
+      hint,
+    })
+  } catch {
+    // Never include the caught error: provider and parsing failures can echo
+    // arbitrary text.
+    return newGenerationHint({
+      ...base,
+      durationMs: Math.max(0, now() - startedAt),
+      status: "failed",
+      reason: "internal-error",
+    })
+  }
+}
+
+type HintGenerationOutcome = { kind: "text"; value: unknown } | { kind: "error" } | { kind: "timeout" }
+
+/**
+ * External timeout race. The generation promise carries its own rejection
+ * handler, so an abandoned call can never surface as an unhandled rejection.
+ */
+async function raceHintGeneration(
+  generation: Promise<{ text: string }>,
+  timeoutMs: number,
+): Promise<HintGenerationOutcome> {
+  const settled = generation.then(
+    (value): HintGenerationOutcome => ({ kind: "text", value }),
+    (): HintGenerationOutcome => ({ kind: "error" }),
+  )
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<HintGenerationOutcome>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: "timeout" }), Math.max(1, timeoutMs))
+  })
+  try {
+    return await Promise.race([settled, timeout])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 /* ------------------------------------------------------------------ */

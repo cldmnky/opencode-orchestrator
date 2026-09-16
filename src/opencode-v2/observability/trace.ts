@@ -12,6 +12,12 @@
  * never fabricated). Usage aggregate events are snapshots that REPLACE the
  * stored values; they are never added together, so no double counting occurs,
  * and missing coverage is simply absent (unknown), never zero.
+ *
+ * A separate generation-hint record (Phase C, opt-in `hints.mode: "advisory"`)
+ * is bounded metadata ABOUT one advisory sessionless generation call. It never
+ * carries prompt text, raw model output, provider error text, or credentials:
+ * its optional `hint` is a single-line, canonical-redactor-redacted,
+ * length-capped advisory string, and every reason is a fixed enum value.
  */
 import { z } from "zod"
 import type { TraceMode } from "../../core/config.js"
@@ -164,6 +170,94 @@ export function usageTokensTotal(usage: UsageSnapshot): number {
 export function parseTraceSummary(value: unknown): TraceSummary | undefined {
   const parsed = traceSummarySchema.safeParse(value)
   return parsed.success ? parsed.data : undefined
+}
+
+/* ------------------------------------------------------------------ */
+/* Generation-hint metadata (Phase C, opt-in `hints.mode: "advisory"`)  */
+/* ------------------------------------------------------------------ */
+
+export const GENERATION_HINT_RECORD_VERSION = 1
+/** Only one kind exists today: the advisory post-step of `handoff_validate`. */
+export const GENERATION_HINT_KINDS = ["handoff-validate"] as const
+export const GENERATION_HINT_STATUSES = ["completed", "failed", "timeout", "skipped"] as const
+/**
+ * Fixed reason vocabulary. Free text (provider errors, URLs, payload echoes) is
+ * never recorded: every reason is a bounded enum value chosen by the runner.
+ */
+export const GENERATION_HINT_REASONS = [
+  "no-model",
+  "verdict-not-pass",
+  "prompt-too-large",
+  "generate-unavailable",
+  "provider-failed",
+  "timed-out",
+  "invalid-output",
+  "internal-error",
+] as const
+export const GENERATION_HINT_LEVELS = ["worker", "orchestrator"] as const
+export const GENERATION_HINT_VERDICTS = ["pass", "fail", "blocked-unknown"] as const
+/** Schema caps for recorded sizes; the runner enforces tighter live bounds. */
+export const GENERATION_HINT_MAX_PROMPT_CHARS = 4096
+export const GENERATION_HINT_MAX_OUTPUT_CHARS = 4096
+export const GENERATION_HINT_MAX_MODEL_CHARS = 200
+/** Hard cap for the optional advisory hint text after canonical redaction. */
+export const GENERATION_HINT_MAX_HINT_CHARS = 280
+
+/**
+ * A bounded metadata record describing ONE advisory generation call. It is
+ * trace-shaped metadata (versioned, strict, bounded) and carries no prompt
+ * text, no raw model output, no provider error text, and no credentials: the
+ * prompt is built from deterministic check verdicts only, and the optional
+ * `hint` is a single-line, canonical-redactor-redacted, length-capped advisory
+ * string. Missing or malformed records parse as undefined (unknown).
+ */
+export const generationHintSchema = z
+  .object({
+    version: z.literal(1),
+    kind: z.enum(GENERATION_HINT_KINDS),
+    status: z.enum(GENERATION_HINT_STATUSES),
+    reason: z.enum(GENERATION_HINT_REASONS).optional(),
+    level: z.enum(GENERATION_HINT_LEVELS),
+    verdict: z.enum(GENERATION_HINT_VERDICTS),
+    checkCount: z.number().int().nonnegative().max(64),
+    /** `providerID/id` when a model was configured; null when absent. */
+    model: z.string().min(1).max(GENERATION_HINT_MAX_MODEL_CHARS).nullable(),
+    promptChars: z.number().int().nonnegative().max(GENERATION_HINT_MAX_PROMPT_CHARS),
+    outputChars: z.number().int().nonnegative().max(GENERATION_HINT_MAX_OUTPUT_CHARS),
+    outputRedacted: z.boolean(),
+    outputTruncated: z.boolean(),
+    hint: z.string().min(1).max(GENERATION_HINT_MAX_HINT_CHARS).optional(),
+    durationMs: z.number().finite().nonnegative(),
+    capturedAt: z.number().finite(),
+  })
+  .strict()
+export type GenerationHintRecord = z.infer<typeof generationHintSchema>
+
+export type GenerationHintInput = Omit<GenerationHintRecord, "version" | "kind"> & {
+  kind?: GenerationHintRecord["kind"]
+}
+
+/** Build a validated bounded hint record; sizes are clamped to the schema caps. */
+export function newGenerationHint(input: GenerationHintInput): GenerationHintRecord {
+  return generationHintSchema.parse({
+    ...input,
+    version: GENERATION_HINT_RECORD_VERSION,
+    kind: input.kind ?? "handoff-validate",
+    promptChars: clampCount(input.promptChars, GENERATION_HINT_MAX_PROMPT_CHARS),
+    outputChars: clampCount(input.outputChars, GENERATION_HINT_MAX_OUTPUT_CHARS),
+    checkCount: clampCount(input.checkCount, 64),
+  })
+}
+
+/** Strict, bounded entry: returns the parsed record or undefined for malformed/unknown data. */
+export function parseGenerationHint(value: unknown): GenerationHintRecord | undefined {
+  const parsed = generationHintSchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
+}
+
+function clampCount(value: number, cap: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(cap, Math.trunc(value)))
 }
 
 /** Storage key for the single bounded current trace record per session. */

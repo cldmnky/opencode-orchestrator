@@ -22,7 +22,14 @@ Constraints:
 - The dominant remaining weakness is unchanged in kind but now fixable in practice: most delegation constraints are still **prompt-only** or gated only at **plugin-owned dispatch surfaces**. The pinned beta-19507 contract now exposes `session.hook("prompt")`, `permission.hook("evaluate")`, `permission.rules` (inherited by child sessions at creation), and a native `ctx.worktree` domain — the host-side primitives needed for real runtime admission enforcement (N1), real worker containment (N2), and a documented worktree path (N3).
 - The orchestrator's **language is its weakest user-facing surface**: operational policy strings are 400–850-character single sentences, the agent has a functional description but no voice or tone contract, and clarification guidance covers only initial task ambiguity. User-visible output inherits this density. G3 targets plain-language communication, a helpful personality, and restatement/summary loops.
 - The **N3 native-worktree probe is complete (2026-09-15) and blocks cutover**: the pinned `ctx.worktree` domain cannot back the managed `worktree/v2` lifecycle (detached create, no ownership/dirty/moved/orphan states, `refresh` result dropped at the plugin surface, destructive `force`). The only permitted follow-up is a read-only inventory observation pilot with `worktree/v2` still authoritative. See [`docs/phase-1/n3-native-worktree-compatibility.md`](phase-1/n3-native-worktree-compatibility.md).
-- The **N4 sessionless-generate contract probe is complete (2026-09-15) and is pilot-only**: the pinned `ctx.generate.text` surface accepts exactly `{ prompt, model? }`, resolves to exactly `{ text }`, is sessionless (no session, inbox item, history, or tool call), and rejects with catchable `Generate.*` errors. Deterministic in-process verification exists only as a **test-only** provider override, no real provider call was measured, and the declared input has no timeout/abort control — so production advisory wiring is not authorized. See [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md).
+- The **N4 sessionless-generate contract probe is complete (2026-09-15)** and the **Phase C close
+  (2026-09-16) implemented its permitted pilot**: an opt-in, default-off `hints.mode: "advisory"`
+  post-step that runs one sessionless generation call only after deterministic D2 checks pass,
+  builds prompts from check verdicts only, parses/redacts/bounds the output, records a bounded
+  trace-shaped metadata record on the `handoff_validate` result, and never gates. No real provider
+  call was measured and the surface still has no abort control (the plugin races a 2 s external
+  timeout), so the pilot remains metadata-only and its live envelope is unmeasured. See
+  [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md).
 - **Config drift defect (verified against the live schema):** the installer and dev template still write `experimental.subagent_depth`, but the current host schema defines **top-level** `subagent_depth` and `experimental` rejects additional properties — so installer-managed installs silently run at native depth 1 and nested delegation breaks. G4 plans the migration. `experimental.continue_loop_on_deny` and `experimental.batch_tool` are confirmed host keys the orchestrator experience needs but the installer does not set.
 - `max_parallel` is still prompted, not scheduled: no DAG scheduler or concurrency semaphore exists (A4 remains true).
 - Durable per-step checkpoints, append-only lifecycle logs, and materialized projections remain unimplemented (S1/S2); the TUI sidebar is a volatile projection only.
@@ -46,8 +53,9 @@ Constraints:
 - Goal continuation enabled by default (max `50`, cooldown `1000 ms`).
 - `clarify`: `auto|off` (default `auto` — native ask-tool clarification guidance).
 - `trace`: `off|memory|snapshot` (default `off`); `budget`: `advisory|stop-between-steps` (default `advisory`, nullable finite `max_steps`/`max_tokens`/`max_cost_usd`/`max_wall_clock_ms`/`max_retries`); `review`: `prompt|bounded` (`max_rounds` 1..8, default 2).
+- `authority`: `off|enforce` (default `off`); `hints`: `{ mode: "off"|"advisory", model? }` (default off; `advisory` requires an explicit `providerID`/`id` model reference).
 - `github` and `worktree` disabled by default; mutations additionally disabled by default; `publish.enabled` default `false`.
-- Defaults preserve pre-observability behavior exactly; the S3/V1 controls are strictly opt-in.
+- Defaults preserve pre-observability behavior exactly; the S3/V1 controls are strictly opt-in, and the Phase C close (`authority` snapshots, generation hints) is opt-in and default-off.
 
 `src/core/roles.ts` still maps planning→`planner`, research→`explore`, implementation→`implementer`, review→`reviewer`. Nested delegation is bounded to the role graph (a delegating worker stays accountable; research never delegates).
 
@@ -58,7 +66,8 @@ Constraints:
 | `max_parallel`, disjoint write scopes, `require_review` (in `prompt` review mode), complexity routing | Prompt-only |
 | `stop-between-steps` budget, bounded-review circuit breaker | Plugin-owned dispatch gates (goal auto-continuation before reservation/delivery; slash-command prompt delivery); never in-flight cancellation, never `session.interrupt` |
 | GitHub/worktree mutations | Fail-closed tool preconditions + static config gates + `confirm: true` + durable publish capability + per-session gates |
-| Worker authority/containment | Prompt-only (no host-enforced boundary yet — target of N2) |
+| Worker authority/containment | Opt-in `authority.mode: "enforce"`: N1 gate on tagged dispatches, N2 child-only tool-action session rules, and durable `authority/v1` snapshots. Snapshots are records, never decisions; not filesystem/process/worktree isolation |
+| Generation hints (N4 pilot) | Opt-in `hints.mode: "advisory"`: advisory metadata only, never a gate; runs only after deterministic D2 checks pass |
 | Completion gating (no finish without validated review) | Not enforced (target of N1) |
 
 ### Review and Verification
@@ -137,7 +146,7 @@ Assessed 2026-09-15 against the current plugin guide and the pinned `@opencode/p
 - `permission.hook("evaluate")` — runs for `allow`/`ask` decisions after configured rules; an explicit configured `deny` is final; the hook may flip `effect` and set `message`.
 - `ctx.permission.rules` — session-scoped rules; **child sessions inherit the rules in effect when they are created** (real containment, not prompts).
 - Native `ctx.worktree` domain — `create`/`remove`/`list`/`refresh` + `transform`/`reload`, project ownership, `Worktree.OperationError` (force-required confirmations), `worktree.updated` events.
-- `ctx.generate.text` — sessionless model calls (no session, tools, or history). **Probe complete 2026-09-15 (N4): exact `{ prompt, model? } -> { text }` shape measured, catchable `Generate.*` failures, test-only deterministic provider override; production wiring pilot-only.**
+- `ctx.generate.text` — sessionless model calls (no session, tools, or history). **Probe complete 2026-09-15 (N4): exact `{ prompt, model? } -> { text }` shape measured, catchable `Generate.*` failures, test-only deterministic provider override.** The Phase C close (2026-09-16) wired the permitted pilot behind default-off `hints.mode: "advisory"`: one bounded advisory metadata record after deterministic checks pass; no real provider call measured, no abort control (external timeout race).
 - `session.hook("retry")` — retry decision/delay override with `attempt` number.
 - `ctx.reference.transform`, `ctx.skill.transform`, `ctx.shell.hook("create.before")`, `ctx.integration.*` — documented surfaces with no current use.
 
@@ -169,8 +178,8 @@ Everything in this section shipped after the 2026-08-30 draft (issues #8/#10/#14
 | P0 | G3 | DX & Governance | Plain-language communication, helpful personality, clarification/summary loop | Policy strings run 400–850 chars in single sentences; no voice/tone spec; clarify covers only initial ambiguity; user output inherits the density | M | High | Losing precision in safety-critical instructions |
 | P0 | G4 | DX & Governance | Installer schema migration: top-level `subagent_depth` + recommended experimental keys | Live schema moved depth to top-level; `experimental` rejects additional properties, so installer-written depth is dead and nested delegation silently breaks; `continue_loop_on_deny`/`batch_tool` are confirmed host keys the experience needs | S | High | Silent config drift on future pins |
 | P1 | N3 | Worktree & Isolation | Migrate managed worktrees onto native `ctx.worktree` (supersedes W1/W2) — **compatibility probe complete 2026-09-15: cutover blocked; no adapter implemented** | Documented domain with ownership, refresh, `worktree.updated`; the probe measured project-scoped inventory, detached create, `Git.WorktreeError.forceRequired` dirty refusal, and silent row drops — the native states do not match `worktree/v2` | L | High | Behavior drift during migration; canonical-config coupling; native `force` deletes dirty trees |
-| P1 | N4 | Verification & Safety | Sessionless deterministic checks via `ctx.generate.text` — **contract probe complete 2026-09-15: surface sessionless; production wiring pilot-only, no wiring implemented** | Semantic handoff lint, review-rubric parsing, complexity adjudication without child sessions | S | Medium | Nondeterministic model output; cost |
-| P1 | V4 | Verification & Safety | Redaction centralization (**V4a complete 2026-09-15**) + authority recording (V4b deferred) | One tested redactor with adversarial fixtures and a threat model; evidence stays transient; effective-authority snapshots remain future work (N2 rules are the only host-enforced layer) | M | High | False security |
+| P1 | N4 | Verification & Safety | Sessionless deterministic checks via `ctx.generate.text` — **contract probe complete 2026-09-15; opt-in metadata-only pilot wired 2026-09-16 (`hints.mode: "advisory"`, default off)** | Semantic handoff lint, review-rubric parsing, complexity adjudication without child sessions | S | Medium | Nondeterministic model output; cost |
+| P1 | V4 | Verification & Safety | Redaction centralization (**V4a complete 2026-09-15**) + authority recording (**V4b complete 2026-09-16, opt-in enforce mode only**) | One tested redactor with adversarial fixtures and a threat model; evidence stays transient; durable effective-authority snapshots are records that never gate (N2 rules remain the only host-enforced layer) | M | High | False security |
 | P1 | S1 | State & Observability | Durable per-step checkpoints with backoff and cursor resume | Goal/run records still lack per-step receipts; `storage.scan` gives cursors; retry classes feed N5 | L | High | Duplicate side effects |
 | P1 | D1 | Delegation & Prompting | DAG scheduler with adaptive scaling | `max_parallel` still prompted only (A4 true); D4 now supplies the routing input | L | High | Over-decomposition |
 | P2 | S2 | State & Observability | Durable event log + materialized projections | Volatile events still sole source for continuation/sidebar hydration; TUI sidebar is a volatile projection | L | High | State divergence |
@@ -291,25 +300,43 @@ No further N3 work is authorized by this probe. If a read-only inventory observa
 
 **V4a (redaction centralization) complete 2026-09-15.** `process/redact.ts` is the single redaction implementation; the duplicate private redactor in `session/move.ts` was deleted in favor of the canonical import. The replacement is not an unconditional strict superset: canonical coverage is broader for documented credential shapes and keyed output uses the canonical `key: [redacted]` form, but whole-word matching intentionally stops matching credential keywords embedded in longer identifiers (`session_token`, `my_secret`) that the prior boundary-less helper caught incidentally; pattern redaction remains a heuristic, not a secret boundary. Adversarial fixtures now cover encoded exact secrets, query-like text, multiline mixed output, substring preservation, empty secret lists, and `redactProcessResult`; direct session-move tests pin GitHub-token, Bearer-token, and no-exact-secret-channel behavior; D2 C7 has GitHub-token/Bearer-shaped fail cases plus a no-secret control; evidence tests pin only enforced schema boundaries and document that `source` has no credential-shape rejection. The threat model at [`docs/v4-redaction-threat-model.md`](v4-redaction-threat-model.md) inventories consumers, raw process-output entry paths, both redaction layers, never-stored data, transient evidence/authority limits, the peer-hint limit, and the regex limit (A8). Behavior outside redaction expansion is unchanged: defaults, D2 v1, admission, review, publication, and gates are untouched.
 
-**V4b (effective-authority recording) remains deferred, not complete.** The original goal — evidence fields marked safe/redacted/unavailable and effective authority recorded as the intersection of parent delegation, worker policy, and installed session rules — is not implemented. No snapshot schema, durable record, or admission integration exists; N2 rules remain opt-in, child-only tool-action containment with no lifecycle install/clear and no computed intersection. **Next V4 step:** an explicit V4b slice that first lands the N2 rule lifecycle (install at delegation/enter, clear at cleanup/exit) on the pinned host, then defines a durable snapshot schema with explicit unknown states, replay-safe writes, and documented admission integration. Do not claim durable authority before that evidence exists.
+**V4b (effective-authority recording) complete 2026-09-16 — opt-in, records only, never gates.** The Phase C close landed the permitted slice on top of Phase A's N2 containment:
 
-**Files affected (candidate):** `process/redact.ts`, `session/move.ts`, `commands/runtime.ts`, `core/permissions.ts`, `gh/client.ts`, `worktree/tools.ts`, candidate `authority/rules.ts` + `authority/state.ts` (with N2/V4b); docs `v4-redaction-threat-model.md`.
+- **Schema and key:** one strict version-1 record per configured-role child session under `authority/v1/<project>/<session>` (`src/opencode-v2/authority/state.ts`): session/parent IDs, role agent, capture time, mode/rule-scope literals, one entry per tracked tool-action family (the eight containment actions), and an explicit `unknownDimensions` list.
+- **Dimensions and intersection:** `parent` (the delegating parent's family-wide rules at snapshot time), `worker-policy` (the plugin's static containment denies for configured-role children), `installed` (the child's own rules read back after install), and `effective` = strictest of the three (`unknown` if any dimension is unknown, else `deny` > `ask` > `allow` > `unconstrained`). Only `resource: "*"` rules participate.
+- **Lifecycle:** written during the child's own admission after the rules are ensured, under the existing process-local `withSessionLock`; recording is best-effort and never changes the admission decision; every snapshot this runtime wrote is cleared on runtime disposal (plugin teardown), so no record outlives the enforcing process. Install/clear is deliberately **not** tied to worktree enter/cleanup in this slice.
+- **Read surface:** `orchestrator_authority_get` (registered only in enforce mode, orchestrator role only, reusing the read-only `orchestrator_observability` permission action so installer/agent-transform rules are unchanged) returns the record or an explicit `unknown` (`missing`/`malformed`/`unreadable`) plus plain limits. It never writes, and no admission/permission/gate/review/publication path reads snapshots.
+- **Honest strength:** tool-action containment metadata only — not filesystem, process, worktree, or atomic child isolation; one current record per session with a process-local lock only (no CAS, transactions, retention, or cross-process guarantee).
+- **Exit evidence:** `test/unit/authority.test.ts` → 40 pass, 0 fail, 262 expect() calls (includes snapshot schema/key, last-match-wins family effects, intersection strictness, unknown/malformed/unreadable reads, recording after rule install, best-effort failure that never blocks admission, clear-on-dispose, and tool registration/role rejection); `test/unit/evidence.test.ts` pins that hints and snapshots are neither EvidenceRecords nor authority; full-suite, typecheck, build, and `git diff --check` results are in the Phase C ledger.
+
+**Files landed:** `src/opencode-v2/authority/state.ts` (new), `src/opencode-v2/authority/tools.ts` (new), `src/opencode-v2/authority/runtime.ts`, `src/opencode-v2/plugin.ts`, `test/unit/authority.test.ts`, `docs/v4-redaction-threat-model.md`.
 
 #### N4 — Sessionless Deterministic Checks via `ctx.generate.text`
 
-Use `ctx.generate.text` for checks that need judgment but not a session: semantic D2 lint (facts/assumptions coherence), review-rubric structuring for bounded review, and D4 adjudication of borderline classifications. Output must be parsed defensively and treated as advisory unless deterministic (schema/semantic) checks already pass; no transcripts or secrets in prompts; results recorded in the trace summary only as metadata.
+Use `ctx.generate.text` for checks that need judgment but not a session: semantic D2 lint (facts/assumptions coherence), review-rubric structuring for bounded review, and D4 adjudication of borderline classifications. Output must be parsed defensively and treated as advisory unless deterministic (schema/semantic) checks already pass; no transcripts or secrets in prompts; results recorded as bounded metadata only. **Implemented form (Phase C close):** one opt-in advisory post-step on `handoff_validate` whose bounded, redacted, versioned record is attached to the validator result (schema owned by `observability/trace.ts`); the plugin does not write it into the session trace summary and does not persist it.
 
-**Contract probe complete (2026-09-15) — production wiring is pilot-only.** The probe measured the pinned surface end to end in an embedded host and produced the decision record [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md):
+**Contract probe complete (2026-09-15); the permitted opt-in pilot landed in the Phase C close (2026-09-16).** The probe measured the pinned surface end to end in an embedded host and produced the decision record [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md):
 
 - Probe scope delivered: exact `{ prompt, model? } -> { text }` shape, sessionless behavior (no session, inbox item, history, or tool call; session-scoped `generate`/`model.request`/`http.request` hooks never fire), a deterministic in-process provider injected through `ctx.aisdk.hook("sdk")`/`("language")`, and two catchable failures (`Generate.ModelSelectionError` for an unknown model, `Generate.UnavailableError` for a provider failure) — with **no real-provider call** and zero external network attempts. The unknown-model case rejects before any provider call; the provider-failure case fails inside the injected in-process provider, which is the suite's only provider call (never a configured provider or the network).
 - Measured result: the injected language model received exactly one user text message with `tools: []`; an unknown model rejects before the injected provider is called; example prompts and outputs stayed non-sensitive fixtures.
-- Decision: **pilot-only, not authorized for production wiring.** A real provider call (network, credentials, cost, latency, model choice, output nondeterminism) was deliberately not measured, the declared input has **no timeout/abort control**, and the only deterministic seam is a test-only host-wide provider override; provider packaging is pin-coupled to the built-in dynamic npm loader.
-- Corrected plan assumption: N4 cannot be treated as a deterministic check by itself. Any future use remains advisory, with deterministic schema/semantic checks first, and needs a new explicit slice for at most one opt-in advisory post-step.
+- Decision at probe time: **pilot-only, not authorized for production wiring.** A real provider call (network, credentials, cost, latency, model choice, output nondeterminism) was deliberately not measured, the declared input has **no timeout/abort control**, and the only deterministic seam is a test-only host-wide provider override; provider packaging is pin-coupled to the built-in dynamic npm loader.
+- Corrected plan assumption: N4 cannot be treated as a deterministic check by itself. Any use remains advisory, with deterministic schema/semantic checks first.
 - **Exit evidence:** `bun test test/contract/phase-c-generate.test.ts` → 6 pass, 0 fail, 67 expect() calls; `bun run build`, `bun run typecheck`, and `git diff --check` green; full-suite evidence recorded in the decision record's reproduction section.
 
-**Files affected (candidate):** `orchestration/validation.ts`, `observability/review.ts` (adapters), `core/d4.ts`.
+**Implemented pilot (Phase C close, 2026-09-16) — opt-in, default-off, metadata only.** The close wired exactly the permitted advisory post-step:
 
-**Effort:** S · **Impact:** Medium · **Risk:** Model nondeterminism; added cost; must never become the sole gate.
+- **Config:** strict `hints: { mode: "off" | "advisory", model?: { providerID, id } }`, default `{ mode: "off" }`; `advisory` requires an explicit model reference (no host-default guessing). With hints off, `handoff_validate` output is byte-identical and no generation call is made.
+- **Ordering:** the call runs only after the deterministic D2 checks return `pass`; failing/blocked receipts produce a bounded `skipped` record and no call.
+- **Prompt:** check ids and verdicts only (`<check-id>=<verdict>` lines plus fixed instruction text); no check details, commands, paths, session text, transcripts, secrets, URLs, or payloads. Hard cap 1200 characters; over-cap prompts are skipped, never truncated.
+- **Output:** defensive `{ text }` parse, single-line/control-character normalization, hard cap 600 characters, canonical-redactor pass, then a 280-character bounded hint in the record. Reasons come from a fixed enum, so provider error text and payload echoes cannot be recorded.
+- **Bounding:** the surface has no abort/timeout control, so the post-step races the call against a 2 s external timeout; a timeout abandons the wait (it cannot cancel the call) and records `timed-out`.
+- **No gating:** the record never changes the verdict, admission state, checks, prose, a gate, or any other decision. It is trace-shaped bounded metadata (schema in `observability/trace.ts`) attached to the `handoff_validate` result; the plugin does not write it into the session trace summary or persist it. Caller-known secrets thread only through the existing injected redactor seam (production threads none).
+- **Exit evidence:** `test/unit/orchestration-tools.test.ts` → 56 pass, 0 fail, 296 expect() calls (includes enabled/disabled paths, verdicts-only prompt assertions, fail-path skip, size bounds, credential redaction, exact-secret threading with a no-secret control, timeout race, provider failure, defensive parse, and a fixed-key metadata record); `test/unit/observability.test.ts` and `test/unit/process.test.ts` pin the record schema/bounds and the redaction shape; full-suite, typecheck, build, and `git diff --check` results are in the Phase C ledger.
+- **Still unmeasured:** no real provider call, cost, latency, or nondeterminism was exercised; the live provider envelope remains unmeasured and the pilot must not be described as production-validated.
+
+**Files landed:** `src/core/config.ts` (`hints`), `src/opencode-v2/orchestration/validation.ts` (hint runner), `src/opencode-v2/orchestration/tools.ts` (post-step wiring), `src/opencode-v2/observability/trace.ts` (record schema), `src/opencode-v2/plugin.ts` (`ctx.generate.text` wiring), `test/unit/{orchestration-tools,observability,process,evidence}.test.ts`.
+
+**Effort:** S · **Impact:** Medium · **Risk:** Model nondeterminism; added cost; must never become the sole gate (it cannot: the record is advisory metadata).
 
 ### State & Observability (remaining)
 
@@ -442,8 +469,10 @@ Identify the beta where the key moved (probe older pins or schema history), ship
 - Replacing OpenCode's native V2 session or plugin architecture.
 - Claiming stable V2 APIs or treating beta behavior as contract.
 - Treating prompt instructions as filesystem or OS isolation (until N2 lands and is verified, prompt rules remain prompts).
+- Treating recorded effective-authority snapshots as admission decisions, evidence, or isolation. They are bounded tool-action records that no decision path reads.
 - Guaranteeing exactly-once provider or external-tool execution.
 - Persisting raw transcripts, prompts, or credentials.
+- Claiming a measured live-provider envelope (network, cost, latency, nondeterminism) for the opt-in generation-hint pilot.
 - Adopting the deprecated npm package as a dependency; treating closed issue #20849 or closed PR #38942 as merged upstream functionality.
 - Widening any gate: session gates only narrow; N1/N2 enforcement must only restrict.
 - Building a general-purpose enterprise agent platform; certifying regulatory compliance.
@@ -465,6 +494,8 @@ Identify the beta where the key moved (probe older pins or schema history), ship
 | Multi-agent consensus becomes correlated error | Independent checker prompts, deterministic checks first (N4 advisory only), human review for high-risk actions |
 | Native V2 API changes break integration | Pinned contract tests, conformance section above, A15/A16 tracked assumptions, no undocumented calls beyond `ctx.catalog` |
 | Redaction misses novel credential formats | Central redactor, adversarial fixtures, no raw output in evidence, explicit uncertainty |
+| Authority snapshots mistaken for enforcement or isolation | Read surface and docs state tool-action-only scope and "records, never decisions"; no decision path reads snapshots; unknown states are explicit |
+| Generation hints echo sensitive model output | Verdicts-only prompts, defensive parse, canonical redaction, hard size caps, fixed reason vocabulary, metadata-only record, default off |
 | Observability leaks private data | Metadata-only trace records (shipped), retention limits still to define (S2) |
 | Doctor creates false confidence | Authority/freshness per capability, local checks advisory, `ctx.integration` signal optional |
 
@@ -537,12 +568,59 @@ Delivered as one cohesive runtime-authority slice (`phase-a-runtime-authority`);
 - **Exit evidence:** `bun test test/contract/phase-b-worktree.test.ts` → 6 pass, 0 fail, 95 expect() calls; `bun run build`, `bun run typecheck`, and `git diff --check` green; full-suite evidence recorded in the decision record's reproduction section.
 - Remaining (not authorized by this probe): adapter with fallback, per-worker isolation re-scope on the native binding + N2 rules. These stay parked until inventory equivalence is proven.
 
-### Phase C — Verification Hardening (N4, V4)
+### Phase C — Verification Hardening (N4, V4) — COMPLETE (2026-09-16)
 
-- **N4 contract probe first slice complete (2026-09-15) — pilot-only, no wiring implemented.** `test/contract/phase-c-generate.test.ts` measures the pinned sessionless `ctx.generate.text` surface (exact `{ prompt, model? } -> { text }` shape, no session/inbox/history/tool side effects, catchable `Generate.*` failures, no external network traffic, and no host-reachable ambient credential — the `OPENCODE_API_KEY` variable is removed for each probe host's lifetime and its value is captured only so it can be restored on cleanup, never passed to the host, logged, or persisted) and the decision record is [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md). Production advisory wiring is **not authorized**; the surface has no timeout/abort control and only a test-only deterministic provider seam. Next N4 step, if wanted, is one opt-in advisory post-step in a new explicit slice.
-- **V4a complete 2026-09-15 — redaction/authority threat model written; central redactor with adversarial fixtures.** `process/redact.ts` is canonical (the `session/move.ts` duplicate was removed); fixtures cover encoded exact secrets, query-like text, multiline mixed output, substring preservation, empty secret lists, and `redactProcessResult`; C7 has GitHub-token/Bearer fail cases plus a no-secret control; evidence tests pin enforced boundaries only. Threat model: [`docs/v4-redaction-threat-model.md`](v4-redaction-threat-model.md). V4a explicitly does **not** record authority or persist evidence: durable effective-authority snapshots are deferred to V4b, whose next step is the N2 rule lifecycle plus a snapshot schema (see the V4 section above).
-- Sessionless semantic checks wired as advisory post-steps of the existing validators (still not authorized; see the N4 decision record for the conditions).
-- Exit evidence: V4a fixtures green with `bun test test/unit/process.test.ts test/unit/session-move.test.ts test/unit/evidence.test.ts test/unit/orchestration-tools.test.ts`, `bun run typecheck`, `bun test`, `bun run build`, and `git diff --check`; N4 outputs (whenever authorized) recorded as trace metadata only. V4 remains open until V4b lands its own evidence.
+- **N4 contract probe complete (2026-09-15).** `test/contract/phase-c-generate.test.ts` measures the pinned sessionless `ctx.generate.text` surface (exact `{ prompt, model? } -> { text }` shape, no session/inbox/history/tool side effects, catchable `Generate.*` failures, no external network traffic, and no host-reachable ambient credential — the `OPENCODE_API_KEY` variable is removed for each probe host's lifetime and its value is captured only so it can be restored on cleanup, never passed to the host, logged, or persisted). The decision record is [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md). The probe did not itself authorize production wiring; the Phase C close later landed exactly the permitted opt-in pilot behind default-off `hints.mode: "advisory"` (see the ledger below).
+- **V4a complete 2026-09-15 — redaction/authority threat model written; central redactor with adversarial fixtures.** `process/redact.ts` is canonical (the `session/move.ts` duplicate was removed); fixtures cover encoded exact secrets, query-like text, multiline mixed output, substring preservation, empty secret lists, and `redactProcessResult`; C7 has GitHub-token/Bearer fail cases plus a no-secret control; evidence tests pin enforced boundaries only. Threat model: [`docs/v4-redaction-threat-model.md`](v4-redaction-threat-model.md). V4a itself recorded no authority and persisted no evidence; **V4b landed in this close**.
+- **V4b complete 2026-09-16 — durable effective-authority snapshots.** Opt-in `authority.mode: "enforce"` records one bounded `authority/v1` snapshot per configured-role child after N2 rule install (parent rules, worker policy, installed rules, and their strictest-effect intersection with explicit unknown states), clears it on runtime exit, and exposes a read-only orchestrator-only lookup. Snapshots are records, never decisions.
+- **N4 pilot complete 2026-09-16 — opt-in advisory generation post-step.** Default-off `hints.mode: "advisory"` runs one bounded sessionless generation call only after deterministic D2 checks pass, builds prompts from check verdicts only, parses/redacts/bounds the output, records a bounded trace-shaped metadata record on the `handoff_validate` result, and never gates; the live provider envelope remains unmeasured.
+- Exit evidence: see the Phase C evidence ledger below (`bun run typecheck`, the five focused unit suites, `test/contract/phase-c-generate.test.ts`, full `bun test`, `bun run build`, `git diff --check`).
+
+### Phase C evidence ledger (recorded 2026-09-16)
+
+Environment: this slice's worktree `phase-c-close` on top of `main` `7b83a33` (the V4a redaction
+audit merge); pinned `@opencode/plugin` / `@opencode/sdk` `0.0.0-beta-19507`; bun 1.3.3;
+`bun install` run in the worktree before verification. All commands were run from the worktree
+root. Nothing was committed, pushed, or published by this slice, and no GitHub or worktree
+mutation tool was used.
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `bun run typecheck` | pass (`tsc --noEmit`, exit 0) |
+| 2 | `bun test test/unit/orchestration-tools.test.ts test/unit/authority.test.ts test/unit/observability.test.ts test/unit/process.test.ts test/unit/evidence.test.ts` | 188 pass / 0 fail, 936 `expect()` calls (5 files) |
+| 3 | `bun test test/contract/phase-c-generate.test.ts` | 6 pass / 0 fail, 67 `expect()` calls |
+| 4 | `bun test` | 943 pass / 1 skip / 0 fail, 7226 `expect()` calls (944 tests, 34 files; skip is the pre-existing cross-volume case) |
+| 5 | `bun run build` | pass; emitted `dist/index.js` et al. (gitignored) |
+| 6 | `git diff --check` | clean (no whitespace errors) |
+| 7 | `git status --short` | exactly the declared scope: 13 modified files plus the two new authority modules; no out-of-scope file changed |
+
+Delivered in this close (all opt-in and default-off):
+
+- **Generation hints (N4 pilot):** `hints: { mode, model? }` config (advisory requires an explicit
+  model), the verdicts-only prompt builder plus bounded defensive parser and timeout race in
+  `orchestration/validation.ts`, the post-step wiring in `orchestration/tools.ts`, the strict
+  bounded record schema in `observability/trace.ts`, and `ctx.generate.text` wiring in
+  `plugin.ts`. With hints off, no call is made and `handoff_validate` output is unchanged.
+- **Durable effective-authority snapshots (V4b):** `authority/state.ts` (schema, `authority/v1`
+  key, family-wide last-match-wins effects, strictest-effect intersection with explicit unknown
+  states, locked read/write/clear), recording and clear-on-dispose in `authority/runtime.ts`, and
+  the orchestrator-only read-only `orchestrator_authority_get` tool in `authority/tools.ts`,
+  registered only in enforce mode and reusing the read-only `orchestrator_observability`
+  permission action (no new permission action; installer/agent-transform untouched).
+- **Docs:** the threat model records the new assets, the never-stored list, the implemented V4b
+  semantics, and the N4 pilot limits; this plan records the Phase C ledger.
+
+Limits and non-claims (unchanged in kind, restated so nothing is overclaimed):
+
+- Snapshots record host-enforced **tool-action** authority only: no filesystem, process,
+  worktree, or atomic child isolation; one current record per session with a process-local lock
+  only; cleared when the enforcing runtime exits; no admission/permission/gate/review/publication
+  path reads them.
+- Generation hints are advisory metadata only: no real provider call, cost, latency, or
+  nondeterminism was measured; the surface has no abort control; no hint text is persisted as
+  evidence or written into the session trace summary; the pilot never gates.
+- Defaults are unchanged: `authority` off, `hints` off, trace/budget/review as before, D2 v1
+  fields and admission vocabulary frozen, publication/gates untouched.
 
 ### Phase D — State and Scale (S1, S2, N5, D1, D3, G1, G2)
 
@@ -566,12 +644,12 @@ Delivered as one cohesive runtime-authority slice (`phase-a-runtime-authority`);
 - **A9 — Capability authority:** unchanged — doctor local/advisory; server probes authoritative only for tested fields.
 - **A10 — Source reliability:** vendor/community claims remain directional; closed issue/PR are not contracts.
 - **A11 — GitHub durability:** the publication **capability record** is durable (`publish/v1`); per-operation GitHub ledgers still do not exist.
-- **A12 — Isolation vs security:** prompt rules, permission visibility, worktree bookkeeping, and OS containment remain separate properties; N2 adds the first host-enforced layer inside that model.
+- **A12 — Isolation vs security:** prompt rules, permission visibility, worktree bookkeeping, and OS containment remain separate properties; N2 adds the first host-enforced layer inside that model, and V4b's snapshots are records of that layer only — never isolation and never decisions.
 - **A13/A14 — S3/V1 semantics:** tracked in `docs/phase-1/assumptions.md` (partially verified; live shared-service probes outstanding).
 - **A15 — Undocumented catalog domain:** `ctx.catalog` is in the pinned `Context` type but not on the plugin guide; documented equivalent is `ctx.model.list()`. Track per pin; migrate if it breaks.
 - **A16 — `tui` flag and hook/worktree host behavior:** the pinned `Plugin` type lacks the `tui` field (cast in use, contract-tested). Live-host behavior is now probed on the pinned host: `session.hook("prompt")`, `permission.hook("evaluate")`, and child rule inheritance by `test/contract/phase-a-hooks.test.ts` (Phase A, 13 pass); the native worktree domain by `test/contract/phase-b-worktree.test.ts` (Phase B, 6 pass — cutover blocked, see the N3 decision record). Measured harness facts: an embedded host's plugin boot `ctx.location` follows the process working directory, `ctx.worktree.*` routes a per-call `location` ref to a location-scoped service, and a directly-passed plugin object is instantiated once per active location (dedupe events by id).
 - **A17 — Host config key placement:** verified 2026-09-15 against the live schema (`https://opencode.ai/config.json`): `subagent_depth` is a top-level `Config` property (default 1); the `experimental` block has `additionalProperties: false` and defines `continue_loop_on_deny` and `batch_tool` but no `subagent_depth`. The installer's `experimental.subagent_depth` is therefore dead on current hosts (G4). Key placement is pin-dependent: treat every installer-written config key as pin-coupled and re-verify per bump (schema-snapshot contract test).
-- **A18 — Sessionless generate surface:** `ctx.generate.text({ prompt, model? })` is measured sessionless with exactly `{ text }` output and catchable `Generate.ModelSelectionError`/`Generate.UnavailableError` failures (Phase C probe, 6 pass). Deterministic verification is possible only through a **test-only** host-wide provider override (`ctx.aisdk.hook("sdk")`/`("language")`); the host's built-in dynamic provider plugin owns the first `sdk` hook and npm-loads `evt.package`, so config-declared provider packages are pin-coupled. No timeout/abort control exists on the declared input, and no real provider call (network, credentials, cost, latency, output nondeterminism) has been measured. Production advisory wiring stays **pilot-only** until a new slice measures those. See [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md).
+- **A18 — Sessionless generate surface:** `ctx.generate.text({ prompt, model? })` is measured sessionless with exactly `{ text }` output and catchable `Generate.ModelSelectionError`/`Generate.UnavailableError` failures (Phase C probe, 6 pass). Deterministic verification is possible only through a **test-only** host-wide provider override (`ctx.aisdk.hook("sdk")`/`("language")`); the host's built-in dynamic provider plugin owns the first `sdk` hook and npm-loads `evt.package`, so config-declared provider packages are pin-coupled. No timeout/abort control exists on the declared input, and no real provider call (network, credentials, cost, latency, output nondeterminism) has been measured. The Phase C close wired the permitted opt-in, default-off `hints.mode: "advisory"` pilot (verdicts-only prompt, defensive parse, canonical redaction, size caps, 2 s external timeout race, metadata-only record, never a gate); its live-provider envelope remains **unmeasured**. See [`docs/phase-1/n4-sessionless-generate-compatibility.md`](phase-1/n4-sessionless-generate-compatibility.md) and §11 of [`docs/v4-redaction-threat-model.md`](v4-redaction-threat-model.md).
 
 ### Verification Checklist
 
@@ -605,6 +683,7 @@ Domains:
 - `src/opencode-v2/gates/{state,tools,rpc}.ts`
 - `src/opencode-v2/observability/{trace,budget,review,runtime,tools}.ts`
 - `src/opencode-v2/orchestration/{validation,evidence,tools}.ts`
+- `src/opencode-v2/authority/{runtime,state,tools}.ts`
 - `src/opencode-v2/peers/tools.ts` · `publish/{state,tools}.ts` · `worker-models/{runtime,state}.ts`
 
 Worktree, process, GitHub:

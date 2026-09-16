@@ -6,7 +6,8 @@ import { D4_PARALLELISM_VALUES, classifyTaskComplexity } from "../../core/d4.js"
 import { D2_LIMITS, RELATIVE_REPO_PATH_PATTERN } from "../../core/contracts.js"
 import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 import { resolveRealpath } from "../worktree/git.js"
-import { validateHandoff, type SessionLocation, type ValidationDeps } from "./validation.js"
+import { runHandoffHint, validateHandoff, type HandoffValidationResult, type SessionLocation, type ValidationDeps } from "./validation.js"
+import type { GenerationHintRecord } from "../observability/trace.js"
 
 /**
  * Serialized runtime orchestration tools (orchestrator_task_complexity_classify,
@@ -25,6 +26,12 @@ import { validateHandoff, type SessionLocation, type ValidationDeps } from "./va
  * `tool.sessionID` into session resolution explicitly (session content is never
  * exposed or logged); `admission_transition` is a stateless state machine that
  * never treats D2 reviewState as approval.
+ *
+ * `handoff_validate` additionally honors the opt-in `hints.mode: "advisory"`
+ * config: after a deterministic `pass` verdict it runs one bounded sessionless
+ * generation post-step and attaches a redacted, metadata-only hint record.
+ * The hint record never changes the verdict, the admission state, or any gate,
+ * and it is not persisted by the plugin.
  */
 
 type ToolDraftLike = {
@@ -52,6 +59,20 @@ export type OrchestrationToolsDeps = {
   pathExists?: (absolutePath: string) => Promise<boolean>
   realpath?: (directory: string) => Promise<string | undefined>
   redact?: (text: string) => string
+  /**
+   * Sessionless generation surface for the opt-in hint post-step; plugin
+   * wiring passes context.generate. Absent means hints cannot run (the tool
+   * records a `generate-unavailable` skip when hints are enabled).
+   */
+  generate?: (input: {
+    prompt: string
+    model?: { providerID: string; id: string }
+  }) => Promise<{ text: string }>
+  /**
+   * Deterministic test/ops override for the hint timeout race; defaults to
+   * `HANDOFF_HINT_TIMEOUT_MS`. The underlying generation is never cancelled.
+   */
+  hintTimeoutMs?: number
 }
 
 export function addOrchestrationTools(draft: ToolDraftLike, deps: OrchestrationToolsDeps): void {
@@ -80,12 +101,14 @@ export function addOrchestrationTools(draft: ToolDraftLike, deps: OrchestrationT
   draft.add({
     name: "handoff_validate",
     description:
-      "Validate a version-1 structured D2 handoff against a task contract (level worker or orchestrator). Deterministic fail-closed checks; returns an admission state for orchestrator_admission_transition. Callable/advisory: not an automatic gate and no completion gate is enforced.",
+      "Validate a version-1 structured D2 handoff against a task contract (level worker or orchestrator). Deterministic fail-closed checks; returns an admission state for orchestrator_admission_transition. Callable/advisory: not an automatic gate and no completion gate is enforced. When hints.mode is advisory, a bounded metadata-only generation hint may be attached after a pass; it never changes the verdict or admission state.",
     input: validateInput,
     options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
-      return resultContent(JSON.stringify(await validateHandoff(input, validationDeps, tool.sessionID)))
+      const result = await validateHandoff(input, validationDeps, tool.sessionID)
+      const hints = await maybeRunHandoffHint(deps, result)
+      return resultContent(JSON.stringify(hints ? { ...result, hints } : result))
     },
   })
 
@@ -112,6 +135,29 @@ function requireOrchestrator(agent: string, options: OrchestratorOptions): void 
   if (agent !== options.orchestrator) {
     throw new Error("orchestration validation tools are available only to the orchestrator")
   }
+}
+
+/**
+ * Opt-in advisory hint post-step. Runs only when `hints.mode: "advisory"` is
+ * configured and the deterministic checks already produced a `pass` verdict.
+ * The returned record is metadata only and never changes `result`: the
+ * validator's verdict, admission state, checks, and prose are whatever the
+ * deterministic path produced, and no error here can surface to the caller.
+ */
+async function maybeRunHandoffHint(
+  deps: OrchestrationToolsDeps,
+  result: HandoffValidationResult,
+): Promise<GenerationHintRecord | undefined> {
+  if (deps.options.hints.mode !== "advisory") return undefined
+  return runHandoffHint({
+    level: result.level,
+    verdict: result.verdict,
+    checks: result.checks,
+    model: deps.options.hints.model,
+    generate: deps.generate,
+    redact: deps.redact,
+    ...(deps.hintTimeoutMs !== undefined ? { timeoutMs: deps.hintTimeoutMs } : {}),
+  })
 }
 
 function resultContent(content: string): ToolResult {

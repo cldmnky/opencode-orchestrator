@@ -6,6 +6,8 @@ import {
   mutationEvidence,
   type Assessment,
 } from "../../src/opencode-v2/orchestration/evidence.js"
+import { newGenerationHint } from "../../src/opencode-v2/observability/trace.js"
+import { buildAuthoritySnapshot, parseAuthoritySnapshot } from "../../src/opencode-v2/authority/state.js"
 
 const PROOF = { id: 1001, number: 42, url: "https://github.com/acme/widgets/issues/42" }
 
@@ -385,5 +387,49 @@ describe("evidence schema boundaries (V4a)", () => {
     const record = liveEvidence({ source: "ghp_EXAMPLEFAKETOKENFORTEST123456", capturedAt: 0 })
     expect(record.source).toBe("ghp_EXAMPLEFAKETOKENFORTEST123456")
     expect(evidenceSchema.safeParse(record).success).toBe(true)
+  })
+})
+
+describe("hints and authority snapshots are not evidence and never become authority (V4b)", () => {
+  const hintRecord = newGenerationHint({
+    status: "completed",
+    level: "worker",
+    verdict: "pass",
+    checkCount: 7,
+    model: "probe/deterministic",
+    promptChars: 300,
+    outputChars: 20,
+    outputRedacted: false,
+    outputTruncated: false,
+    hint: "keep the receipt scoped",
+    durationMs: 5,
+    capturedAt: 1000,
+  })
+
+  test("a generation hint record is not an evidence record and cannot be admitted as one", () => {
+    expect(evidenceSchema.safeParse(hintRecord).success).toBe(false)
+    expect(outcome(assessEvidence(hintRecord, { kind: "live" }))).toBe("rejected")
+    // Field-wrapping a hint cannot promote it: the strict evidence schema still
+    // rejects unknown keys, so hints are never persisted as evidence.
+    expect(evidenceSchema.safeParse({ ...hintRecord, marker: "EVIDENCE_LIVE" }).success).toBe(false)
+  })
+
+  test("an authority snapshot is not an evidence record and never carries evidence authority", () => {
+    const snapshot = buildAuthoritySnapshot({
+      sessionID: "ses_child",
+      parentSessionID: "ses_parent",
+      roleAgent: "implementer",
+      capturedAt: 1000,
+      parentRules: [],
+      parentReadable: true,
+      installedRules: [],
+      installedReadable: true,
+    })
+    expect(evidenceSchema.safeParse(snapshot).success).toBe(false)
+    expect(outcome(assessEvidence(snapshot, { kind: "mutation" }))).toBe("rejected")
+    // And a recorded evidence claim can never parse as an authority snapshot,
+    // so evidence is never persisted as authority.
+    expect(parseAuthoritySnapshot(liveEvidence({ source: "opencode-orchestrator.gh", capturedAt: 0 }))).toBeUndefined()
+    expect(parseAuthoritySnapshot(hintRecord)).toBeUndefined()
   })
 })

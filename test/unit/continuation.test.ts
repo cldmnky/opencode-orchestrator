@@ -9,6 +9,13 @@ import {
   type PlanRunRecord,
   type StorageLike,
 } from "../../src/opencode-v2/goal/state.js"
+import {
+  continuationStepIdempotencyKey,
+  newPendingStepRecord,
+  parseStepRecord,
+  stepPrefix,
+  stepStorageKey,
+} from "../../src/opencode-v2/orchestration/step-state.js"
 import { startGoalContinuation } from "../../src/opencode-v2/goal/continuation.js"
 import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
 
@@ -515,6 +522,204 @@ describe("goal continuation", () => {
     stop()
   })
 
+  test("writes a pending step receipt before delivery and marks it dispatched after", async () => {
+    const location = { directory: "/workspace", project: { id: "project-step" } }
+    const key = goalStorageKey(location, "session")
+    const stepKey = stepStorageKey(location, "session", 1)
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const statusAtDelivery: Array<string | undefined> = []
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      {
+        ...fixture(location, values, prompts, stream),
+        session: {
+          get: async () => undefined,
+          prompt: async (input: { text: string }) => {
+            // The receipt must already exist as pending when the prompt is queued.
+            statusAtDelivery.push(parseStepRecord(values.get(stepKey))?.status)
+            prompts.push(input)
+          },
+        },
+      },
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-step", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 1)
+    await waitFor(() => parseStepRecord(values.get(stepKey))?.status === "dispatched")
+
+    expect(statusAtDelivery).toEqual(["pending"])
+    const record = parseStepRecord(values.get(stepKey))
+    expect(record?.stepIndex).toBe(1)
+    expect(record?.attempt).toBe(1)
+    expect(record?.idempotencyKey).toBe(continuationStepIdempotencyKey("session", 1, 1))
+    expect(record?.createdAt).toBeGreaterThan(0)
+    expect(record?.dispatchedAt).toBeGreaterThanOrEqual(record?.createdAt ?? 0)
+    stop()
+  })
+
+  test("leaves the receipt pending when prompt delivery fails and records the next step", async () => {
+    const location = { directory: "/workspace", project: { id: "project-step-fail" } }
+    const key = goalStorageKey(location, "session")
+    const firstStepKey = stepStorageKey(location, "session", 1)
+    const secondStepKey = stepStorageKey(location, "session", 2)
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    let failNext = true
+    const stop = startGoalContinuation(
+      {
+        ...fixture(location, values, prompts, stream),
+        session: {
+          get: async () => undefined,
+          prompt: async (input: { text: string }) => {
+            if (failNext) {
+              failNext = false
+              throw new Error("prompt delivery failed")
+            }
+            prompts.push(input)
+          },
+        },
+      },
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-step-fail", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => parseStepRecord(values.get(firstStepKey)) !== undefined)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(prompts).toHaveLength(0)
+    expect(parseStepRecord(values.get(firstStepKey))?.status).toBe("pending")
+
+    // The next idle edge reserves a new step and delivers: only that step is
+    // marked dispatched; the failed delivery stays truthfully pending.
+    stream.push({ id: "idle-step-fail-2", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 1)
+    await waitFor(() => parseStepRecord(values.get(secondStepKey))?.status === "dispatched")
+    expect(parseStepRecord(values.get(firstStepKey))?.status).toBe("pending")
+    stop()
+  })
+
+  test("a failed step receipt write never blocks continuation delivery", async () => {
+    const location = { directory: "/workspace", project: { id: "project-step-write-fail" } }
+    const key = goalStorageKey(location, "session")
+    const stepKey = stepStorageKey(location, "session", 1)
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const prefix = stepPrefix(location, "session")
+    const failingStorage: StorageLike = {
+      get: async (item) => values.get(item),
+      set: async (item, value) => {
+        if (item.startsWith(prefix)) throw new Error("step storage unavailable")
+        values.set(item, value)
+      },
+      remove: async (item) => void values.delete(item),
+    }
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream, failingStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-step-write-fail", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 1)
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(1)
+    expect(values.has(stepKey)).toBe(false)
+    stop()
+  })
+
+  test("removes step receipts with the rest of the session state on delete", async () => {
+    const location = { directory: "/workspace", project: { id: "project-step-delete" } }
+    const goalKey = goalStorageKey(location, "session")
+    const firstStepKey = stepStorageKey(location, "session", 1)
+    const secondStepKey = stepStorageKey(location, "session", 2)
+    const otherSessionKey = stepStorageKey(location, "other-session", 1)
+    const values = new Map<string, unknown>([
+      [goalKey, newGoal("session", "ship the change", 1)],
+      [firstStepKey, newPendingStepRecord({ sessionID: "session", stepIndex: 1, idempotencyKey: continuationStepIdempotencyKey("session", 1, 1), now: 1 })],
+      [secondStepKey, newPendingStepRecord({ sessionID: "session", stepIndex: 2, idempotencyKey: continuationStepIdempotencyKey("session", 1, 2), now: 2 })],
+      [otherSessionKey, newPendingStepRecord({ sessionID: "other-session", stepIndex: 1, idempotencyKey: continuationStepIdempotencyKey("other-session", 1, 1), now: 1 })],
+    ])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream, scanningStorage(values)),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "deleted-steps", type: "session.deleted", data: { sessionID: "session" } })
+    await waitFor(() => !values.has(firstStepKey))
+
+    expect(values.has(secondStepKey)).toBe(false)
+    expect(values.has(goalKey)).toBe(false)
+    expect(values.has(otherSessionKey)).toBe(true)
+    stop()
+  })
+
+  test("serializes step receipt writes with session.deleted cleanup", async () => {
+    // A reservation blocked mid-write must keep its pending receipt inside the
+    // lock: the delete queues behind it and removes the receipt, so a delete
+    // can never be followed by a resurrected step record.
+    const location = { directory: "/workspace", project: { id: "project-step-delete-race" } }
+    const key = goalStorageKey(location, "session")
+    const stopKey = stopStorageKey(location, "session")
+    const stepKey = stepStorageKey(location, "session", 1)
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    let releaseSet!: () => void
+    const setGate = new Promise<void>((resolve) => {
+      releaseSet = resolve
+    })
+    let reservationStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      reservationStarted = resolve
+    })
+    const sharedStorage: StorageLike = {
+      get: async (item) => values.get(item),
+      set: async (item, value) => {
+        if (item === key) {
+          reservationStarted()
+          await setGate
+        }
+        values.set(item, value)
+        if (item === key) {
+          // A concurrent /halt lands while the reservation write is in flight,
+          // so admission deterministically stops after the lock is released.
+          values.set(stopKey, { version: 1, sessionID: "session", stoppedAt: 1 })
+        }
+      },
+      remove: async (item) => void values.delete(item),
+      scan: async ({ prefix, after, limit }) => {
+        const matches = [...values.keys()].sort().filter((item) => item.startsWith(prefix) && (after === undefined || item > after))
+        const page = matches.slice(0, limit)
+        const next = matches.length > page.length ? page[page.length - 1] : undefined
+        return { entries: page.map((item) => ({ key: item, value: values.get(item) })), ...(next !== undefined ? { next } : {}) }
+      },
+    }
+    const prompts: Array<{ text: string }> = []
+    const streamA = createStream()
+    const streamB = createStream()
+    const stopA = startGoalContinuation(
+      fixture(location, values, prompts, streamA, sharedStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+    const stopB = startGoalContinuation(
+      fixture(location, values, prompts, streamB, sharedStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    streamA.push({ id: "idle-step-delete-race", type: "session.idle", data: { sessionID: "session" } })
+    await started
+    streamB.push({ id: "deleted-step-race", type: "session.deleted", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    releaseSet()
+
+    await waitFor(() => !values.has(key))
+    expect(values.has(stepKey)).toBe(false)
+    expect(prompts).toHaveLength(0)
+    stopA()
+    stopB()
+  })
+
   test("does not admit a gate-blocked continuation and does not burn a reservation", async () => {
     const location = { directory: "/workspace", project: { id: "project-gate-block" } }
     const key = goalStorageKey(location, "session")
@@ -740,6 +945,20 @@ function fixture(
     session: {
       get: async () => undefined,
       prompt: async (input: { text: string }) => void prompts.push(input),
+    },
+  }
+}
+
+function scanningStorage(values: Map<string, unknown>): StorageLike {
+  return {
+    get: async (item: string) => values.get(item),
+    set: async (item: string, value: unknown) => void values.set(item, value),
+    remove: async (item: string) => void values.delete(item),
+    scan: async ({ prefix, after, limit }) => {
+      const matches = [...values.keys()].sort().filter((key) => key.startsWith(prefix) && (after === undefined || key > after))
+      const page = matches.slice(0, limit)
+      const next = matches.length > page.length ? page[page.length - 1] : undefined
+      return { entries: page.map((key) => ({ key, value: values.get(key) })), ...(next !== undefined ? { next } : {}) }
     },
   }
 }

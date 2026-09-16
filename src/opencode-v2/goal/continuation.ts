@@ -3,6 +3,13 @@ import { buildContinuationPrompt } from "../../core/prompts.js"
 import type { DispatchGate } from "../observability/runtime.js"
 import { authorityDispatchMetadata, type AuthorityMetadataValue } from "../authority/runtime.js"
 import {
+  continuationStepIdempotencyKey,
+  markStepDispatched,
+  newPendingStepRecord,
+  removeSessionSteps,
+  writeStepRecord,
+} from "../orchestration/step-state.js"
+import {
   goalStorageKey,
   readAutomationStop,
   readGoal,
@@ -74,15 +81,16 @@ export function startGoalContinuation(
     if (event.type === "session.deleted") {
       // Serialize cleanup under the same per-session lock the reservation uses
       // so a delete cannot interleave with an in-flight reservation write and
-      // leave stale run/halt state (or admit a prompt for a deleted session).
-      // Records are keyed by the session's stable origin project, so cleanup
-      // resolves that project first.
+      // leave stale run/halt/step state (or admit a prompt for a deleted
+      // session). Records are keyed by the session's stable origin project, so
+      // cleanup resolves that project first.
       await withSessionLock(context.location, sessionID, async () => {
         const keyedLocation = { ...context.location, project: { id: await stableProjectID(context.storage, context.location, sessionID) } }
         await Promise.all([
           context.storage.remove(goalStorageKey(keyedLocation, sessionID)),
           context.storage.remove(runStorageKey(keyedLocation, sessionID)),
           context.storage.remove(stopStorageKey(keyedLocation, sessionID)),
+          removeSessionSteps(context.storage, keyedLocation, sessionID),
         ])
       })
       inFlight.delete(sessionID)
@@ -116,8 +124,9 @@ export function startGoalContinuation(
     // Reserve the turn under the session lock: the ceiling, cooldown, halt,
     // controls gate, plan-run state, and duplicate-idle checks all happen
     // atomically here so concurrent idle edges cannot exceed the ceiling. The
-    // reservation itself is the only shared mutation performed while holding
-    // the lock.
+    // only shared mutations performed while holding the lock are the goal
+    // reservation and its durable pending step receipt (S1 slice 1); the
+    // receipt write is best-effort and can never change the reservation.
     const reserved = await withSessionLock(context.location, sessionID, async () => {
       const goal = await readGoal(context.storage, key)
       if (!goal || goal.status !== "active") return undefined
@@ -154,6 +163,25 @@ export function startGoalContinuation(
         updatedAt: now,
       }
       await context.storage.set(key, next)
+
+      // Durable per-step receipt: the reserved turn is recorded as `pending`
+      // under the same lock (so session cleanup serializes with it) before any
+      // prompt delivery. A receipt failure is logged and swallowed: receipts
+      // are observability and must never change an admission decision.
+      try {
+        await writeStepRecord(
+          context.storage,
+          keyedLocation,
+          newPendingStepRecord({
+            sessionID,
+            stepIndex: next.continuationCount,
+            idempotencyKey: continuationStepIdempotencyKey(sessionID, goal.createdAt, next.continuationCount),
+            now,
+          }),
+        )
+      } catch (error) {
+        console.warn(`opencode-orchestrator step receipt write failed for ${sessionID}`, error)
+      }
       return { goal: next, run }
     })
     if (!reserved || controller.signal.aborted) return
@@ -191,6 +219,18 @@ export function startGoalContinuation(
       // re-consult the dispatch gate at admission time.
       ...(options.authority.mode === "enforce" ? { metadata: authorityDispatchMetadata("continuation") } : {}),
     })
+
+    // Delivery confirmed: update the receipt to `dispatched`. The update is
+    // serialized with session cleanup under the session lock, is idempotent,
+    // and is best-effort like the pending write: it can never fail the
+    // continuation or change an admission decision.
+    try {
+      await withSessionLock(context.location, sessionID, async () => {
+        await markStepDispatched(context.storage, keyedLocation, sessionID, reserved.goal.continuationCount)
+      })
+    } catch (error) {
+      console.warn(`opencode-orchestrator step receipt update failed for ${sessionID}`, error)
+    }
   }
 }
 

@@ -720,6 +720,206 @@ describe("goal continuation", () => {
     stopB()
   })
 
+  test("marks the previously dispatched step completed before the next admission", async () => {
+    const location = { directory: "/workspace", project: { id: "project-step-complete" } }
+    const key = goalStorageKey(location, "session")
+    const firstStepKey = stepStorageKey(location, "session", 1)
+    const secondStepKey = stepStorageKey(location, "session", 2)
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const stepWrites: string[] = []
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const recordingStorage: StorageLike = {
+      ...scanningStorage(values),
+      set: async (item, value) => {
+        if (item.startsWith(stepPrefix(location, "session"))) {
+          stepWrites.push(`${(value as { stepIndex: number }).stepIndex}:${(value as { status: string }).status}`)
+        }
+        values.set(item, value)
+      },
+    }
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream, recordingStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-complete-1", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 1)
+    await waitFor(() => parseStepRecord(values.get(firstStepKey))?.status === "dispatched")
+
+    stream.push({ id: "idle-complete-2", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 2)
+    await waitFor(() => parseStepRecord(values.get(secondStepKey))?.status === "dispatched")
+
+    const first = parseStepRecord(values.get(firstStepKey))
+    expect(first?.status).toBe("completed")
+    expect(first?.completedAt).toBeGreaterThanOrEqual(first?.dispatchedAt ?? 0)
+    // The completion write lands before the next reservation's pending write.
+    expect(stepWrites).toEqual(["1:pending", "1:dispatched", "1:completed", "2:pending", "2:dispatched"])
+    stop()
+  })
+
+  test("marks the previous step completed even when the next admission is refused", async () => {
+    const location = { directory: "/workspace", project: { id: "project-step-complete-refused" } }
+    const key = goalStorageKey(location, "session")
+    const firstStepKey = stepStorageKey(location, "session", 1)
+    const secondStepKey = stepStorageKey(location, "session", 2)
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 1 } }),
+    )
+
+    stream.push({ id: "idle-refused-1", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 1)
+    await waitFor(() => parseStepRecord(values.get(firstStepKey))?.status === "dispatched")
+
+    stream.push({ id: "idle-refused-2", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => parseStepRecord(values.get(firstStepKey))?.status === "completed")
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    // The ceiling refused the new admission exactly as before; the completion
+    // mark changed nothing about the admission decision.
+    expect(prompts).toHaveLength(1)
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(1)
+    expect(values.has(secondStepKey)).toBe(false)
+    stop()
+  })
+
+  test("a failed completion write never blocks the next admission", async () => {
+    const location = { directory: "/workspace", project: { id: "project-step-complete-fail" } }
+    const key = goalStorageKey(location, "session")
+    const firstStepKey = stepStorageKey(location, "session", 1)
+    const secondStepKey = stepStorageKey(location, "session", 2)
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const prefix = stepPrefix(location, "session")
+    const failingStorage: StorageLike = {
+      get: async (item) => values.get(item),
+      set: async (item, value) => {
+        if (item.startsWith(prefix) && (value as { status?: string }).status === "completed") {
+          throw new Error("step storage unavailable")
+        }
+        values.set(item, value)
+      },
+      remove: async (item) => void values.delete(item),
+    }
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream, failingStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-complete-fail-1", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => parseStepRecord(values.get(firstStepKey))?.status === "dispatched")
+
+    stream.push({ id: "idle-complete-fail-2", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 2)
+    await waitFor(() => parseStepRecord(values.get(secondStepKey))?.status === "dispatched")
+
+    // The completion write failed and was swallowed: the prior receipt keeps
+    // its last truthful status and admission proceeded unchanged.
+    expect(parseStepRecord(values.get(firstStepKey))?.status).toBe("dispatched")
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(2)
+    stop()
+  })
+
+  test("serializes the completion write with session.deleted cleanup", async () => {
+    // A completion blocked mid-write must keep the delete queued behind it, so
+    // cleanup cannot remove the receipt and then be followed by a resurrecting
+    // completion write.
+    const location = { directory: "/workspace", project: { id: "project-step-complete-delete-race" } }
+    const key = goalStorageKey(location, "session")
+    const stepKey = stepStorageKey(location, "session", 1)
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    let releaseCompletion!: () => void
+    const completionGate = new Promise<void>((resolve) => {
+      releaseCompletion = resolve
+    })
+    let completionStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      completionStarted = resolve
+    })
+    const sharedStorage: StorageLike = {
+      get: async (item) => values.get(item),
+      set: async (item, value) => {
+        if (item === stepKey && (value as { status?: string }).status === "completed") {
+          completionStarted()
+          await completionGate
+        }
+        values.set(item, value)
+      },
+      remove: async (item) => void values.delete(item),
+      scan: async ({ prefix, after, limit }) => {
+        const matches = [...values.keys()].sort().filter((item) => item.startsWith(prefix) && (after === undefined || item > after))
+        const page = matches.slice(0, limit)
+        const next = matches.length > page.length ? page[page.length - 1] : undefined
+        return { entries: page.map((item) => ({ key: item, value: values.get(item) })), ...(next !== undefined ? { next } : {}) }
+      },
+    }
+    const prompts: Array<{ text: string }> = []
+    const streamA = createStream()
+    const streamB = createStream()
+    const stopA = startGoalContinuation(
+      fixture(location, values, prompts, streamA, sharedStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+    const stopB = startGoalContinuation(
+      fixture(location, values, prompts, streamB, sharedStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    streamA.push({ id: "idle-complete-delete-1", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => parseStepRecord(values.get(stepKey))?.status === "dispatched")
+    streamA.push({ id: "idle-complete-delete-2", type: "session.idle", data: { sessionID: "session" } })
+    await started
+    streamB.push({ id: "deleted-complete-race", type: "session.deleted", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    releaseCompletion()
+
+    await waitFor(() => !values.has(key))
+    expect(values.has(stepKey)).toBe(false)
+    stopA()
+    stopB()
+  })
+
+  test("clears completion tracking when the session is deleted", async () => {
+    const location = { directory: "/workspace", project: { id: "project-step-complete-memory" } }
+    const key = goalStorageKey(location, "session")
+    const stepKey = stepStorageKey(location, "session", 1)
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    let stepReads = 0
+    const countingStorage: StorageLike = {
+      ...scanningStorage(values),
+      get: async (item) => {
+        if (item === stepKey) stepReads += 1
+        return values.get(item)
+      },
+    }
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream, countingStorage),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "idle-memory-1", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => parseStepRecord(values.get(stepKey))?.status === "dispatched")
+
+    stream.push({ id: "deleted-memory", type: "session.deleted", data: { sessionID: "session" } })
+    await waitFor(() => !values.has(key))
+    const readsAtDelete = stepReads
+
+    // A late idle edge for the deleted session must not attempt a completion
+    // read for a receipt cleanup already removed.
+    stream.push({ id: "idle-memory-2", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(stepReads).toBe(readsAtDelete)
+    stop()
+  })
+
   test("does not admit a gate-blocked continuation and does not burn a reservation", async () => {
     const location = { directory: "/workspace", project: { id: "project-gate-block" } }
     const key = goalStorageKey(location, "session")

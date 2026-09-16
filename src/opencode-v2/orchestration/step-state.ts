@@ -16,15 +16,20 @@ import { redact } from "../process/redact.js"
  *   never changes a decision. A receipt write/update failure is caught by the
  *   caller and never blocks a dispatch.
  * - There is no scheduler, no event log, no projection, no retry hook, and no
- *   backoff here. `status`, `attempt`, `cursor`, `errorClass`, and
- *   `errorMessage` are recorded state for later slices to consume; nothing in
- *   this module retries or resumes anything.
+ *   backoff here. `status`, `attempt`, `cursor`, `errorClass`, `errorMessage`,
+ *   and `completedMessage` are recorded state for later slices to consume;
+ *   nothing in this module retries or resumes anything.
  * - There is no exactly-once claim: a receipt records that a step was reserved
  *   (`pending`), delivered (`dispatched`), finished (`completed`), or failed
  *   (`failed`). It can make a replay detectable; it cannot make an external
  *   side effect idempotent. See `docs/s1-replay-safety-inventory.md`.
+ * - `completed` and `failed` are sticky terminal records: a finished step is
+ *   never reopened and a failure is never silently replaced. Completion is a
+ *   recorded observation (the session went idle after delivery), never proof
+ *   that the turn or its external effects finished successfully.
  * - Writes are not serialized here: the caller owns locking (goal continuation
- *   performs the pending write under the existing process-local session lock).
+ *   performs the pending/dispatched/completed writes under the existing
+ *   process-local session lock).
  *
  * This module is free of filesystem/process/git/gh calls: it only reads and
  * writes durable storage through a storage-like interface.
@@ -50,6 +55,8 @@ export type StepErrorClass = (typeof STEP_ERROR_CLASSES)[number]
 
 /** Bound for the redacted failure message stored on a record. */
 export const STEP_ERROR_MESSAGE_MAX_LENGTH = 500
+/** Bound for the redacted completion message stored on a record. */
+export const STEP_COMPLETED_MESSAGE_MAX_LENGTH = 500
 /** Bound for a deterministic idempotency key. */
 export const STEP_IDEMPOTENCY_KEY_MAX_LENGTH = 512
 /** Bound for an opaque resume cursor carried by a record. */
@@ -75,6 +82,8 @@ export type StepRecord = {
   updatedAt: number
   dispatchedAt?: number
   completedAt?: number
+  /** Known-pattern-and-exact-secret redacted, whitespace-collapsed, length-bounded. */
+  completedMessage?: string
   failedAt?: number
   errorClass?: StepErrorClass
   /** Known-pattern-and-exact-secret redacted, whitespace-collapsed, length-bounded. */
@@ -95,6 +104,7 @@ export const stepRecordSchema = z
     updatedAt: z.number().finite().nonnegative(),
     dispatchedAt: z.number().finite().nonnegative().optional(),
     completedAt: z.number().finite().nonnegative().optional(),
+    completedMessage: z.string().min(1).max(STEP_COMPLETED_MESSAGE_MAX_LENGTH).optional(),
     failedAt: z.number().finite().nonnegative().optional(),
     errorClass: z.enum(STEP_ERROR_CLASSES).optional(),
     errorMessage: z.string().min(1).max(STEP_ERROR_MESSAGE_MAX_LENGTH).optional(),
@@ -151,10 +161,15 @@ export function continuationStepIdempotencyKey(sessionID: string, goalCreatedAt:
  * callers can omit the field instead of storing a meaningless value.
  */
 export function boundedStepErrorMessage(value: string, secrets: readonly string[] = []): string {
+  return boundedStepMessage(value, secrets, STEP_ERROR_MESSAGE_MAX_LENGTH)
+}
+
+/** Shared bounded/redacted text shape for every record message field. */
+function boundedStepMessage(value: string, secrets: readonly string[], maxLength: number): string {
   const collapsed = redact(value, secrets).replace(/\s+/g, " ").trim()
   if (collapsed.length === 0) return ""
-  if (collapsed.length <= STEP_ERROR_MESSAGE_MAX_LENGTH) return collapsed
-  return `${collapsed.slice(0, STEP_ERROR_MESSAGE_MAX_LENGTH - 1)}…`
+  if (collapsed.length <= maxLength) return collapsed
+  return `${collapsed.slice(0, maxLength - 1)}…`
 }
 
 export type NewStepRecordInput = {
@@ -407,6 +422,43 @@ export async function markStepFailed(
   if (input.errorMessage !== undefined) {
     const message = boundedStepErrorMessage(input.errorMessage, input.secrets ?? [])
     if (message.length > 0) next.errorMessage = message
+  }
+  const parsed = stepRecordSchema.parse(next)
+  await storage.set(key, parsed)
+  return parsed
+}
+
+export type StepCompletionInput = {
+  /** Optional bounded, redacted completion note stored as `completedMessage`. */
+  message?: string
+  /** Exact caller-known secrets to redact out of `message` as well. */
+  secrets?: readonly string[]
+}
+
+/**
+ * Marks a delivered receipt `completed` with an optional bounded, redacted
+ * completion note. No-op for a missing record, for an already-`completed`
+ * record (idempotent: a finished step is never rewritten, so a repeated call
+ * keeps the first `completedAt`/`completedMessage`), and for a `failed` record
+ * (failure evidence is terminal and is never silently replaced). Blank notes
+ * are omitted instead of stored.
+ */
+export async function markStepCompleted(
+  storage: StorageLike,
+  location: LocationLike,
+  sessionID: string,
+  stepIndex: number,
+  input: StepCompletionInput = {},
+  now = Date.now(),
+): Promise<StepRecord | undefined> {
+  const keyed = await keyedLocation(storage, location, sessionID)
+  const key = stepStorageKey(keyed, sessionID, stepIndex)
+  const current = parseStepRecord(await storage.get(key))
+  if (!current || current.status === "completed" || current.status === "failed") return current
+  const next: StepRecord = { ...current, status: "completed", completedAt: now, updatedAt: now }
+  if (input.message !== undefined) {
+    const message = boundedStepMessage(input.message, input.secrets ?? [], STEP_COMPLETED_MESSAGE_MAX_LENGTH)
+    if (message.length > 0) next.completedMessage = message
   }
   const parsed = stepRecordSchema.parse(next)
   await storage.set(key, parsed)

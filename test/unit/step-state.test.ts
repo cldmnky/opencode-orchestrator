@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  STEP_COMPLETED_MESSAGE_MAX_LENGTH,
   STEP_ERROR_MESSAGE_MAX_LENGTH,
   STEP_LIST_LIMIT_MAX,
   STEP_RECORD_VERSION,
@@ -7,6 +8,7 @@ import {
   continuationStepIdempotencyKey,
   lastCompletedStep,
   listStepRecords,
+  markStepCompleted,
   markStepDispatched,
   markStepFailed,
   newPendingStepRecord,
@@ -111,6 +113,10 @@ describe("step record schema", () => {
     expect(full.version).toBe(STEP_RECORD_VERSION)
     expect(full.status).toBe("pending")
     expect(full.attempt).toBe(1)
+
+    const noted = stepRecordSchema.safeParse({ ...recordWithStatus("completed"), completedMessage: "observed idle" })
+    expect(noted.success).toBe(true)
+    expect(noted.success && noted.data.completedMessage).toBe("observed idle")
   })
 
   test("rejects unknown fields, unknown statuses, and out-of-range values", () => {
@@ -122,6 +128,9 @@ describe("step record schema", () => {
     expect(parseStepRecord({ ...pending(), errorClass: "very-bad" })).toBeUndefined()
     expect(parseStepRecord({ ...pending(), version: 2 })).toBeUndefined()
     expect(parseStepRecord({ ...pending(), errorMessage: "x".repeat(STEP_ERROR_MESSAGE_MAX_LENGTH + 1) })).toBeUndefined()
+    expect(
+      parseStepRecord({ ...pending(), completedMessage: "x".repeat(STEP_COMPLETED_MESSAGE_MAX_LENGTH + 1) }),
+    ).toBeUndefined()
     expect(parseStepRecord({ ...pending(), completedAt: Number.NaN })).toBeUndefined()
   })
 
@@ -311,6 +320,82 @@ describe("step storage helpers", () => {
     expect(await markStepFailed(completedStorage, LOCATION, SESSION, 1, { errorClass: "permanent" })).toEqual(completed)
   })
 
+  test("markStepCompleted completes pending and dispatched records and never rewrites terminal ones", async () => {
+    const storage = memStorage([[STEP_KEY, pending()]])
+    const completed = await markStepCompleted(storage, LOCATION, SESSION, 1, {}, 500)
+    expect(completed?.status).toBe("completed")
+    expect(completed?.completedAt).toBe(500)
+    expect(completed?.updatedAt).toBe(500)
+    expect(storage.values.get(STEP_KEY)).toEqual(completed)
+
+    // Idempotent: a repeated call returns the same record and keeps the first
+    // completion timestamp instead of rewriting the receipt.
+    const again = await markStepCompleted(storage, LOCATION, SESSION, 1, {}, 900)
+    expect(again).toEqual(completed)
+    expect(storage.values.get(STEP_KEY)).toEqual(completed)
+
+    const dispatchedStorage = memStorage([[STEP_KEY, recordWithStatus("dispatched")]])
+    const fromDispatched = await markStepCompleted(dispatchedStorage, LOCATION, SESSION, 1, {}, 700)
+    expect(fromDispatched?.status).toBe("completed")
+    expect(fromDispatched?.dispatchedAt).toBe(101)
+    expect(fromDispatched?.completedAt).toBe(700)
+    expect(fromDispatched?.updatedAt).toBe(700)
+
+    // Missing records stay missing instead of being created.
+    expect(await markStepCompleted(storage, LOCATION, SESSION, 42)).toBeUndefined()
+    expect(storage.values.has(stepStorageKey(LOCATION, SESSION, 42))).toBe(false)
+
+    // A failed receipt is terminal evidence: completion never silently replaces it.
+    const failed = recordWithStatus("failed")
+    const failedStorage = memStorage([[STEP_KEY, failed]])
+    expect(await markStepCompleted(failedStorage, LOCATION, SESSION, 1, {}, 800)).toEqual(failed)
+    expect(failedStorage.values.get(STEP_KEY)).toEqual(failed)
+  })
+
+  test("markStepCompleted bounds and redacts an optional completion message", async () => {
+    const completed = await markStepCompleted(
+      memStorage([[STEP_KEY, pending()]]),
+      LOCATION,
+      SESSION,
+      1,
+      { message: "idle observed\nAuthorization: Bearer ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAK", secrets: [] },
+      600,
+    )
+    expect(completed?.completedMessage).toContain("idle observed")
+    expect(completed?.completedMessage).not.toContain("ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAK")
+    expect(completed?.completedMessage).toContain("[redacted]")
+    expect(completed?.completedMessage).not.toContain("\n")
+
+    const exact = await markStepCompleted(
+      memStorage([[STEP_KEY, pending()]]),
+      LOCATION,
+      SESSION,
+      1,
+      { message: "token=super-secret-value done", secrets: ["super-secret-value"] },
+      600,
+    )
+    expect(exact?.completedMessage).not.toContain("super-secret-value")
+    expect(exact?.completedMessage).toContain("[redacted]")
+
+    // A long message is truncated to the completion bound.
+    const long = await markStepCompleted(
+      memStorage([[STEP_KEY, pending()]]),
+      LOCATION,
+      SESSION,
+      1,
+      { message: "x".repeat(2_000) },
+      600,
+    )
+    expect(long?.completedMessage?.length).toBe(STEP_COMPLETED_MESSAGE_MAX_LENGTH)
+    expect(long?.completedMessage?.endsWith("…")).toBe(true)
+
+    // Blank messages are omitted instead of stored.
+    const blankStorage = memStorage([[STEP_KEY, pending()]])
+    const blank = await markStepCompleted(blankStorage, LOCATION, SESSION, 1, { message: "   \n  " }, 600)
+    expect(blank?.completedMessage).toBeUndefined()
+    expect(parseStepRecord(blankStorage.values.get(STEP_KEY))).toEqual(blank)
+  })
+
   test("listStepRecords returns one parsed, sorted scan page with a cursor", async () => {
     const storage = memStorage([
       [stepStorageKey(LOCATION, SESSION, 3), pending(SESSION, 3)],
@@ -375,17 +460,37 @@ describe("step storage helpers", () => {
 
   test("removeSessionSteps removes every receipt of one session and nothing else", async () => {
     const otherSessionKey = stepStorageKey(LOCATION, "other-session", 1)
+    const otherSessionCompletedKey = stepStorageKey(LOCATION, "other-session", 2)
+    const foreignProjectKey = stepStorageKey({ ...LOCATION, project: { id: "other-project" } }, SESSION, 1)
+    const completedKey = stepStorageKey(LOCATION, SESSION, 4)
     const storage = pagedStorage([
       [stepStorageKey(LOCATION, SESSION, 1), pending()],
       [stepStorageKey(LOCATION, SESSION, 2), pending(SESSION, 2)],
       [stepStorageKey(LOCATION, SESSION, 3), pending(SESSION, 3)],
+      [completedKey, recordWithStatus("completed", 4)],
       [otherSessionKey, pending("other-session", 1)],
+      [otherSessionCompletedKey, recordWithStatus("completed", 2, "other-session")],
+      [foreignProjectKey, pending(SESSION, 1)],
     ])
-    expect(await removeSessionSteps(storage, LOCATION, SESSION)).toBe(3)
+    expect(await removeSessionSteps(storage, LOCATION, SESSION)).toBe(4)
     expect(storage.values.has(stepStorageKey(LOCATION, SESSION, 1))).toBe(false)
     expect(storage.values.has(stepStorageKey(LOCATION, SESSION, 2))).toBe(false)
     expect(storage.values.has(stepStorageKey(LOCATION, SESSION, 3))).toBe(false)
+    expect(storage.values.has(completedKey)).toBe(false)
     expect(storage.values.get(otherSessionKey)).toBeDefined()
+    expect(storage.values.get(otherSessionCompletedKey)).toBeDefined()
+    expect(storage.values.get(foreignProjectKey)).toBeDefined()
+    // Missing scan removes nothing instead of claiming a scalable prefix delete.
     expect(await removeSessionSteps(noScanStorage(storage.values), LOCATION, SESSION)).toBe(0)
+  })
+
+  test("removeSessionSteps stops at the bounded scan cap instead of claiming completeness", async () => {
+    const total = 2_100
+    const beyondCap = 100
+    const storage = memStorage(
+      Array.from({ length: total }, (_, index) => [stepStorageKey(LOCATION, SESSION, index), pending(SESSION, index)]),
+    )
+    expect(await removeSessionSteps(storage, LOCATION, SESSION)).toBe(total - beyondCap)
+    expect(storage.values.size).toBe(beyondCap)
   })
 })

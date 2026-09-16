@@ -4,6 +4,7 @@ import type { DispatchGate } from "../observability/runtime.js"
 import { authorityDispatchMetadata, type AuthorityMetadataValue } from "../authority/runtime.js"
 import {
   continuationStepIdempotencyKey,
+  markStepCompleted,
   markStepDispatched,
   newPendingStepRecord,
   removeSessionSteps,
@@ -51,6 +52,11 @@ export function startGoalContinuation(
   const iterator = iterable[Symbol.asyncIterator]()
   const inFlight = new Set<string>()
   const lastEvent = new Map<string, string>()
+  // Index of the most recently delivered continuation step per session, kept in
+  // memory only: the next idle edge marks that receipt `completed` before any
+  // new admission is attempted. A restart simply loses the observation; it
+  // never replays or resumes anything.
+  const lastDispatched = new Map<string, number>()
   let finished!: Promise<void>
 
   finished = consumeEvents().catch((error) => {
@@ -95,6 +101,7 @@ export function startGoalContinuation(
       })
       inFlight.delete(sessionID)
       lastEvent.delete(sessionID)
+      lastDispatched.delete(sessionID)
       return
     }
 
@@ -105,11 +112,37 @@ export function startGoalContinuation(
 
     inFlight.add(sessionID)
     try {
+      // A new idle edge means the previously delivered turn is over: record its
+      // receipt as `completed` before this edge can reserve a new step. The
+      // mark is best-effort and serialized under the session lock; it never
+      // changes the admission decision below (a refused admission still leaves
+      // the prior step truthfully completed).
+      await settlePreviousStep(sessionID)
       await admitContinuation(sessionID)
     } catch (error) {
       if (!controller.signal.aborted) console.error(`opencode-orchestrator continuation failed for ${sessionID}`, error)
     } finally {
       inFlight.delete(sessionID)
+    }
+  }
+
+  // Marks the last delivered step's receipt `completed`, best-effort: the write
+  // is serialized with session cleanup under the same per-session lock the
+  // reservation uses, and every failure is logged and swallowed so it can never
+  // block or alter an admission. The tracked index is deleted only after the
+  // attempt returns (success or a missing receipt); a storage failure keeps it
+  // so a later idle edge can retry the idempotent mark.
+  async function settlePreviousStep(sessionID: string): Promise<void> {
+    const stepIndex = lastDispatched.get(sessionID)
+    if (stepIndex === undefined) return
+    try {
+      const keyedLocation = { ...context.location, project: { id: await stableProjectID(context.storage, context.location, sessionID) } }
+      await withSessionLock(context.location, sessionID, async () => {
+        await markStepCompleted(context.storage, keyedLocation, sessionID, stepIndex)
+      })
+      lastDispatched.delete(sessionID)
+    } catch (error) {
+      console.warn(`opencode-orchestrator step receipt completion failed for ${sessionID}`, error)
     }
   }
 
@@ -231,6 +264,11 @@ export function startGoalContinuation(
     } catch (error) {
       console.warn(`opencode-orchestrator step receipt update failed for ${sessionID}`, error)
     }
+    // Remember the delivered step so the next idle edge can mark its receipt
+    // completed. Tracking is memory-only and independent of the best-effort
+    // update above: the completion mark targets the logical step, and a failed
+    // dispatched write must not erase it.
+    lastDispatched.set(sessionID, reserved.goal.continuationCount)
   }
 }
 

@@ -147,7 +147,7 @@ Assessed 2026-09-15 against the current plugin guide and the pinned `@opencode/p
 - `ctx.permission.rules` — session-scoped rules; **child sessions inherit the rules in effect when they are created** (real containment, not prompts).
 - Native `ctx.worktree` domain — `create`/`remove`/`list`/`refresh` + `transform`/`reload`, project ownership, `Worktree.OperationError` (force-required confirmations), `worktree.updated` events.
 - `ctx.generate.text` — sessionless model calls (no session, tools, or history). **Probe complete 2026-09-15 (N4): exact `{ prompt, model? } -> { text }` shape measured, catchable `Generate.*` failures, test-only deterministic provider override.** The Phase C close (2026-09-16) wired the permitted pilot behind default-off `hints.mode: "advisory"`: one bounded advisory metadata record after deterministic checks pass; no real provider call measured, no abort control (external timeout race).
-- `session.hook("retry")` — retry decision/delay override with `attempt` number.
+- `session.hook("retry")` — retry decision/delay override with `attempt` number. **Used by N5** (default-off bounded policy; probe + wiring complete 2026-09-16 — see [`docs/phase-1/n5-retry-compatibility.md`](phase-1/n5-retry-compatibility.md)).
 - `ctx.reference.transform`, `ctx.skill.transform`, `ctx.shell.hook("create.before")`, `ctx.integration.*` — documented surfaces with no current use.
 
 ## Completed Work and Residual Gaps
@@ -183,7 +183,7 @@ Everything in this section shipped after the 2026-08-30 draft (issues #8/#10/#14
 | P1 | S1 | State & Observability | Durable per-step checkpoints with backoff and cursor resume | Goal/run records still lack per-step receipts; `storage.scan` gives cursors; retry classes feed N5 | L | High | Duplicate side effects |
 | P1 | D1 | Delegation & Prompting | DAG scheduler with adaptive scaling | `max_parallel` still prompted only (A4 true); D4 now supplies the routing input | L | High | Over-decomposition |
 | P2 | S2 | State & Observability | Durable event log + materialized projections | Volatile events still sole source for continuation/sidebar hydration; TUI sidebar is a volatile projection | L | High | State divergence |
-| P2 | N5 | State & Observability | Retry/backoff policy via `session.hook("retry")` | Documented retry override; feeds S1 retry classification with bounded delays | S | Medium | Fighting host classification |
+| P2 | N5 | State & Observability | Retry/backoff policy via `session.hook("retry")` — **contract probe + default-off bounded policy complete 2026-09-16** | Documented retry override; feeds S1 retry classification with bounded delays | S | Medium | Fighting host classification |
 | P2 | D3 | Delegation & Prompting | Context budget measurement | No token estimator or budget yet; usage snapshots exist in trace records | M | High | Lossy compression |
 | P2 | G1 | DX & Governance | Bounded parent/child messaging | Pinned contract still has no messaging/parentage API; peers are a stopgap; requires host primitives first | M | Medium | Deadlock |
 | P2 | G2 | DX & Governance | Versioned policy profiles + evidence packets | Config surface has grown (trace/budget/review/clarify/publish/gates); `ctx.reference.transform` can publish profile docs | M | Medium | Profile sprawl |
@@ -354,11 +354,34 @@ As previously drafted (volatile events vs durable append-only lifecycle records 
 
 #### N5 — Retry/Backoff Policy via the Retry Hook
 
-Register `session.hook("retry")` to implement bounded, classed retry policy for orchestrator sessions: honor host classification, cap delays (documented: invalid delays fall back to the computed delay; built-in max attempts remain a hard limit), and record attempts in the trace summary. Feeds S1 retry classes; must not convert terminal failures into retries for external side-effect classes.
+**Status: complete (probe + default-off production slice), 2026-09-16.** Contract probe measured on pinned beta-19507 with a deterministic in-process provider (callback shape, physical attempt numbering starting at 2, delay override, malformed-delay host fallback, the `recurs(4)` ceiling, duplicated `session.retry.scheduled` delivery, registration cleanup, zero network/credentials) and the policy is wired behind a new strict, default-off `retry: { mode: "off" | "bounded", max_delay_ms }` block. Recorded in full in [`docs/phase-1/n5-retry-compatibility.md`](phase-1/n5-retry-compatibility.md).
 
-**Files affected (candidate):** `plugin.ts`, `observability/{runtime,trace}.ts`, candidate `authority/hooks.ts` (with N1).
+**Implementation.** Pure policy in `src/opencode-v2/observability/retry.ts`: fixed bounded classes (`rate-limited`, `provider-internal`, `transport`, `unknown`, `terminal`), never `false`→`true`, keep only positively-classified transient classes, veto ambiguous classes and per-session bursts (6 observations / 60 s), cap valid delays downward, leave malformed delays for the host fallback, and leave the built-in maximum attempt count as the hard limit. `src/opencode-v2/plugin.ts` registers one `session.hook("retry")` only when `mode: "bounded"`, filters to the orchestrator agent, and pushes the registration into the existing cleanup list. Attempts are recorded only as bounded metadata (`retryTraceSchema`, `retry-trace/v1/<project>/<session>`, snapshot mode) with no error text, prompts, or credentials; the S3 trace summary's `retries` counter and the S3 runtime are untouched and never double count.
+
+**Files:** `src/opencode-v2/observability/retry.ts` (new), `src/opencode-v2/observability/trace.ts`, `src/core/config.ts`, `src/opencode-v2/plugin.ts`, `test/unit/retry.test.ts` (new), `test/unit/observability.test.ts`, `test/contract/phase-d-retry.test.ts` (new), `docs/phase-1/n5-retry-compatibility.md` (new), and this plan ledger.
+
+**Verification (2026-09-16):** `bun run typecheck` clean; `bun test test/unit/retry.test.ts test/unit/observability.test.ts` 58 pass / 0 fail; `bun test test/contract/phase-d-retry.test.ts` 10 pass / 0 fail; full `bun test`, `bun run build`, and `git diff --check` green (see the N5 evidence ledger below).
+
+**Limitations:** the retry trace record has no tool reader in this slice; the burst window and attempt maps are process-local and are not cleaned on `session.deleted`; no real provider call was exercised (no retry-after headers, cost, or latency measured); no exactly-once or durable retry-ledger claim. With `mode: "off"` no hook is registered and every existing behavior stays byte-identical.
+
+**Original requirement (unchanged):** Register `session.hook("retry")` to implement bounded, classed retry policy for orchestrator sessions: honor host classification, cap delays (documented: invalid delays fall back to the computed delay; built-in max attempts remain a hard limit), and record attempts in the trace summary. Feeds S1 retry classes; must not convert terminal failures into retries for external side-effect classes.
 
 **Effort:** S · **Impact:** Medium · **Risk:** Fighting host classification; retry storms.
+
+### N5 evidence ledger (recorded 2026-09-16)
+
+Environment: this slice's worktree on `feat/n5-retry-policy` based on `main` `831c65f`; pinned `@opencode/plugin`/`@opencode/sdk` `0.0.0-beta-19507`; bun 1.3.3; `bun install` and `bun run build` run in the worktree before the contract suite. All commands from the worktree root.
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `bun run typecheck` | pass (`tsc --noEmit`, exit 0) |
+| 2 | `bun test test/unit/retry.test.ts test/unit/observability.test.ts` | 58 pass / 0 fail |
+| 3 | `bun test test/contract/phase-d-retry.test.ts` | 10 pass / 0 fail (contract probe + production wiring) |
+| 4 | `bun test` | 1010 pass / 1 skip / 0 fail (1011 tests, 37 files; the skip is the pre-existing cross-volume platform case) |
+| 5 | `bun run build` | pass; emitted `dist/index.js`, `dist/tui.js`, `dist/commands.js`, `dist/installer.js`, `dist/cli/index.js` |
+| 6 | `git diff --check` | clean (no whitespace errors) |
+
+Measured probe facts and the exact policy rules are recorded in [`docs/phase-1/n5-retry-compatibility.md`](phase-1/n5-retry-compatibility.md); this ledger records only the verification commands.
 
 ### Delegation & Prompting (remaining)
 

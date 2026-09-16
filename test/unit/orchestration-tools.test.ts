@@ -8,7 +8,17 @@ import {
   addOrchestrationTools,
   type OrchestrationToolsDeps,
 } from "../../src/opencode-v2/orchestration/tools.js"
-import { HANDOFF_CHECK_IDS, type HandoffValidationResult } from "../../src/opencode-v2/orchestration/validation.js"
+import {
+  HANDOFF_CHECK_IDS,
+  HANDOFF_HINT_OUTPUT_MAX_CHARS,
+  HANDOFF_HINT_PROMPT_MAX_CHARS,
+  handoffHintPrompt,
+  parseHandoffHintOutput,
+  runHandoffHint,
+  type HandoffValidationResult,
+} from "../../src/opencode-v2/orchestration/validation.js"
+import { GENERATION_HINT_MAX_HINT_CHARS, type GenerationHintRecord } from "../../src/opencode-v2/observability/trace.js"
+import { createRedactor } from "../../src/opencode-v2/process/redact.js"
 
 const options = parseOptions({})
 
@@ -1039,5 +1049,303 @@ describe("handoff_validate orchestrator level", () => {
     const result = parseResult(output.content)
     expect(ADMISSION_STATES).toContain(result.admissionState as AdmissionState)
     expect(result.verdict === "fail" ? result.admissionState === "orchestrator-failed" : true).toBe(true)
+  })
+})
+
+const hintOptions = parseOptions({ hints: { mode: "advisory", model: { providerID: "probe", id: "deterministic" } } })
+
+type HintedResult = HandoffValidationResult & { hints?: GenerationHintRecord }
+
+function parseHinted(content: string): HintedResult {
+  return JSON.parse(content) as HintedResult
+}
+
+describe("generation hints (opt-in, default off)", () => {
+  test("config defaults to off, rejects typos, and requires an explicit model when advisory", () => {
+    expect(parseOptions({}).hints).toEqual({ mode: "off" })
+    expect(parseOptions({ hints: {} }).hints).toEqual({ mode: "off" })
+    expect(parseOptions({ hints: { mode: "off" } })).toEqual(parseOptions({}))
+    expect(parseOptions({ hints: { mode: "advisory", model: { providerID: "p", id: "m" } } }).hints).toEqual({
+      mode: "advisory",
+      model: { providerID: "p", id: "m" },
+    })
+    for (const invalid of [
+      { hints: { mode: "on" } },
+      { hints: { mode: "advisory" } },
+      { hints: { mode: "advisory", model: { providerID: "", id: "m" } } },
+      { hints: { mode: "advisory", model: { providerID: "p" } } },
+      { hints: { mode: "advisory", model: { providerID: "p", id: "m", extra: true } } },
+      { hints: { mode: "off", extra: true } },
+      { hint: { mode: "advisory", model: { providerID: "p", id: "m" } } },
+    ]) {
+      expect(() => parseOptions(invalid)).toThrow()
+    }
+  })
+
+  test("default off: no generation call and no hint record (result unchanged)", async () => {
+    let calls = 0
+    const tools = collect({
+      generate: async () => {
+        calls += 1
+        return { text: "unused" }
+      },
+    })
+    const output = await tools
+      .get("handoff_validate")!
+      .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
+    const result = parseHinted(output.content)
+    expect(result.hints).toBeUndefined()
+    expect(calls).toBe(0)
+    expect(result.verdict).toBe("pass")
+    expect(result.admissionState).toBe("worker-passed")
+  })
+
+  test("enabled: one call after a pass, prompt from verdicts only, verdict and admission unchanged", async () => {
+    const prompts: string[] = []
+    const tools = collect({
+      options: hintOptions,
+      vcs: vcsReturning([{ file: "src/a.ts" }]),
+      generate: async (input) => {
+        prompts.push(input.prompt)
+        return { text: "  Keep the\nreceipt scoped and verified.  " }
+      },
+    })
+    const output = await tools
+      .get("handoff_validate")!
+      .execute(
+        {
+          level: "orchestrator",
+          handoff: handoff({ filesChanged: [{ path: "src/a.ts", scope: "edited" }] }),
+          contract: contract(),
+        },
+        toolContext("session-1", "orchestrator"),
+      )
+    const result = parseHinted(output.content)
+    expect(result.verdict).toBe("pass")
+    expect(result.admissionState).toBe("admitted")
+    const hints = result.hints as GenerationHintRecord
+    expect(hints.version).toBe(1)
+    expect(hints.kind).toBe("handoff-validate")
+    expect(hints.status).toBe("completed")
+    expect(hints.level).toBe("orchestrator")
+    expect(hints.verdict).toBe("pass")
+    expect(hints.checkCount).toBe(result.checks.length)
+    expect(hints.model).toBe("probe/deterministic")
+    expect(hints.hint).toBe("Keep the receipt scoped and verified.")
+    expect(hints.outputRedacted).toBe(false)
+    expect(hints.outputTruncated).toBe(false)
+    expect(hints.promptChars).toBe(prompts[0]!.length)
+    expect(hints.durationMs).toBeGreaterThanOrEqual(0)
+
+    // The prompt carries check ids and verdicts only: no detail text, no
+    // command strings, no paths, no session values.
+    const prompt = prompts[0]!
+    expect(prompt).toContain("c1-structure=pass")
+    expect(prompt).toContain(`${HANDOFF_CHECK_IDS.o6Authority}=pass`)
+    expect(prompt.split("\n").filter((line) => line.includes("="))).toHaveLength(result.checks.length + 2)
+    expect(prompt).not.toContain("src/a.ts")
+    expect(prompt).not.toContain("handoff matches the strict D2 structure")
+    expect(prompt).not.toContain("bun test")
+    expect(prompt.length).toBeLessThanOrEqual(HANDOFF_HINT_PROMPT_MAX_CHARS)
+  })
+
+  test("enabled but deterministic checks fail: skipped, never generated, verdict unchanged", async () => {
+    let calls = 0
+    const tools = collect({
+      options: hintOptions,
+      generate: async () => {
+        calls += 1
+        return { text: "unused" }
+      },
+    })
+    const output = await tools
+      .get("handoff_validate")!
+      .execute(
+        { level: "worker", handoff: handoff({ taskId: "other-task" }), contract: contract() },
+        toolContext("session-1", "orchestrator"),
+      )
+    const result = parseHinted(output.content)
+    expect(result.verdict).toBe("fail")
+    expect(result.admissionState).toBe("worker-failed")
+    expect(calls).toBe(0)
+    expect(result.hints).toEqual(
+      expect.objectContaining({ status: "skipped", reason: "verdict-not-pass", verdict: "fail" }),
+    )
+  })
+
+  test("enabled with no generation surface: records a skip and still validates", async () => {
+    const tools = collect({ options: hintOptions })
+    const output = await tools
+      .get("handoff_validate")!
+      .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
+    const result = parseHinted(output.content)
+    expect(result.admissionState).toBe("worker-passed")
+    expect(result.hints?.status).toBe("skipped")
+    expect(result.hints?.reason).toBe("generate-unavailable")
+  })
+
+  test("bounds: oversized output is truncated and credential-shaped output is redacted, never echoed", async () => {
+    const oversized = collect({ options: hintOptions, generate: async () => ({ text: "x".repeat(4000) }) })
+    const big = parseHinted(
+      (
+        await oversized
+          .get("handoff_validate")!
+          .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
+      ).content,
+    )
+    expect(big.hints?.status).toBe("completed")
+    expect(big.hints?.outputTruncated).toBe(true)
+    expect(big.hints?.outputChars).toBe(HANDOFF_HINT_OUTPUT_MAX_CHARS)
+    expect(big.hints!.hint!.length).toBeLessThanOrEqual(GENERATION_HINT_MAX_HINT_CHARS)
+    expect(big.hints!.hint!.endsWith("…")).toBe(true)
+
+    const secret = "ghp_EXAMPLEFAKETOKENFORTEST123456"
+    const redacted = collect({ options: hintOptions, generate: async () => ({ text: `rotate ${secret} now` }) })
+    const output = await redacted
+      .get("handoff_validate")!
+      .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
+    const result = parseHinted(output.content)
+    expect(result.hints?.outputRedacted).toBe(true)
+    expect(result.hints?.hint).toBe("rotate [redacted] now")
+    expect(output.content).not.toContain("ghp_")
+    expect(output.content).not.toContain("EXAMPLEFAKETOKENFORTEST123456")
+    expect(JSON.stringify(result.hints)).not.toContain(secret)
+  })
+
+  test("threads caller-known exact secrets only through the injected redactor, with a no-secret control", async () => {
+    const secret = "FAKE-EXACT-SECRET-FOR-TEST"
+    const redactor = createRedactor([secret])
+    const withSecret = collect({
+      options: hintOptions,
+      redact: redactor,
+      generate: async () => ({ text: `value ${secret} end` }),
+    })
+    const secretResult = parseHinted(
+      (
+        await withSecret
+          .get("handoff_validate")!
+          .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
+      ).content,
+    )
+    expect(secretResult.hints?.outputRedacted).toBe(true)
+    expect(JSON.stringify(secretResult)).not.toContain(secret)
+    expect(secretResult.hints?.hint).toBe("value [redacted] end")
+
+    const control = collect({
+      options: hintOptions,
+      redact: redactor,
+      generate: async () => ({ text: "no secrets in this hint" }),
+    })
+    const controlResult = parseHinted(
+      (
+        await control
+          .get("handoff_validate")!
+          .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
+      ).content,
+    )
+    expect(controlResult.hints?.outputRedacted).toBe(false)
+    expect(controlResult.hints?.hint).toBe("no secrets in this hint")
+  })
+
+  test("external timeout race abandons the wait without throwing or changing the verdict", async () => {
+    let lateResolve: ((value: { text: string }) => void) | undefined
+    const tools = collect({
+      options: hintOptions,
+      hintTimeoutMs: 20,
+      generate: () =>
+        new Promise<{ text: string }>((resolve) => {
+          lateResolve = resolve
+        }),
+    })
+    const output = await tools
+      .get("handoff_validate")!
+      .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
+    const result = parseHinted(output.content)
+    expect(result.verdict).toBe("pass")
+    expect(result.admissionState).toBe("worker-passed")
+    expect(result.hints?.status).toBe("timeout")
+    expect(result.hints?.reason).toBe("timed-out")
+    expect(result.hints?.hint).toBeUndefined()
+    // A late resolution is abandoned, never surfaced, and never an unhandled rejection.
+    lateResolve?.({ text: "late output that must not appear" })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(output.content).not.toContain("late output")
+  })
+
+  test("provider failure records a bounded failure without echoing error text", async () => {
+    const tools = collect({
+      options: hintOptions,
+      generate: async () => {
+        throw new Error("provider exploded at https://example.invalid/?token=SECRET")
+      },
+    })
+    const output = await tools
+      .get("handoff_validate")!
+      .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
+    const result = parseHinted(output.content)
+    expect(result.verdict).toBe("pass")
+    expect(result.hints?.status).toBe("failed")
+    expect(result.hints?.reason).toBe("provider-failed")
+    expect(output.content).not.toContain("exploded")
+    expect(output.content).not.toContain("SECRET")
+    expect(output.content).not.toContain("example.invalid")
+  })
+
+  test("parse helpers are defensive: invalid envelopes and unknown check ids are rejected or skipped", () => {
+    for (const invalid of [undefined, null, "text", [], {}, { text: 5 }, { text: "" }, { text: "\n\t " }]) {
+      expect(parseHandoffHintOutput(invalid)).toBeUndefined()
+    }
+    expect(parseHandoffHintOutput({ text: "ok" })).toEqual({ text: "ok", truncated: false })
+    expect(parseHandoffHintOutput({ text: "a\nb\tc" })).toEqual({ text: "a b c", truncated: false })
+    const long = parseHandoffHintOutput({ text: "y".repeat(HANDOFF_HINT_OUTPUT_MAX_CHARS + 10) })
+    expect(long?.truncated).toBe(true)
+    expect(long?.text.length).toBe(HANDOFF_HINT_OUTPUT_MAX_CHARS)
+
+    const built = handoffHintPrompt("worker", [
+      { id: HANDOFF_CHECK_IDS.c2Status, verdict: "pass", detail: "detail must not travel: src/secret.ts" },
+      { id: "unknown-check-id", verdict: "fail", detail: "unknown must not travel" },
+    ])
+    expect(built.ok).toBe(true)
+    if (built.ok) {
+      expect(built.prompt).toContain("c2-status=pass")
+      expect(built.prompt).not.toContain("unknown-check-id")
+      expect(built.prompt).not.toContain("detail must not travel")
+      expect(built.prompt).not.toContain("src/secret.ts")
+    }
+  })
+
+  test("runHandoffHint is metadata-only and never throws for a hostile generator", async () => {
+    const record = await runHandoffHint({
+      level: "worker",
+      verdict: "pass",
+      checks: [],
+      model: { providerID: "p", id: "m" },
+      generate: async () => {
+        throw "boom"
+      },
+      now: () => 100,
+    })
+    expect(record.status).toBe("failed")
+    expect(record.reason).toBe("provider-failed")
+    expect(record.promptChars).toBeGreaterThan(0)
+    // Fixed key set: no error text, prompt text, or raw output can appear.
+    expect(Object.keys(record).sort()).toEqual(
+      [
+        "capturedAt",
+        "checkCount",
+        "durationMs",
+        "kind",
+        "level",
+        "model",
+        "outputChars",
+        "outputRedacted",
+        "outputTruncated",
+        "promptChars",
+        "reason",
+        "status",
+        "verdict",
+        "version",
+      ].sort(),
+    )
   })
 })

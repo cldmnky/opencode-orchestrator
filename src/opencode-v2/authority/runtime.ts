@@ -47,12 +47,25 @@
  *   - The child's existing rules are preserved verbatim; only missing exact
  *     deny rules for the full orchestrator-only tool family plus the goal
  *     tools are appended (deterministic order, no duplicate exact deny rules).
- *     Later admissions are idempotent and write nothing when the rules are
- *     already present.
+ *     Later admissions are idempotent: no rule is written again when the rules
+ *     are already present (the snapshot record is refreshed instead).
  *   - Child lookup or rule installation failure fails closed before admission.
  *   - This is tool-action containment only — not filesystem, process,
  *     worktree, or atomic child isolation. No parent rule is ever installed or
  *     cleared, and there is no worktree lifecycle install/clear logic here.
+ *
+ * Durable effective-authority snapshots (Phase C):
+ *   - After the containment rules are ensured for a configured-role child, the
+ *     same admission records one bounded snapshot under `authority/v1/...`:
+ *     parent rules, the plugin's static worker policy, the child's installed
+ *     rules, and their per-action intersection with explicit unknown states.
+ *   - Snapshot recording is best-effort and NEVER changes the admission
+ *     decision: a failed read, write, or build is logged and admission
+ *     proceeds. Nothing in the admission or permission path reads snapshots.
+ *   - On runtime disposal (plugin teardown), every snapshot this runtime had
+ *     recorded by disposal time is cleared under the same session lock, so no
+ *     recorded authority outlives the process that enforced it. Clearing is
+ *     best-effort and idempotent.
  */
 import type { PermissionEvaluation } from "@opencode/plugin/promise/permission"
 import type { SessionPrompt } from "@opencode/plugin/promise/session"
@@ -64,6 +77,8 @@ import {
 } from "../../core/permissions.js"
 import { RUNTIME_PLUGIN_ID } from "../../core/package-identity.js"
 import type { DispatchCheck, DispatchDecision, DispatchGate } from "../observability/runtime.js"
+import type { LocationLike, StorageLike } from "../goal/state.js"
+import { buildAuthoritySnapshot, clearAuthoritySnapshot, writeAuthoritySnapshot } from "./state.js"
 
 /** Namespaced metadata key for the bounded authority dispatch marker. */
 export const AUTHORITY_METADATA_KEY = "opencode-orchestrator.authority"
@@ -113,6 +128,13 @@ export type AuthorityDeps = {
     ): Promise<AuthorityRegistration>
     rules(input: { sessionID: string; permissions: readonly PermissionRule[] }): Promise<void>
   }
+  /**
+   * Durable sink for effective-authority snapshots (Phase C). When either is
+   * absent, snapshots are not recorded: the runtime still enforces rules but
+   * records nothing, and the read surface reports unknown.
+   */
+  storage?: StorageLike
+  location?: LocationLike
 }
 
 export type AuthorityRuntime = { dispose(): Promise<void> }
@@ -229,6 +251,9 @@ export function boundedAuthorityMessage(prefix: string, reason: string | undefin
  */
 export async function startAuthority(deps: AuthorityDeps): Promise<AuthorityRuntime> {
   const registrations: AuthorityRegistration[] = []
+  // Sessions whose snapshots this runtime wrote; cleared on dispose so no
+  // authority record outlives the enforcing process.
+  const recordedSnapshotSessions = new Set<string>()
   try {
     registrations.push(await deps.session.hook("prompt", (event) => onPrompt(event)))
     registrations.push(await deps.permission.hook("evaluate", (event) => onEvaluate(event)))
@@ -246,6 +271,7 @@ export async function startAuthority(deps: AuthorityDeps): Promise<AuthorityRunt
     dispose(): Promise<void> {
       closing ??= (async () => {
         for (const registration of [...registrations].reverse()) await registration.dispose()
+        await clearRecordedSnapshots()
       })()
       return closing
     },
@@ -270,17 +296,21 @@ export async function startAuthority(deps: AuthorityDeps): Promise<AuthorityRunt
     const child = await configuredRoleChild(event.sessionID)
     if (!child) return
     const merged = mergeContainmentRules(child.permissions ?? [])
-    if (merged.added.length === 0) return
-    try {
-      await deps.permission.rules({ sessionID: event.sessionID, permissions: merged.permissions })
-    } catch (error) {
-      throw new Error(
-        boundedAuthorityMessage(
-          `${RUNTIME_PLUGIN_ID} authority could not install child containment rules for session ${event.sessionID}`,
-          `the rule installation failed and this admission fails closed: ${errorMessage(error)}`,
-        ),
-      )
+    if (merged.added.length > 0) {
+      try {
+        await deps.permission.rules({ sessionID: event.sessionID, permissions: merged.permissions })
+      } catch (error) {
+        throw new Error(
+          boundedAuthorityMessage(
+            `${RUNTIME_PLUGIN_ID} authority could not install child containment rules for session ${event.sessionID}`,
+            `the rule installation failed and this admission fails closed: ${errorMessage(error)}`,
+          ),
+        )
+      }
     }
+    // After the rules are ensured, record the effective-authority snapshot.
+    // Best-effort: it never gates and never changes this admission.
+    await recordAuthoritySnapshot(event.sessionID, child)
   }
 
   async function onEvaluate(event: PermissionEvaluation): Promise<void> {
@@ -329,6 +359,67 @@ export async function startAuthority(deps: AuthorityDeps): Promise<AuthorityRunt
       )
     }
     return classifyConfiguredRoleChild(session, roleAgentIDs) ? session : undefined
+  }
+
+  /**
+   * Record one bounded effective-authority snapshot for a configured-role
+   * child AFTER its containment rules were ensured. Best-effort by design:
+   * missing storage wiring skips recording, and any build/read/write failure
+   * is logged and swallowed so it can never change the admission decision.
+   */
+  async function recordAuthoritySnapshot(sessionID: string, child: AuthoritySessionInfo): Promise<void> {
+    if (!deps.storage || !deps.location) return
+    const storage = deps.storage
+    const location = deps.location
+    try {
+      const parentRead = child.parentID ? await readRules(child.parentID) : { readable: false }
+      const installedRead = await readRules(sessionID)
+      const snapshot = buildAuthoritySnapshot({
+        sessionID,
+        ...(child.parentID !== undefined ? { parentSessionID: child.parentID } : {}),
+        roleAgent: child.agent ?? "unknown",
+        capturedAt: Date.now(),
+        parentRules: parentRead.rules,
+        parentReadable: parentRead.readable,
+        installedRules: installedRead.rules,
+        installedReadable: installedRead.readable,
+      })
+      await writeAuthoritySnapshot(storage, location, sessionID, snapshot)
+      recordedSnapshotSessions.add(sessionID)
+    } catch (error) {
+      console.warn(
+        `${RUNTIME_PLUGIN_ID} authority could not record the effective-authority snapshot for session ${sessionID}`,
+        error,
+      )
+    }
+  }
+
+  /** Read a session's family-wide rules; unreadable and unclassified are distinct. */
+  async function readRules(
+    sessionID: string,
+  ): Promise<{ readable: boolean; rules?: readonly PermissionRule[] }> {
+    try {
+      const session = unwrapSessionInfo(await deps.session.get({ sessionID }))
+      if (!session) return { readable: false }
+      return { readable: true, rules: session.permissions ?? [] }
+    } catch {
+      return { readable: false }
+    }
+  }
+
+  /** Clear every snapshot this runtime wrote; best-effort and idempotent. */
+  async function clearRecordedSnapshots(): Promise<void> {
+    if (!deps.storage || !deps.location) return
+    const storage = deps.storage
+    const location = deps.location
+    for (const sessionID of recordedSnapshotSessions) {
+      try {
+        await clearAuthoritySnapshot(storage, location, sessionID)
+      } catch (error) {
+        console.warn(`${RUNTIME_PLUGIN_ID} authority could not clear the snapshot for session ${sessionID}`, error)
+      }
+    }
+    recordedSnapshotSessions.clear()
   }
 
   /** A gate refusal, or a gate failure folded to a fail-closed refusal. */

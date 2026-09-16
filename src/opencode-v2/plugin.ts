@@ -19,6 +19,7 @@ import { addPublishTools } from "./publish/tools.js"
 import { addPeerTools } from "./peers/tools.js"
 import { createDispatchGate, shouldStartObservability, startObservability } from "./observability/runtime.js"
 import { shouldStartAuthority, startAuthority } from "./authority/runtime.js"
+import { addAuthorityTools } from "./authority/tools.js"
 import { startWorktreeEventSync } from "./worktree/events.js"
 import { SpawnRunner } from "./process/runner.js"
 import { createSessionMoveCoordinator } from "./session/move-coordinator.js"
@@ -82,9 +83,18 @@ export const orchestratorPlugin = (Plugin.define as any)({
 
     // Phase A runtime authority (opt-in): N1 admission/permission enforcement
     // and N2 child-only containment. `authority.mode: "off"` (the default)
-    // registers nothing and leaves the default setup byte-identical.
+    // registers nothing and leaves the default setup byte-identical. In enforce
+    // mode the runtime also records durable effective-authority snapshots
+    // (authority/v1) after rule install; snapshots never gate.
     const authority = shouldStartAuthority(options)
-      ? await startAuthority({ options, gate: controlGate, session: ctx.session, permission: ctx.permission })
+      ? await startAuthority({
+          options,
+          gate: controlGate,
+          session: ctx.session,
+          permission: ctx.permission,
+          storage: ctx.storage,
+          location: ctx.location,
+        })
       : undefined
     if (authority) registrations.push({ dispose: () => authority.dispose() })
 
@@ -132,7 +142,9 @@ export const orchestratorPlugin = (Plugin.define as any)({
             location: ctx.location,
             session: ctx.session,
             vcs: ctx.vcs,
+            generate: (input) => ctx.generate.text(input),
           })
+          addAuthorityTools(draft, { options, storage: ctx.storage, location: ctx.location })
           addObservabilityTools(draft, {
             options,
             storage: ctx.storage,
@@ -237,6 +249,19 @@ export const orchestratorPlugin = (Plugin.define as any)({
                 : []),
               ...(options.trace.mode !== "off"
                 ? ["Trace is enabled: orchestrator_observability_get reads the bounded metadata summary and budget evaluation for a session."]
+                : []),
+              ...(options.authority.mode === "enforce"
+                ? [
+                    "Runtime authority is in enforce mode: tagged plugin dispatches are checked before admission and configured-role children get tool-action containment.",
+                    "Use orchestrator_authority_get (read-only) to inspect the recorded effective-authority snapshot for a session.",
+                    "Snapshots never change admission decisions, and containment is not filesystem or process isolation.",
+                  ]
+                : []),
+              ...(options.hints.mode === "advisory"
+                ? [
+                    "Advisory generation hints are enabled: after a deterministic handoff pass, a bounded redacted hint may be attached to the handoff_validate result.",
+                    "Hints never change verdicts, admission states, or gates.",
+                  ]
                 : []),
             ].join("\n"),
           })

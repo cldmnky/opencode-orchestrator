@@ -116,6 +116,14 @@ export function buildWorkerSystem(role: keyof typeof ROLE_GUIDANCE, options?: Or
     .join("\n")
 }
 
+/**
+ * Command prompts are rendered as short bullets (G3 full rollout): one
+ * instruction per line, each within the 25-word plain-language sentence
+ * budget. Pinned safety phrases stay byte-identical; where a phrase was
+ * lowercase mid-sentence, a short lead-in keeps the phrase intact instead of
+ * re-capitalizing it. The `orchestrate` prompt keeps the tracked
+ * prompt-builder coordination line (see test/unit/prompt-builder.test.ts).
+ */
 export function buildCommandPrompt(name: string, argumentsText: string, options?: OrchestratorOptions): string {
   const args = argumentsText.trim() || "(no arguments)"
   const common = [
@@ -138,14 +146,61 @@ export function buildCommandPrompt(name: string, argumentsText: string, options?
       objective: args,
       clarifyEnabled: options?.clarify?.mode !== "off",
     }),
-    goal: `Manage the session goal deterministically. The argument is: ${args}. Use the namespaced goal tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update with plugin-owned durable storage: set, show, pause, resume, or clear only the current session goal. Continue only while it is active, and mark complete through orchestrator_goal_update with auditable evidence.`,
-    restructure: `Perform a conservative, test-backed restructuring of: ${args}. Research references and tests first, write a phased plan under .orchestrator/plans/, execute the phases in order with behavior-preserving edits only, then run a reviewer pass over the aggregate change.`,
-    "run-plan": `Execute the requested plan from .orchestrator/plans/: ${args}. Read the complete plan before changing files, follow the plan's phase order, track each step, delegate safe independent work only with disjoint write scopes, verify every step, and audit the aggregate result with the review role.`,
-    halt: `Stop automated work for this session. Interpret this control request: ${args}. Preserve recoverable .orchestrator state and do not delete user work.`,
-    handover: `Create a self-contained continuation handover for: ${args}. Read the current session context and VCS state, preserve user requirements accurately, redact secrets, separate established facts from assumptions, and include completed work, pending work, decisions, verification, and blockers.`,
-    polish: `Polish the requested scope without changing behavior: ${args}. Inspect changed files, make only justified cleanup edits, verify each affected area, and request an independent aggregate review of the full change.`,
-    "stress-plan": `Create a robust plan for: ${args}. Gather repository facts, draft the plan, obtain independent critiques covering correctness, scope, security, and feasibility, then synthesize one revised plan with an explicit phase order under .orchestrator/plans/.`,
-    gates: `Manage the per-session orchestrator gates for: ${args}. This control request is handled by the plugin before any model turn; no prompt is delivered.`,
+    goal: [
+      "Manage the session goal deterministically.",
+      `The argument is: ${args}.`,
+      "Use the namespaced goal tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update with plugin-owned durable storage: set, show, pause, resume, or clear only the current session goal.",
+      "Continue only while it is active.",
+      "Mark complete through orchestrator_goal_update with auditable evidence.",
+    ].join("\n"),
+    restructure: [
+      `Perform a conservative, test-backed restructuring of: ${args}.`,
+      "Research references and tests first.",
+      "Write a phased plan under .orchestrator/plans/.",
+      "Execute the phases in order with behavior-preserving edits only.",
+      "Then run a reviewer pass over the aggregate change.",
+    ].join("\n"),
+    "run-plan": [
+      `Execute the requested plan from .orchestrator/plans/: ${args}.`,
+      "Read the complete plan before changing files.",
+      "Follow the plan's phase order.",
+      "Track each step.",
+      "Delegate safe independent work only with disjoint write scopes.",
+      "Verify every step.",
+      "Audit the aggregate result with the review role.",
+    ].join("\n"),
+    halt: [
+      "Stop automated work for this session.",
+      `Interpret this control request: ${args}.`,
+      "Preserve recoverable .orchestrator state and do not delete user work.",
+    ].join("\n"),
+    handover: [
+      `Create a self-contained continuation handover for: ${args}.`,
+      "Read the current session context and VCS state.",
+      "Preserve user requirements accurately.",
+      "Then redact secrets.",
+      "Then separate established facts from assumptions.",
+      "Then include completed work, pending work, decisions, verification, and blockers.",
+    ].join("\n"),
+    polish: [
+      `Polish the requested scope without changing behavior: ${args}.`,
+      "Inspect changed files.",
+      "Make only justified cleanup edits.",
+      "Verify each affected area.",
+      "Request an independent aggregate review of the full change.",
+    ].join("\n"),
+    "stress-plan": [
+      `Create a robust plan for: ${args}.`,
+      "Gather repository facts.",
+      "Draft the plan.",
+      "Obtain independent critiques covering correctness, scope, security, and feasibility.",
+      "Then synthesize one revised plan with an explicit phase order under .orchestrator/plans/.",
+    ].join("\n"),
+    gates: [
+      `Manage the per-session orchestrator gates for: ${args}.`,
+      "This control request is handled by the plugin before any model turn.",
+      "No prompt is delivered.",
+    ].join("\n"),
   }
 
   return `${prompts[name] ?? `Execute ${name}: ${args}`}\n\n${common}`
@@ -184,15 +239,21 @@ export function buildContinuationPrompt(
  * transcripts — and the ledger behavior is explicit: reopen the plan, execute
  * the first unfinished item with direct verification, update the ledger, then
  * keep advancing autonomously until a real blocker or a configured breaker
- * applies. Line breaks in the stored path are neutralized so a malformed
+ * applies. Every rule is a short bullet so continuations stay plain-language.
+ * Line breaks in the stored path are neutralized so a malformed
  * durable record cannot inject prompt sections.
  */
 function planContinuationGuidance(plan: string): string {
   const safePlan = plan.replace(/[\r\n]+/g, " ")
   return [
     `Plan ledger: ${safePlan}`,
-    "Reopen the active plan ledger, execute the first unfinished item with direct verification, and update the ledger to record the change before moving to the next unfinished item in order.",
-    "Continue autonomously through the ledger unless a real blocker or a configured breaker applies (halt flag, budget fail-closed, cooldown, max continuations, or an open review circuit); stop and report to the user otherwise, and never mark the goal or plan complete without direct evidence.",
+    "Reopen the active plan ledger.",
+    "Then execute the first unfinished item with direct verification.",
+    "Then update the ledger to record the change before moving to the next unfinished item in order.",
+    "Continue autonomously through the ledger unless a real blocker or a configured breaker applies.",
+    "Configured breakers: halt flag, budget fail-closed, cooldown, max continuations, or an open review circuit.",
+    "Stop and report to the user otherwise.",
+    "Above all, never mark the goal or plan complete without direct evidence.",
   ].join("\n")
 }
 

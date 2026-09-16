@@ -1133,6 +1133,105 @@ describe("G3 plain-language communication contract", () => {
     expect(lineWords(confirmLine ?? "")).toBeLessThanOrEqual(SENTENCE_WORD_LIMIT)
   })
 
+  // The full rollout extends the same rule to the authored command prompts
+  // (`buildCommandPrompt`) and the plan-ledger bullets
+  // (`planContinuationGuidance`): one instruction per line, and no line or
+  // sentence over the 25-word budget. The `orchestrate` prompt embeds the
+  // prompt-builder coordination line, the one tracked deviation (pinned by
+  // test/unit/prompt-builder.test.ts); every other authored line is a short
+  // bullet.
+  const COORDINATION_SENTENCE =
+    "Coordinate this task end to end. Start with repository facts, prefer the smallest coherent end-to-end slice over a file-by-file or layer-by-layer split, delegate independent work in parallel only with exact disjoint write scopes, integrate the results, and verify the final state directly."
+
+  function overBudgetLines(text: string): string[] {
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && lineWords(line) > SENTENCE_WORD_LIMIT)
+  }
+
+  function overBudgetSentences(text: string): string[] {
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .flatMap((line) => line.split(/(?<=[.!?])\s+/))
+      .map((sentence) => sentence.trim())
+      .filter((sentence) => lineWords(sentence) > SENTENCE_WORD_LIMIT)
+  }
+
+  function withoutTrackedCoordinationLine(prompt: string): string {
+    return prompt
+      .split("\n")
+      .filter((line) => line.trim() !== COORDINATION_SENTENCE)
+      .join("\n")
+  }
+
+  test("command prompts are short bullets, with only the tracked coordination line over budget", () => {
+    for (const options of [parseOptions({}), ALL_FEATURES]) {
+      for (const name of COMMAND_NAMES) {
+        const raw = buildCommandPrompt(name, "scope", options)
+        if (name === "orchestrate") {
+          expect(overBudgetLines(raw), name).toEqual([COORDINATION_SENTENCE])
+        }
+        const prompt = name === "orchestrate" ? withoutTrackedCoordinationLine(raw) : raw
+        expect(overBudgetLines(prompt), name).toEqual([])
+        expect(overBudgetSentences(prompt), name).toEqual([])
+      }
+    }
+  })
+
+  test("continuation prompts are short bullets with and without an active plan ledger", () => {
+    const kinds: Array<[string, string]> = [
+      ["default", buildContinuationPrompt("objective", 2)],
+      ["plan", buildContinuationPrompt("objective", 3, undefined, ".orchestrator/plans/ship.md")],
+      ["plan all features", buildContinuationPrompt("objective", 3, ALL_FEATURES, ".orchestrator/plans/ship.md")],
+    ]
+    for (const [name, prompt] of kinds) {
+      expect(overBudgetLines(prompt), name).toEqual([])
+      expect(overBudgetSentences(prompt), name).toEqual([])
+    }
+    // The plan ledger is the only plan-specific section, and its bullets are
+    // one instruction per line.
+    const withPlan = kinds[2]![1]
+    const ledger = withPlan.slice(withPlan.indexOf("Plan ledger:"), withPlan.indexOf("This is continuation"))
+    expect(overBudgetLines(ledger), "plan ledger").toEqual([])
+    expect(ledger.split("\n").length).toBeGreaterThanOrEqual(8)
+  })
+
+  // These instructions were single dense sentences before the full rollout.
+  // Each is now split into short bullets; none may be reassembled, and the
+  // pinned wording stays byte-identical on its own short line.
+  const FORMER_DENSE_INSTRUCTIONS = [
+    "Research references and tests first, write a phased plan under .orchestrator/plans/, execute the phases in order with behavior-preserving edits only, then run a reviewer pass over the aggregate change.",
+    "Read the complete plan before changing files, follow the plan's phase order, track each step, delegate safe independent work only with disjoint write scopes, verify every step, and audit the aggregate result with the review role.",
+    "Read the current session context and VCS state, preserve user requirements accurately, redact secrets, separate established facts from assumptions, and include completed work, pending work, decisions, verification, and blockers.",
+    "Gather repository facts, draft the plan, obtain independent critiques covering correctness, scope, security, and feasibility, then synthesize one revised plan with an explicit phase order under .orchestrator/plans/.",
+    "Reopen the active plan ledger, execute the first unfinished item with direct verification, and update the ledger to record the change before moving to the next unfinished item in order.",
+    "Continue autonomously through the ledger unless a real blocker or a configured breaker applies (halt flag, budget fail-closed, cooldown, max continuations, or an open review circuit); stop and report to the user otherwise, and never mark the goal or plan complete without direct evidence.",
+  ]
+
+  test("the formerly dense command and plan instructions are split, never reassembled", () => {
+    const composed = [
+      ...COMMAND_NAMES.map((name) => buildCommandPrompt(name, "scope", ALL_FEATURES)),
+      buildContinuationPrompt("objective", 2, ALL_FEATURES, ".orchestrator/plans/ship.md"),
+    ].join("\n")
+    for (const instruction of FORMER_DENSE_INSTRUCTIONS) {
+      expect(composed).not.toContain(instruction)
+    }
+    expect(buildCommandPrompt("restructure", "scope")).toContain(
+      "Execute the phases in order with behavior-preserving edits only.",
+    )
+    expect(buildCommandPrompt("run-plan", "scope")).toContain("Delegate safe independent work only with disjoint write scopes.")
+    expect(buildCommandPrompt("handover", "scope")).toContain("Then redact secrets.")
+    expect(buildCommandPrompt("handover", "scope")).toContain("Then separate established facts from assumptions.")
+    const plan = buildContinuationPrompt("objective", 2, undefined, ".orchestrator/plans/ship.md")
+    expect(plan).toContain("Then execute the first unfinished item with direct verification.")
+    expect(plan).toContain("Continue autonomously through the ledger unless a real blocker or a configured breaker applies.")
+    expect(plan).toContain("Configured breakers: halt flag, budget fail-closed, cooldown, max continuations, or an open review circuit.")
+    expect(plan).toContain("Above all, never mark the goal or plan complete without direct evidence.")
+  })
+
   // Fail-closed preconditions that must reach every prompt kind with the same
   // meaning. Phrases are the pinned safety wording; presence here is the
   // test-enforced semantic-equivalence proof for the G3 restructure.

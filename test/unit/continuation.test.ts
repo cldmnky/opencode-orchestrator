@@ -17,6 +17,14 @@ import {
   stepStorageKey,
 } from "../../src/opencode-v2/orchestration/step-state.js"
 import { startGoalContinuation } from "../../src/opencode-v2/goal/continuation.js"
+import {
+  createLeadBoard,
+  leadBoardStorageKey,
+  leadTaskStepIdempotencyKey,
+  parseLeadBoard,
+  type LeadBoard,
+  type LeadTask,
+} from "../../src/opencode-v2/orchestration/lead-board.js"
 import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
 
 // The runtime passes the parsed plugin options to the continuation prompt
@@ -1092,6 +1100,276 @@ describe("goal continuation", () => {
     stop()
   })
 
+  test("reserves a board task, persists the pending receipt before delivery, and renders the packet", async () => {
+    const location = { directory: "/workspace", project: { id: "board-project" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const board = leadBoardFixture(location, "session", "ship the change", 1, [
+      leadTask({ taskID: "root", scope: { version: 1, root: "project", readPaths: [], writePaths: [], broad: false } }),
+    ])
+    values.set(leadBoardStorageKey(location, "session"), board)
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "board-idle-1", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 1)
+    const text = prompts[0]!.text
+    expect(text).toContain("Board task packet (advisory scope; not isolation or permission):")
+    expect(text).toContain("Task: root at lifecycle version 3")
+    expect(text).toContain("Owner: lead/session")
+    expect(text).toContain("Read scope: (none)")
+    expect(text).toContain("Write scope: (none)")
+    expect(text).toContain("Dependencies: (none)")
+    expect(text).toContain("orchestrator_lead_board_transition")
+    expect(text).toContain("never completes a task")
+    expect(text).toContain("approved exact-revision review")
+    expect(text.split("Board task packet").length - 1).toBe(1)
+    // No D2 drift: the packet section never embeds or reshapes the D2 skeleton
+    // (the generic D2 guidance below it is unchanged and pre-existing).
+    const packetSection = text.slice(text.indexOf("Board task packet"), text.indexOf("The lead board is the durable task ledger"))
+    expect(packetSection).not.toContain("reviewState")
+    expect(packetSection).not.toContain("Outcome:")
+
+    // Reservation persisted before delivery, then advanced to in-progress.
+    const stored = parseLeadBoard(values.get(leadBoardStorageKey(location, "session")))!
+    expect(stored.tasks[0]!.stepIndex).toBe(1)
+    expect(stored.tasks[0]!.status).toBe("in-progress")
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(1)
+    const receipt = parseStepRecord(values.get(stepStorageKey(location, "session", 1)))
+    expect(receipt?.status).toBe("dispatched")
+    expect(receipt?.idempotencyKey).toBe(leadTaskStepIdempotencyKey(board.boardID, "root", 1))
+    stop()
+  })
+
+  test("does not queue a board prompt when a reservation write fails", async () => {
+    const location = { directory: "/workspace", project: { id: "board-write-fail" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    values.set(leadBoardStorageKey(location, "session"), leadBoardFixture(location, "session", "ship the change", 1))
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const failing: StorageLike = {
+      get: async (item) => values.get(item),
+      set: async (item, value) => {
+        if (item.startsWith("lead-board/")) throw new Error("board write failed")
+        values.set(item, value)
+      },
+      remove: async (item) => void values.delete(item),
+    }
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream, failing),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "board-write-fail", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(prompts).toHaveLength(0)
+    // No burned reservation and no leftover pending receipt: the failed write is
+    // a safety outcome, never a guessed dispatch.
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(0)
+    expect(values.has(stepStorageKey(location, "session", 1))).toBe(false)
+    stop()
+  })
+
+  test("dispatches the first conflict-free ready task and leaves a scope-conflicting task ready", async () => {
+    const location = { directory: "/workspace", project: { id: "board-scope" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    values.set(
+      leadBoardStorageKey(location, "session"),
+      leadBoardFixture(location, "session", "ship the change", 1, [
+        leadTask({ taskID: "active", status: "in-progress", scope: { version: 1, root: "project", readPaths: [], writePaths: ["src/x"], broad: false } }),
+        leadTask({ taskID: "blocked", scope: { version: 1, root: "project", readPaths: [], writePaths: ["src/x"], broad: false } }),
+        leadTask({ taskID: "free", scope: { version: 1, root: "project", readPaths: [], writePaths: ["src/y"], broad: false } }),
+      ]),
+    )
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "board-scope", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => prompts.length === 1)
+    expect(prompts[0]!.text).toContain("Task: free at lifecycle version")
+    const stored = parseLeadBoard(values.get(leadBoardStorageKey(location, "session")))!
+    expect(stored.tasks.find((task) => task.taskID === "blocked")!.status).toBe("ready")
+    expect(stored.tasks.find((task) => task.taskID === "free")!.status).toBe("in-progress")
+    stop()
+  })
+
+  test("reconciles a pending reservation to ambiguous without a second dispatch", async () => {
+    const location = { directory: "/workspace", project: { id: "board-pending" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const board = leadBoardFixture(location, "session", "ship the change", 1, [
+      leadTask({ taskID: "root", status: "reserved", stepIndex: 1 }),
+    ])
+    values.set(leadBoardStorageKey(location, "session"), board)
+    values.set(
+      stepStorageKey(location, "session", 1),
+      newPendingStepRecord({
+        sessionID: "session",
+        stepIndex: 1,
+        idempotencyKey: leadTaskStepIdempotencyKey(board.boardID, "root", 1),
+        now: 1,
+      }),
+    )
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "board-pending", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(prompts).toHaveLength(0)
+    const stored = parseLeadBoard(values.get(leadBoardStorageKey(location, "session")))!
+    expect(stored.tasks[0]!.status).toBe("ambiguous")
+    expect(stored.tasks[0]!.evidence.some((ref) => ref.description.includes("never confirmed delivered"))).toBe(true)
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(0)
+    stop()
+  })
+
+  test("advances an in-progress task to awaiting-validation from a completed step but never to completed", async () => {
+    const location = { directory: "/workspace", project: { id: "board-completed-step" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const board = leadBoardFixture(location, "session", "ship the change", 1, [
+      leadTask({ taskID: "root", status: "in-progress", stepIndex: 1 }),
+    ])
+    values.set(leadBoardStorageKey(location, "session"), board)
+    values.set(stepStorageKey(location, "session", 1), {
+      ...newPendingStepRecord({
+        sessionID: "session",
+        stepIndex: 1,
+        idempotencyKey: leadTaskStepIdempotencyKey(board.boardID, "root", 1),
+        now: 1,
+      }),
+      status: "completed",
+      completedAt: 2,
+      updatedAt: 2,
+    })
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+
+    stream.push({ id: "board-completed-step", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(prompts).toHaveLength(0)
+    const stored = parseLeadBoard(values.get(leadBoardStorageKey(location, "session")))!
+    expect(stored.tasks[0]!.status).toBe("awaiting-validation")
+    stop()
+  })
+
+  test("no dispatch from a malformed board, and a delivery failure marks the task ambiguous", async () => {
+    // Malformed board: unavailable, never overwritten, never dispatched from.
+    const malformedLocation = { directory: "/workspace", project: { id: "board-malformed" } }
+    const malformedValues = new Map<string, unknown>([
+      [goalStorageKey(malformedLocation, "session"), newGoal("session", "ship the change", 1)],
+      [leadBoardStorageKey(malformedLocation, "session"), { version: 1, boardID: "x" }],
+    ])
+    const malformedPrompts: Array<{ text: string }> = []
+    const malformedStream = createStream()
+    const stopMalformed = startGoalContinuation(
+      fixture(malformedLocation, malformedValues, malformedPrompts, malformedStream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+    malformedStream.push({ id: "board-malformed", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(malformedPrompts).toHaveLength(0)
+    expect((malformedValues.get(goalStorageKey(malformedLocation, "session")) as { continuationCount: number }).continuationCount).toBe(0)
+    expect(malformedValues.get(leadBoardStorageKey(malformedLocation, "session"))).toEqual({ version: 1, boardID: "x" })
+    stopMalformed()
+
+    // Delivery failure: the reservation becomes ambiguous and is not retried.
+    const failLocation = { directory: "/workspace", project: { id: "board-deliver-fail" } }
+    const failValues = new Map<string, unknown>([
+      [goalStorageKey(failLocation, "session"), newGoal("session", "ship the change", 1)],
+      [leadBoardStorageKey(failLocation, "session"), leadBoardFixture(failLocation, "session", "ship the change", 1)],
+    ])
+    const failPrompts: Array<{ text: string }> = []
+    const failStream = createStream()
+    let failNext = true
+    const stopFail = startGoalContinuation(
+      {
+        ...fixture(failLocation, failValues, failPrompts, failStream),
+        session: {
+          get: async () => undefined,
+          prompt: async (input: { text: string }) => {
+            if (failNext) {
+              failNext = false
+              throw new Error("prompt delivery failed")
+            }
+            failPrompts.push(input)
+          },
+        },
+      },
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+    failStream.push({ id: "board-deliver-fail-1", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => parseLeadBoard(failValues.get(leadBoardStorageKey(failLocation, "session")))?.tasks[0]?.status === "ambiguous")
+    expect(failPrompts).toHaveLength(0)
+    failStream.push({ id: "board-deliver-fail-2", type: "session.idle", data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(failPrompts).toHaveLength(0)
+    stopFail()
+  })
+
+  test("removes the board with session cleanup and finds a moved session's board at the origin", async () => {
+    const location = { directory: "/workspace", project: { id: "board-delete" } }
+    const values = new Map<string, unknown>([
+      [goalStorageKey(location, "session"), newGoal("session", "ship the change", 1)],
+      [leadBoardStorageKey(location, "session"), leadBoardFixture(location, "session", "ship the change", 1)],
+    ])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+    stream.push({ id: "board-delete", type: "session.deleted", data: { sessionID: "session" } })
+    await waitFor(() => !values.has(leadBoardStorageKey(location, "session")))
+    stop()
+
+    // A moved session whose anchor records the origin resolves the origin-keyed board.
+    const movedLocation = { directory: "/workspace", project: { id: "project-here" } }
+    const originKey = leadBoardStorageKey({ directory: "/origin", project: { id: "origin" } }, "session")
+    const movedValues = new Map<string, unknown>([
+      [goalStorageKey({ directory: "/origin", project: { id: "origin" } }, "session"), newGoal("session", "ship the change", 1)],
+      [originKey, leadBoardFixture({ directory: "/origin", project: { id: "origin" } }, "session", "ship the change", 1)],
+      ["session/v1/project-here/session", {
+        version: 1,
+        sessionID: "session",
+        originProjectID: "origin",
+        originDirectory: "/origin",
+        currentProjectID: "project-here",
+        currentDirectory: "/workspace",
+        updatedAt: 1,
+      }],
+    ])
+    const movedPrompts: Array<{ text: string }> = []
+    const movedStream = createStream()
+    const stopMoved = startGoalContinuation(
+      fixture(movedLocation, movedValues, movedPrompts, movedStream),
+      parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+    )
+    movedStream.push({ id: "board-moved", type: "session.idle", data: { sessionID: "session" } })
+    await waitFor(() => movedPrompts.length === 1)
+    expect(movedPrompts[0]!.text).toContain("Board task packet")
+    expect((movedValues.get(originKey) as { tasks: Array<{ status: string }> }).tasks[0]!.status).toBe("in-progress")
+    stopMoved()
+  })
+
   test("continues a session whose idle events carry the moved directory", async () => {
     // A session move changes the session directory but keeps the workspace; idle
     // events for the moved session must still be admitted.
@@ -1161,6 +1439,43 @@ function scanningStorage(values: Map<string, unknown>): StorageLike {
       return { entries: page.map((key) => ({ key, value: values.get(key) })), ...(next !== undefined ? { next } : {}) }
     },
   }
+}
+
+function leadTask(overrides: Partial<LeadTask> = {}): LeadTask {
+  return {
+    version: 1,
+    taskID: "root",
+    title: "root task",
+    owner: { sessionID: "session", role: "lead" },
+    scope: { version: 1, root: "project", readPaths: [], writePaths: [], broad: false },
+    dependencies: [],
+    status: "planned",
+    attempt: 1,
+    evidence: [],
+    lifecycleVersion: 1,
+    idempotencyKey: "board-1/root",
+    replay: { kind: "none" },
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  }
+}
+
+function leadBoardFixture(
+  location: { directory: string; project: { id: string } },
+  sessionID: string,
+  objective: string,
+  goalGeneration: number,
+  tasks?: LeadTask[],
+): LeadBoard {
+  const base = createLeadBoard({
+    projectID: location.project.id,
+    leadSessionID: sessionID,
+    goalGeneration,
+    objective,
+    now: 1,
+  })
+  return tasks ? { ...base, tasks } : base
 }
 
 function runRecord(status: PlanRunRecord["status"], plan = ".orchestrator/plans/ship.md"): PlanRunRecord {

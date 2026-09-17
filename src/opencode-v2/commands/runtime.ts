@@ -25,6 +25,15 @@ import {
 } from "../goal/state.js"
 import { publicationStatus, setPublicationEnabled, type PublicationStatusView } from "../publish/state.js"
 import {
+  createLeadBoard,
+  leadBoardKeyedLocation,
+  leadBoardStorageKey,
+  parseLeadBoard,
+  pauseLeadBoard,
+  resumeLeadBoard,
+  writeLeadBoard,
+} from "../orchestration/lead-board.js"
+import {
   clearGates,
   gateChangeMessage,
   gateStatuses,
@@ -533,12 +542,13 @@ async function mutateGoalCommand(
   if (args === "clear") {
     await context.storage.remove(key)
     await context.storage.remove(stopStorageKey(context.location, sessionID))
+    await removeBoardForSession(context, sessionID)
     await emitStatus(
       context,
       sessionID,
       statusMessage({
         happened: "Orchestration goal cleared.",
-        means: "The goal and its stop flag were removed for this session.",
+        means: "The goal, its stop flag, and its lead board were removed for this session.",
         next: "Set a new goal with /goal <objective> when you are ready.",
       }),
     )
@@ -568,6 +578,10 @@ async function mutateGoalCommand(
       delete updated.completionEvidence
     }
     await context.storage.set(key, updated)
+    // Goal commands remain the pause/halt/replacement control plane for the
+    // board: pause narrows board dispatch, resume restores it, and a board can
+    // never unpause itself. A completed board stays complete.
+    await setBoardPaused(context, sessionID, args === "pause")
     if (args === "resume") await context.storage.remove(stopStorageKey(context.location, sessionID))
     await emitStatus(
       context,
@@ -586,6 +600,17 @@ async function mutateGoalCommand(
   const goal = newGoal(sessionID, args)
   await context.storage.set(key, goal)
   await context.storage.remove(stopStorageKey(context.location, sessionID))
+  // A new goal generation gets a NEW deterministic board: a fresh boardID,
+  // fresh idempotency keys, and a single planned root lead task. A board write
+  // failure is reported truthfully; the goal then runs on the legacy
+  // board-missing path until an explicit /goal set or board init succeeds.
+  let boardNote = ""
+  try {
+    const board = await ensureBoardForGoal(context, sessionID, goal)
+    boardNote = board ? `\n\nLead board: ${board.boardID} (1 planned root task).` : "\n\nLead board: not created (an existing board was kept)."
+  } catch (error) {
+    boardNote = `\n\nLead board: not created (${errorMessage(error)}); the goal continues on the legacy board-missing path.`
+  }
   await emitStatus(
     context,
     sessionID,
@@ -593,8 +618,55 @@ async function mutateGoalCommand(
       happened: "Orchestration goal set.",
       means: "The orchestrator will keep working toward this objective automatically.",
       next: "Pause it with /goal pause, or clear it with /goal clear.",
-    })}\n\nObjective: ${goal.objective}`,
+    })}\n\nObjective: ${goal.objective}${boardNote}`,
   )
+}
+
+/**
+ * Board enrollment for one goal generation: creates the deterministic board
+ * when it is absent, replaces it only when the goal generation changed, and
+ * otherwise keeps the existing ledger untouched. The board is keyed by the
+ * session's stable origin project exactly like goal/run/halt records.
+ */
+async function ensureBoardForGoal(
+  context: Context,
+  sessionID: string,
+  goal: GoalRecord,
+): Promise<{ boardID: string } | undefined> {
+  const keyedLocation = await leadBoardKeyedLocation(context.storage, context.location, sessionID)
+  const key = leadBoardStorageKey(keyedLocation, sessionID)
+  const existing = parseLeadBoard(await context.storage.get(key))
+  if (existing && existing.goalGeneration === goal.createdAt) return undefined
+  const board = createLeadBoard({
+    projectID: keyedLocation.project.id,
+    leadSessionID: sessionID,
+    goalGeneration: goal.createdAt,
+    objective: goal.objective,
+  })
+  await writeLeadBoard(context.storage, keyedLocation, board)
+  return { boardID: board.boardID }
+}
+
+async function setBoardPaused(context: Context, sessionID: string, paused: boolean): Promise<void> {
+  try {
+    const keyedLocation = await leadBoardKeyedLocation(context.storage, context.location, sessionID)
+    const key = leadBoardStorageKey(keyedLocation, sessionID)
+    const board = parseLeadBoard(await context.storage.get(key))
+    if (!board || board.status === "complete") return
+    const next = paused ? pauseLeadBoard(board) : resumeLeadBoard(board)
+    if (next !== board) await writeLeadBoard(context.storage, keyedLocation, next)
+  } catch (error) {
+    console.warn(`opencode-orchestrator could not update the lead board pause state for ${sessionID}`, error)
+  }
+}
+
+async function removeBoardForSession(context: Context, sessionID: string): Promise<void> {
+  try {
+    const keyedLocation = await leadBoardKeyedLocation(context.storage, context.location, sessionID)
+    await context.storage.remove(leadBoardStorageKey(keyedLocation, sessionID))
+  } catch (error) {
+    console.warn(`opencode-orchestrator could not remove the lead board for ${sessionID}`, error)
+  }
 }
 
 async function runHaltCommand(
@@ -952,6 +1024,15 @@ async function mutateStartPlanRun(context: Context, sessionID: string, plan: str
     updatedAt: now,
   }
   await context.storage.set(key, run)
+  // A new plan-run generation enrolls the current goal generation on its lead
+  // board: init when absent, replace only when the goal generation changed, and
+  // never clobber a live ledger of the same generation.
+  try {
+    const goal = await readGoal(context.storage, goalStorageKey(context.location, sessionID))
+    if (goal) await ensureBoardForGoal(context, sessionID, goal)
+  } catch (error) {
+    console.warn(`opencode-orchestrator could not enroll the lead board for ${sessionID}`, error)
+  }
   return selected
 }
 

@@ -19,6 +19,15 @@ import {
 } from "../../src/opencode-v2/orchestration/validation.js"
 import { GENERATION_HINT_MAX_HINT_CHARS, type GenerationHintRecord } from "../../src/opencode-v2/observability/trace.js"
 import { createRedactor } from "../../src/opencode-v2/process/redact.js"
+import {
+  createLeadBoard,
+  leadBoardStorageKey,
+  leadTaskStepIdempotencyKey,
+  parseLeadBoard,
+  type LeadBoard,
+} from "../../src/opencode-v2/orchestration/lead-board.js"
+import { reviewStorageKey } from "../../src/opencode-v2/observability/review.js"
+import { goalStorageKey } from "../../src/opencode-v2/goal/state.js"
 
 const options = parseOptions({})
 
@@ -90,13 +99,28 @@ function collect(overrides: Partial<OrchestrationToolsDeps> = {}): Map<string, T
     },
     {
       options,
-      location: { directory: "/workspace" },
+      location: { directory: "/workspace", project: { id: "project" } },
+      storage: memStorage(),
       pathExists: existsAlways,
       realpath: identityRealpath,
       ...overrides,
     },
   )
   return tools
+}
+
+function memStorage(values = new Map<string, unknown>()): {
+  values: Map<string, unknown>
+  get(key: string): Promise<unknown>
+  set(key: string, value: unknown): Promise<void>
+  remove(key: string): Promise<void>
+} {
+  return {
+    values,
+    get: async (key) => values.get(key),
+    set: async (key, value) => void values.set(key, value),
+    remove: async (key) => void values.delete(key),
+  }
 }
 
 type VcsResult = ReadonlyArray<{ file: string }>
@@ -112,10 +136,20 @@ function parseResult(content: string): HandoffValidationResult {
 }
 
 describe("orchestration validation tool registration", () => {
-  test("registers exactly the three tools under the orchestrator namespace with the shared permission", () => {
+  test("registers exactly the validation and lead-board tools under the orchestrator namespace with the shared permission", () => {
     const tools = collect()
     const names = [...tools.keys()]
-    expect(names).toEqual(["task_complexity_classify", "handoff_validate", "admission_transition"])
+    expect(names).toEqual([
+      "task_complexity_classify",
+      "handoff_validate",
+      "admission_transition",
+      "lead_board_get",
+      "lead_board_init",
+      "lead_board_task_create",
+      "lead_board_task_assign",
+      "lead_board_transition",
+      "lead_board_complete",
+    ])
     for (const name of names) {
       const tool = tools.get(name)!
       expect(tool.options?.namespace).toBe("orchestrator")
@@ -1347,5 +1381,373 @@ describe("generation hints (opt-in, default off)", () => {
         "version",
       ].sort(),
     )
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/* Lead board tools                                                    */
+/* ------------------------------------------------------------------ */
+
+const boardLocation = { directory: "/workspace", project: { id: "project" } }
+const HEAD_SHA = "a".repeat(40)
+const BASE_SHA = "b".repeat(40)
+
+function seedGoal(values: Map<string, unknown>, generation = 10, status = "active"): void {
+  values.set(goalStorageKey(boardLocation, "session-1"), {
+    version: 1,
+    sessionID: "session-1",
+    objective: "ship",
+    status,
+    createdAt: generation,
+    updatedAt: generation,
+    continuationCount: 0,
+  })
+}
+
+function boardTask(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 1,
+    taskID: "t1",
+    title: "task one",
+    owner: { sessionID: "session-1", role: "lead" },
+    scope: { version: 1, root: "project", readPaths: [], writePaths: ["src/a.ts"], broad: false },
+    dependencies: [],
+    status: "planned",
+    attempt: 1,
+    evidence: [],
+    lifecycleVersion: 1,
+    idempotencyKey: "board-x/t1",
+    replay: { kind: "none" },
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  }
+}
+
+function seedBoard(values: Map<string, unknown>, overrides: Partial<LeadBoard> = {}): LeadBoard {
+  const board: LeadBoard = {
+    ...createLeadBoard({ projectID: "project", leadSessionID: "session-1", goalGeneration: 10, objective: "ship", now: 1 }),
+    ...overrides,
+  }
+  values.set(leadBoardStorageKey(boardLocation, "session-1"), JSON.parse(JSON.stringify(board)) as LeadBoard)
+  return board
+}
+
+function seedReview(values: Map<string, unknown>, overrides: Record<string, unknown> = {}): void {
+  values.set(reviewStorageKey(boardLocation, "session-1"), {
+    version: 1,
+    taskId: "t1",
+    runId: "r1",
+    maker: "session-1",
+    checker: "reviewer-1",
+    state: "approved",
+    round: 1,
+    maxRounds: 3,
+    requiresHuman: false,
+    createdAt: 1,
+    updatedAt: 2,
+    headSha: HEAD_SHA,
+    baseSha: BASE_SHA,
+    ...overrides,
+  })
+}
+
+function readStoredBoard(values: Map<string, unknown>): LeadBoard {
+  const board = parseLeadBoard(values.get(leadBoardStorageKey(boardLocation, "session-1")))
+  expect(board).toBeDefined()
+  return board!
+}
+
+describe("lead board tools", () => {
+  test("rejects a worker agent for every lead-board tool", async () => {
+    const tools = collect()
+    const worker = toolContext("session-1", "explore")
+    for (const name of ["lead_board_get", "lead_board_init", "lead_board_task_create", "lead_board_task_assign", "lead_board_transition", "lead_board_complete"]) {
+      await expect(tools.get(name)!.execute({}, worker)).rejects.toThrow(/only to the orchestrator/)
+    }
+  })
+
+  test("lead_board_get reports missing, unavailable, and a bounded projection without raw receipts", async () => {
+    const values = new Map<string, unknown>()
+    const tools = collect({ storage: memStorage(values) })
+    const missing = JSON.parse((await tools.get("lead_board_get")!.execute({}, toolContext("session-1", "orchestrator"))).content) as Record<string, unknown>
+    expect(missing.status).toBe("missing")
+    expect((missing.limitations as string[]).join(" ")).toContain("advisory")
+
+    values.set(leadBoardStorageKey(boardLocation, "session-1"), { version: 1, boardID: "x" })
+    const unavailable = JSON.parse((await tools.get("lead_board_get")!.execute({}, toolContext("session-1", "orchestrator"))).content) as Record<string, unknown>
+    expect(unavailable.status).toBe("unavailable")
+    expect(values.get(leadBoardStorageKey(boardLocation, "session-1"))).toEqual({ version: 1, boardID: "x" })
+
+    values.clear()
+    seedGoal(values)
+    seedBoard(values, { tasks: [boardTask()] as never })
+    const ok = JSON.parse((await tools.get("lead_board_get")!.execute({}, toolContext("session-1", "orchestrator"))).content) as {
+      status: string
+      board: { counts: Record<string, number>; tasks: Array<Record<string, unknown>> }
+    }
+    expect(ok.status).toBe("ok")
+    expect(ok.board.counts.planned).toBe(1)
+    expect(ok.board.tasks[0]!.evidence).toBeUndefined()
+    expect(ok.board.tasks[0]!.replay).toEqual({ kind: "none" })
+  })
+
+  test("lead_board_init requires a goal, creates once, and replaces only on a new generation", async () => {
+    const values = new Map<string, unknown>()
+    const tools = collect({ storage: memStorage(values) })
+    const orchestrator = toolContext("session-1", "orchestrator")
+    const refused = JSON.parse((await tools.get("lead_board_init")!.execute({}, orchestrator)).content) as Record<string, unknown>
+    expect(refused.reason).toBe("no-goal")
+
+    seedGoal(values)
+    const created = JSON.parse((await tools.get("lead_board_init")!.execute({}, orchestrator)).content) as Record<string, unknown>
+    expect(created.status).toBe("created")
+    const again = JSON.parse((await tools.get("lead_board_init")!.execute({}, orchestrator)).content) as Record<string, unknown>
+    expect(again.status).toBe("exists")
+
+    seedGoal(values, 11)
+    const replaced = JSON.parse((await tools.get("lead_board_init")!.execute({ goalGeneration: 11 }, orchestrator)).content) as Record<string, unknown>
+    expect(replaced.status).toBe("created")
+    const stored = readStoredBoard(values)
+    expect(stored.goalGeneration).toBe(11)
+  })
+
+  test("lead_board_task_create validates scope, duplicates, dependencies, and the board revision", async () => {
+    const values = new Map<string, unknown>()
+    seedGoal(values)
+    const board = seedBoard(values)
+    const tools = collect({ storage: memStorage(values) })
+    const orchestrator = toolContext("session-1", "orchestrator")
+    const request = {
+      expectedBoardRevision: board.boardRevision,
+      taskID: "child-1",
+      title: "child task",
+      ownerSessionID: "child-session",
+      ownerRole: "implementer",
+      readPaths: ["src/a.ts"],
+      writePaths: ["src/b.ts"],
+      dependencies: ["root"],
+    }
+    const created = JSON.parse((await tools.get("lead_board_task_create")!.execute(request, orchestrator)).content) as Record<string, unknown>
+    expect(created.status).toBe("created")
+    const stored = readStoredBoard(values)
+    expect(stored.tasks).toHaveLength(2)
+    expect(stored.tasks[1]!.status).toBe("planned")
+    expect(stored.boardRevision).toBe(2)
+
+    const duplicate = JSON.parse(
+      (await tools.get("lead_board_task_create")!.execute({ ...request, expectedBoardRevision: 2 }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(duplicate.reason).toBe("invalid-task")
+    expect((duplicate.issues as string[]).join(" ")).toContain("duplicate-task-id")
+
+    const badScope = JSON.parse(
+      (await tools.get("lead_board_task_create")!.execute({ ...request, taskID: "child-2", expectedBoardRevision: 2, writePaths: ["/etc"] }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(badScope.reason).toBe("invalid-scope")
+
+    const stale = JSON.parse(
+      (await tools.get("lead_board_task_create")!.execute({ ...request, taskID: "child-3", expectedBoardRevision: 1 }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(stale.reason).toBe("version-mismatch")
+  })
+
+  test("lead_board_task_assign bumps versions once and refuses stale versions", async () => {
+    const values = new Map<string, unknown>()
+    seedBoard(values, { tasks: [boardTask()] as never })
+    const tools = collect({ storage: memStorage(values) })
+    const orchestrator = toolContext("session-1", "orchestrator")
+    const assigned = JSON.parse(
+      (await tools
+        .get("lead_board_task_assign")!
+        .execute({ taskID: "t1", expectedVersion: 1, ownerSessionID: "child-2", ownerRole: "reviewer" }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(assigned.status).toBe("assigned")
+    const stored = readStoredBoard(values)
+    expect(stored.tasks[0]!.owner).toEqual({ sessionID: "child-2", role: "reviewer" })
+    expect(stored.tasks[0]!.lifecycleVersion).toBe(2)
+    expect(stored.boardRevision).toBe(2)
+    const stale = JSON.parse(
+      (await tools.get("lead_board_task_assign")!.execute({ taskID: "t1", expectedVersion: 1, ownerSessionID: "x", ownerRole: "lead" }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(stale.reason).toBe("version-mismatch")
+  })
+
+  test("lead_board_transition reports evidence, rejects stale versions, foreign actors, and workers", async () => {
+    const values = new Map<string, unknown>()
+    seedBoard(values, { tasks: [boardTask({ status: "in-progress", lifecycleVersion: 4 })] as never })
+    const tools = collect({ storage: memStorage(values) })
+    const orchestrator = toolContext("session-1", "orchestrator")
+    const missingEvidence = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 4, action: "report" }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(missingEvidence.reason).toBe("missing-evidence")
+    const reported = JSON.parse(
+      (await tools
+        .get("lead_board_transition")!
+        .execute(
+          { taskID: "t1", expectedVersion: 4, action: "report", evidence: [{ kind: "command", reference: "bun test", description: "green" }] },
+          orchestrator,
+        )).content,
+    ) as Record<string, unknown>
+    expect(reported.status).toBe("applied")
+    expect(readStoredBoard(values).tasks[0]!.status).toBe("awaiting-validation")
+    const stale = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 4, action: "request-changes" }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(stale.reason).toBe("version-mismatch")
+    // A foreign session cannot even reach the actor check: the board record is
+    // keyed to and identity-verified against the lead session, so a different
+    // session reads board-missing/unavailable and is refused.
+    const foreign = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 5, action: "request-changes" }, toolContext("session-2", "orchestrator"))).content,
+    ) as Record<string, unknown>
+    expect(foreign.status).toBe("refused")
+    expect(["missing", "unavailable"]).toContain(foreign.reason as string)
+  })
+
+  test("lead_board_transition validate runs the unchanged D2 validator and refuses non-pass results", async () => {
+    const values = new Map<string, unknown>()
+    seedBoard(values, { tasks: [boardTask({ status: "awaiting-validation", lifecycleVersion: 5 })] as never })
+    const tools = collect({ storage: memStorage(values), vcs: vcsReturning([{ file: "src/a.ts" }]) })
+    const orchestrator = toolContext("session-1", "orchestrator")
+    const validateRequest = {
+      taskID: "t1",
+      expectedVersion: 5,
+      action: "validate",
+      revision: HEAD_SHA,
+      handoff: handoff({ taskId: "t1", filesChanged: [{ path: "src/a.ts", scope: "child" }] }),
+      contract: contract({ taskId: "t1", writeScope: ["src/a.ts"], requiredCommands: [], reviewRequired: true }),
+      checks: [{ id: "scope-review", verdict: "pass" }],
+    }
+    const failedCheck = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ ...validateRequest, checks: [{ id: "scope-review", verdict: "fail" }] }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(failedCheck.reason).toBe("check-failed")
+
+    const contractMismatch = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ ...validateRequest, contract: contract({ taskId: "other" }) }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(contractMismatch.reason).toBe("contract-mismatch")
+
+    const scopeEscape = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ ...validateRequest, contract: contract({ taskId: "t1", writeScope: ["src/z.ts"] }) }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(scopeEscape.reason).toBe("contract-scope")
+
+    const badRevision = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ ...validateRequest, revision: "abc" }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(badRevision.reason).toBe("invalid-revision")
+
+    // Without VCS truth the validator blocks conservatively and the action refuses.
+    const noVcs = collect({ storage: memStorage(values) })
+    const blocked = JSON.parse((await noVcs.get("lead_board_transition")!.execute(validateRequest, orchestrator)).content) as Record<string, unknown>
+    expect(blocked.reason).toBe("validation-failed")
+
+    const applied = JSON.parse((await tools.get("lead_board_transition")!.execute(validateRequest, orchestrator)).content) as {
+      status: string
+      board: { tasks: Array<{ status: string; lifecycleVersion: number; validation?: { checkIDs: string[] } }> }
+    }
+    expect(applied.status).toBe("applied")
+    expect(applied.board.tasks[0]!.status).toBe("awaiting-review")
+    expect(applied.board.tasks[0]!.validation!.checkIDs.length).toBeGreaterThan(0)
+    expect(readStoredBoard(values).tasks[0]!.validation?.revision).toBe(HEAD_SHA)
+  })
+
+  test("lead_board_transition complete requires an approved exact-revision review and is sticky", async () => {
+    const values = new Map<string, unknown>()
+    seedBoard(values, {
+      tasks: [
+        boardTask({
+          status: "awaiting-review",
+          lifecycleVersion: 6,
+          validation: { leadSessionID: "session-1", validatedAt: 3, revision: HEAD_SHA, checkIDs: ["c1-structure:pass"] },
+        }),
+      ] as never,
+    })
+    const tools = collect({ storage: memStorage(values) })
+    const orchestrator = toolContext("session-1", "orchestrator")
+    const noReview = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 6, action: "complete" }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(noReview.reason).toBeDefined()
+
+    seedReview(values, { state: "changes-requested" })
+    const notApproved = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 6, action: "complete" }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(notApproved.reason).toBe("not-approved")
+
+    seedReview(values, { headSha: "c".repeat(40) })
+    const mismatch = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 6, action: "complete" }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(mismatch.reason).toBe("revision-mismatch")
+
+    seedReview(values)
+    const completed = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 6, action: "complete" }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(completed.status).toBe("applied")
+    const stored = readStoredBoard(values)
+    expect(stored.tasks[0]!.status).toBe("completed")
+    expect(stored.tasks[0]!.review?.revision).toBe(HEAD_SHA)
+    const sticky = JSON.parse(
+      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 7, action: "requeue" }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(sticky.status).toBe("refused")
+  })
+
+  test("lead_board_complete requires all tasks completed, the aggregate verification, the exact review, and an unchanged goal", async () => {
+    const values = new Map<string, unknown>()
+    seedGoal(values)
+    seedReview(values)
+    const board = seedBoard(values)
+    const tools = collect({ storage: memStorage(values), vcs: vcsReturning([]) })
+    const orchestrator = toolContext("session-1", "orchestrator")
+    const request = {
+      expectedBoardRevision: board.boardRevision,
+      revision: HEAD_SHA,
+      handoff: handoff({ taskId: board.boardID, outcome: "aggregate verified" }),
+      contract: contract({ taskId: board.boardID, writeScope: [], requiredCommands: [], reviewRequired: true }),
+      checks: [],
+    }
+    const incomplete = JSON.parse((await tools.get("lead_board_complete")!.execute(request, orchestrator)).content) as Record<string, unknown>
+    expect(incomplete.reason).toBe("board-incomplete")
+
+    seedBoard(values, { tasks: [boardTask({ status: "completed" })] as never })
+    const contractMismatch = JSON.parse(
+      (await tools.get("lead_board_complete")!.execute({ ...request, contract: contract({ taskId: "other", writeScope: [], requiredCommands: [], reviewRequired: true }) }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(contractMismatch.reason).toBe("contract-mismatch")
+
+    // Goal identity change (a replaced generation) cancels the completion.
+    seedGoal(values, 11)
+    const identityChanged = JSON.parse((await tools.get("lead_board_complete")!.execute(request, orchestrator)).content) as Record<string, unknown>
+    expect(identityChanged.reason).toBe("goal-identity-changed")
+
+    // Restore the matching generation and complete under the lock.
+    seedGoal(values, 10)
+    const completed = JSON.parse((await tools.get("lead_board_complete")!.execute(request, orchestrator)).content) as Record<string, unknown>
+    expect(completed.status).toBe("complete")
+    const stored = readStoredBoard(values)
+    expect(stored.status).toBe("complete")
+    expect(stored.completion?.revision).toBe(HEAD_SHA)
+    const goal = values.get(goalStorageKey(boardLocation, "session-1")) as { status: string; completionEvidence?: string }
+    expect(goal.status).toBe("complete")
+    expect(goal.completionEvidence).toContain(stored.boardID)
+
+    // A paused goal also cancels before any write.
+    const pausedValues = new Map<string, unknown>()
+    seedGoal(pausedValues, 10, "paused")
+    seedReview(pausedValues)
+    const pausedBoard = seedBoard(pausedValues, { tasks: [boardTask({ status: "completed" })] as never })
+    const pausedTools = collect({ storage: memStorage(pausedValues), vcs: vcsReturning([]) })
+    const paused = JSON.parse(
+      (await pausedTools.get("lead_board_complete")!.execute({ ...request, expectedBoardRevision: pausedBoard.boardRevision }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(paused.reason).toBe("goal-identity-changed")
+    expect(readStoredBoard(pausedValues).status).toBe("active")
   })
 })

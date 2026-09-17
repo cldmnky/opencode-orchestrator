@@ -9,6 +9,7 @@ import type { CommandInvocationLike } from "../../src/opencode-v2/commands/index
 import { formatHandoverSummary, runCommand, statusMessage } from "../../src/opencode-v2/commands/runtime.js"
 import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
 import { goalStorageKey, runStorageKey, stopStorageKey } from "../../src/opencode-v2/goal/state.js"
+import { leadBoardStorageKey, parseLeadBoard } from "../../src/opencode-v2/orchestration/lead-board.js"
 import { publishStorageKey, type PublishRecord } from "../../src/opencode-v2/publish/state.js"
 import { gatesStorageKey, type GatesRecord } from "../../src/opencode-v2/gates/state.js"
 import type { WorkerModelRuntime } from "../../src/opencode-v2/worker-models/runtime.js"
@@ -159,6 +160,55 @@ describe("runtime commands", () => {
 
     expect(fixture.values.has(goalKey)).toBe(false)
     expect(fixture.values.has(stopKey)).toBe(false)
+  })
+
+  test("/goal set enrolls a deterministic board; pause/resume narrow it and clear removes it", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    const fixture = runtimeFixture(directory)
+    const options = parseOptions({})
+    const boardKey = leadBoardStorageKey(fixture.context.location, "session")
+    const goalKey = goalStorageKey(fixture.context.location, "session")
+
+    await runCommand(fixture.context, options, "goal", invocation("ship the release"), undefined)
+    const goal = fixture.values.get(goalKey) as { createdAt: number }
+    const board = parseLeadBoard(fixture.values.get(boardKey))!
+    expect(board.goalGeneration).toBe(goal.createdAt)
+    expect(board.tasks).toHaveLength(1)
+    expect(board.tasks[0]!.taskID).toBe("root")
+    expect(board.tasks[0]!.status).toBe("planned")
+    expect(board.status).toBe("active")
+    expect(fixture.statuses[0]).toContain(`Lead board: ${board.boardID}`)
+
+    await runCommand(fixture.context, options, "goal", invocation("pause"), undefined)
+    expect(parseLeadBoard(fixture.values.get(boardKey))!.status).toBe("paused")
+    await runCommand(fixture.context, options, "goal", invocation("resume"), undefined)
+    expect(parseLeadBoard(fixture.values.get(boardKey))!.status).toBe("active")
+
+    await runCommand(fixture.context, options, "goal", invocation("clear"), undefined)
+    expect(fixture.values.has(boardKey)).toBe(false)
+    expect(fixture.values.has(goalKey)).toBe(false)
+  })
+
+  test("/run-plan enrolls the current goal generation and replaces only a stale board", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
+    mkdirSync(join(directory, ".orchestrator", "plans"), { recursive: true })
+    writeFileSync(join(directory, ".orchestrator", "plans", "release.md"), "# Release\n\n- Verify the build\n")
+    const fixture = runtimeFixture(directory)
+    const options = parseOptions({})
+    const boardKey = leadBoardStorageKey(fixture.context.location, "session")
+
+    await runCommand(fixture.context, options, "goal", invocation("ship the release"), undefined)
+    const original = parseLeadBoard(fixture.values.get(boardKey))!
+    await runCommand(fixture.context, options, "run-plan", invocation("release"), undefined)
+    expect(parseLeadBoard(fixture.values.get(boardKey))!.boardID).toBe(original.boardID)
+
+    // A stale board (different goal generation) is replaced, never clobbered
+    // silently for the same generation.
+    const stale = { ...original, goalGeneration: original.goalGeneration + 1 }
+    fixture.values.set(boardKey, stale)
+    await runCommand(fixture.context, options, "run-plan", invocation("release"), undefined)
+    expect(parseLeadBoard(fixture.values.get(boardKey))!.goalGeneration).toBe(original.goalGeneration)
+    expect(parseLeadBoard(fixture.values.get(boardKey))!.boardID).toBe(original.boardID)
   })
 
   test("a blocked dispatch gate stops a slash command before any prompt or plan run", async () => {

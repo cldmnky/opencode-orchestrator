@@ -150,6 +150,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
           addOrchestrationTools(draft, {
             options,
             location: ctx.location,
+            storage: ctx.storage,
             session: ctx.session,
             vcs: ctx.vcs,
             generate: (input) => ctx.generate.text(input),
@@ -202,6 +203,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
               "Parallel writes require an exact disjoint write scope from every child.",
               "Separate established facts from assumptions.",
               "Use orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update for session goal state.",
+              "Use orchestrator_lead_board_get, orchestrator_lead_board_init, orchestrator_lead_board_task_create, orchestrator_lead_board_task_assign, orchestrator_lead_board_transition, and orchestrator_lead_board_complete for the durable lead board; a delivered prompt, an idle edge, or a step receipt never completes a task.",
               "Inspect or toggle the durable project-scoped publication capability with /publish (status|enable|disable).",
               "It is a capability toggle, not caller authentication.",
               "It never mutates Git or GitHub and never weakens the static github/worktree gates.",

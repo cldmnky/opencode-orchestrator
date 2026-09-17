@@ -206,11 +206,30 @@ export function buildCommandPrompt(name: string, argumentsText: string, options?
   return `${prompts[name] ?? `Execute ${name}: ${args}`}\n\n${common}`
 }
 
+/**
+ * Board operating instructions appended only when a durable lead-board task
+ * drives the continuation. The packet itself is rendered verbatim
+ * (post-normalization) by the lead-board module and passed in; this module
+ * adds instructions and never embeds board fields into the D2 handoff
+ * skeleton. Scope packets stay advisory: not isolation, permissions, or a
+ * worktree binding.
+ */
+const LEAD_BOARD_OPERATING_GUIDANCE = [
+  "The lead board is the durable task ledger for this goal generation.",
+  "Work the task in the packet above, then report bounded evidence with orchestrator_lead_board_transition; a delivered prompt, an idle edge, or a step receipt never completes a task.",
+  "A worker handoff is a report until you validate it: call orchestrator_handoff_validate on the unchanged D2 envelope first.",
+  "Then rerun the required checks yourself and record bounded results, revision, and redacted refs with the validate action.",
+  "Completion additionally requires an approved exact-revision review for the same revision; pass expectedVersion (the task lifecycle version) on every transition.",
+  "If an external outcome is unknowable, mark the task ambiguous instead of retrying; resume only from a lead-validated cursor.",
+  "Scope packets are advisory: they are not filesystem isolation, permissions, or a worktree binding.",
+].join("\n")
+
 export function buildContinuationPrompt(
   objective: string,
   continuationCount: number,
   options?: OrchestratorOptions,
   plan?: string,
+  taskPacket?: string,
 ): string {
   return [
     "Continue the active orchestration goal.",
@@ -220,6 +239,7 @@ export function buildContinuationPrompt(
     "Make concrete progress, delegate safely when useful, and stop only after the objective is complete or a blocker requires the user.",
     "Read and update the goal with the namespaced tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update.",
     "Completion requires a direct verification result and an evidence string through orchestrator_goal_update.",
+    ...(taskPacket ? [taskPacket, LEAD_BOARD_OPERATING_GUIDANCE] : []),
     DELEGATION_GRAPH_GUIDANCE,
     PROMPTING_POLICY_GUIDANCE,
     verticalSliceGuidance(options?.decomposition?.strategy),

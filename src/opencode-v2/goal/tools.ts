@@ -11,6 +11,11 @@ import {
   type StorageLike,
   type GoalRecord,
 } from "./state.js"
+import {
+  createLeadBoard,
+  hydrateLeadBoard,
+  writeLeadBoard,
+} from "../orchestration/lead-board.js"
 import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 
 type ToolDraftLike = {
@@ -52,6 +57,22 @@ export function addGoalTools(
         const stableLocation = stableLocationFor(projectID, location)
         await storage.set(goalStorageKey(stableLocation, tool.sessionID), goal)
         await storage.remove(stopStorageKey(stableLocation, tool.sessionID))
+        // A new goal generation enrolls its own deterministic lead board
+        // (same wiring as /goal set): new boardID, fresh idempotency keys, one
+        // planned root task. A board write failure leaves the goal on the
+        // legacy board-missing path, never a synthesized ledger.
+        try {
+          const board = createLeadBoard({
+            projectID,
+            leadSessionID: tool.sessionID,
+            goalGeneration: goal.createdAt,
+            objective: goal.objective,
+          })
+          await writeLeadBoard(storage, stableLocation, board)
+        } catch {
+          // Reported by the goal record itself; the board can be re-enrolled
+          // explicitly with orchestrator_lead_board_init.
+        }
         return result(JSON.stringify(goal))
       })
     },
@@ -78,6 +99,20 @@ export function addGoalTools(
         const evidence = stringField(input, "evidence")
         if (status === "complete" && evidence.length < 8) {
           return result("completion requires at least eight characters of evidence")
+        }
+        // A goal generation governed by a lead board cannot be bypassed: the
+        // board must reach `complete` through orchestrator_lead_board_complete
+        // (all tasks completed + aggregate verification + approved
+        // exact-revision review). A missing board keeps the legacy path; an
+        // unavailable/malformed board fails closed.
+        if (status === "complete") {
+          const hydration = await hydrateLeadBoard(storage, location, tool.sessionID, { goalGeneration: goal.createdAt })
+          if (hydration.status === "unavailable") {
+            return result("completion refused: the lead board is unavailable; repair or re-init it first")
+          }
+          if (hydration.status === "ok" && hydration.board?.status !== "complete") {
+            return result("completion refused: complete the lead board with orchestrator_lead_board_complete first")
+          }
         }
 
         const now = Date.now()

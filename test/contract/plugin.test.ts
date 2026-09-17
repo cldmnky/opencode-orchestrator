@@ -184,11 +184,17 @@ describe("server plugin contract", () => {
       "orchestrator_task_complexity_classify",
       "orchestrator_handoff_validate",
       "orchestrator_admission_transition",
+      "orchestrator_lead_board_get",
+      "orchestrator_lead_board_init",
+      "orchestrator_lead_board_task_create",
+      "orchestrator_lead_board_task_assign",
+      "orchestrator_lead_board_transition",
+      "orchestrator_lead_board_complete",
       "orchestrator_publish_policy_get",
       "orchestrator_peer_list",
       "orchestrator_session_status",
     ])
-    expect(allToolNames).toHaveLength(28)
+    expect(allToolNames).toHaveLength(34)
     expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBe(11)
     expect(tools.filter((tool) => tool.options?.permission === WORKTREE_TOOL_PERMISSION).length).toBe(7)
     expect(tools.filter((tool) => tool.options?.permission === PUBLISH_TOOL_PERMISSION).length).toBe(1)
@@ -204,11 +210,18 @@ describe("server plugin contract", () => {
     for (const tool of goalTools) {
       expect(tool.options?.permission).toBe(GOAL_TOOL_PERMISSION)
     }
-    // The three serialized runtime validation tools share their own permission.
+    // The serialized runtime validation tools and the lead-board tools share
+    // the same permission action (one rule grants or revokes the family).
     const validationTools = tools.filter((tool) => tool.options?.permission === ORCHESTRATION_TOOL_PERMISSION)
     expect(validationTools.map((tool) => tool.name).sort()).toEqual([
       "admission_transition",
       "handoff_validate",
+      "lead_board_complete",
+      "lead_board_get",
+      "lead_board_init",
+      "lead_board_task_assign",
+      "lead_board_task_create",
+      "lead_board_transition",
       "task_complexity_classify",
     ])
     for (const tool of validationTools) {
@@ -623,6 +636,12 @@ describe("server plugin contract", () => {
       "orchestrator_task_complexity_classify",
       "orchestrator_handoff_validate",
       "orchestrator_admission_transition",
+      "orchestrator_lead_board_get",
+      "orchestrator_lead_board_init",
+      "orchestrator_lead_board_task_create",
+      "orchestrator_lead_board_task_assign",
+      "orchestrator_lead_board_transition",
+      "orchestrator_lead_board_complete",
       "orchestrator_publish_policy_get",
       "orchestrator_peer_list",
       "orchestrator_session_status",

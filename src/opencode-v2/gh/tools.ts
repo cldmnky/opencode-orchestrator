@@ -9,6 +9,14 @@ import { requireGateEnabled } from "../gates/state.js"
 import { readReviewRecord } from "../observability/runtime.js"
 import { validateApprovedReviewRevision } from "../observability/review.js"
 import {
+  PUBLISH_REPLAY_LIMITATIONS,
+  reconcilePrCreate,
+  reconcilePrMerge,
+  recordPrCreateResult,
+  recordPrMergeResult,
+  type PrReconcileRemote,
+} from "../publish/reconcile.js"
+import {
   assertIssueState,
   compareRefs,
   createIssue,
@@ -332,24 +340,82 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
             `github pr create refused: the current remote base (${base}) is not an ancestor of the remote head (${head})`,
           )
         }
+        // Durable replay identity is persisted BEFORE the mutation, and a
+        // retry/restart reconciles from a fresh bounded open-PR list first:
+        // never a blind second POST. Absence of a match stays ambiguous;
+        // same refs with a different SHA is blocked; the list is a page-bounded
+        // compensating control, never an idempotency claim.
+        const replay = await reconcilePrCreate({
+          storage: deps.storage,
+          location: deps.location,
+          sessionID: tool.sessionID,
+          remote: replayRemote(gh, owner, repo),
+          repository: `${owner}/${repo}`,
+          headRef: head,
+          baseRef: base,
+          expectedHeadSHA: expectedHeadSha,
+          expectedBaseSHA: expectedBaseSha,
+          taskID: stringField(input, "taskID").slice(0, 128),
+        })
+        if (replay.status === "failed") {
+          return result(`github pr create refused: replay descriptor could not be persisted (${replay.reason}); the PR was not created`)
+        }
+        if (replay.status === "ambiguous" || replay.status === "blocked") {
+          return result(
+            `github pr create ${replay.status === "blocked" ? "refused" : "ambiguous"}: replay reconciliation ${replay.reason}; no PR was created and no blind retry was attempted`,
+          )
+        }
+        if (replay.status === "adopted") {
+          // Exact-identity adoption from a fresh read: zero second POST.
+          const evidence = mutationEvidence({
+            source: "opencode-orchestrator.gh.pr.create",
+            sessionID: tool.sessionID,
+            proof: { id: replay.pull.id, number: replay.pull.number, url: replay.pull.html_url },
+          })
+          return result(
+            JSON.stringify({
+              ...replay.pull,
+              adopted: true,
+              verified: true,
+              replay: { status: "adopted", reason: replay.reason, descriptorPersisted: replay.descriptorPersisted },
+              limitations: PUBLISH_REPLAY_LIMITATIONS,
+              evidence,
+            }),
+          )
+        }
         // The client always sends draft: true and verifies the created pull
         // reports draft === true with the exact expected head/base SHAs.
-        const created = await createPull(gh, {
-          owner,
-          repo,
-          title,
-          head,
-          base,
-          body: body || undefined,
-          expectedHeadSha,
-          expectedBaseSha,
+        let created
+        try {
+          created = await createPull(gh, {
+            owner,
+            repo,
+            title,
+            head,
+            base,
+            body: body || undefined,
+            expectedHeadSha,
+            expectedBaseSha,
+          })
+        } catch (error) {
+          // The POST outcome is unknown (a lost response or an unverifiable
+          // created pull): record the ambiguity and never claim success.
+          await recordPrCreateResult(deps.storage, replay.descriptor, { status: "lost-response" })
+          return result(`github pr create failed: ${message(error)}`)
+        }
+        await recordPrCreateResult(deps.storage, replay.descriptor, {
+          status: "created",
+          prNumber: created.number,
+          prURL: created.html_url,
         })
         const evidence = mutationEvidence({
           source: "opencode-orchestrator.gh.pr.create",
           sessionID: tool.sessionID,
           proof: { id: created.id, number: created.number, url: created.html_url },
         })
-        return result(JSON.stringify({ ...created, verified: true, evidence }))
+        return result(
+          JSON.stringify({ ...created, verified: true, replay: { status: "created" }, limitations: PUBLISH_REPLAY_LIMITATIONS, evidence }),
+        )
       } catch (error) {
         return result(`github pr create failed: ${message(error)}`)
       }
@@ -647,6 +713,57 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
         if (!receipt.valid) {
           return result(`github pr merge refused: ${receipt.message}`)
         }
+        // Durable replay identity is persisted BEFORE the PUT, and a
+        // retry/restart reconciles from a fresh PR view first: a merged pull is
+        // adopted with zero second PUT; a still-open pull at the exact expected
+        // revision proceeds to the full precondition re-evaluation below
+        // (explicit lead recovery); a moved revision or unknown state stops
+        // truthfully. Never a blind re-PUT, never an alternate SHA.
+        const replay = await reconcilePrMerge({
+          storage: deps.storage,
+          location: deps.location,
+          sessionID: tool.sessionID,
+          remote: replayRemote(gh, owner, repo),
+          repository: `${owner}/${repo}`,
+          prNumber: number,
+          expectedHeadSHA: expectedHeadSha,
+          expectedBaseSHA: expectedBaseSha,
+          taskID: stringField(input, "taskID").slice(0, 128),
+        })
+        if (replay.status === "failed") {
+          return result(`github pr merge refused: replay descriptor could not be persisted (${replay.reason}); no merge was attempted`)
+        }
+        if (replay.status === "ambiguous" || replay.status === "blocked") {
+          return result(
+            `github pr merge ${replay.status === "blocked" ? "refused" : "ambiguous"}: replay reconciliation ${replay.reason}; no blind retry was attempted`,
+          )
+        }
+        if (replay.status === "adopted") {
+          // Replay-safe post-merge verification: a second fresh view must
+          // confirm the merge. Zero second PUT.
+          const after = await viewPull(gh, { owner, repo, number })
+          if (!after.merged) {
+            return result("github pr merge failed: replay adoption was not confirmed by a fresh view")
+          }
+          const evidence = mutationEvidence({
+            source: "opencode-orchestrator.gh.pr.merge",
+            sessionID: tool.sessionID,
+            proof: { id: after.id, number: after.number, url: after.html_url },
+          })
+          return result(
+            JSON.stringify({
+              ...after,
+              ...(replay.mergeSHA !== undefined ? { mergeSha: replay.mergeSHA } : {}),
+              expectedHeadSha,
+              expectedBaseSha,
+              adopted: true,
+              verified: true,
+              replay: { status: "adopted", descriptorPersisted: replay.descriptorPersisted },
+              limitations: PUBLISH_REPLAY_LIMITATIONS,
+              evidence,
+            }),
+          )
+        }
         // Fresh pre-view: open, unmerged, NOT a draft, conflict-free, and the
         // exact expected head revision.
         const before = await viewPull(gh, { owner, repo, number })
@@ -699,9 +816,22 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
           )
         }
 
-        const merged = await mergePull(gh, merge)
+        let merged
+        try {
+          merged = await mergePull(gh, merge)
+        } catch (error) {
+          // The PUT outcome is unknown: record the ambiguity, never claim
+          // success and never blindly re-PUT.
+          if (replay.status === "proceed") {
+            await recordPrMergeResult(deps.storage, replay.descriptor, { status: "lost-response" })
+          }
+          return result(`github pr merge failed: ${message(error)}`)
+        }
         if (!merged.merged) {
           return result(`github pr merge failed: API reported merged:false (${merged.message || "no message"})`)
+        }
+        if (replay.status === "proceed") {
+          await recordPrMergeResult(deps.storage, replay.descriptor, { status: "merged", mergeSHA: merged.sha })
         }
 
         // Post-merge verification: a second fresh view must confirm the merge.
@@ -723,6 +853,8 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
             expectedHeadSha,
             expectedBaseSha,
             verified: true,
+            replay: { status: "merged" },
+            limitations: PUBLISH_REPLAY_LIMITATIONS,
             evidence,
           }),
         )
@@ -753,6 +885,31 @@ async function currentRemoteBaseAncestry(
   const baseRef = await getBranchRef(gh, { owner, repo, branch: base })
   const cmp = await compareRefs(gh, { owner, repo, base, head })
   return { headSha: headRef.sha, baseSha: baseRef.sha, ancestor: cmp.ancestor && cmp.baseSha === baseRef.sha }
+}
+
+/**
+ * Bounded injected remote reads for replay reconciliation. A read failure is
+ * `undefined` (unavailable), never "no match", so absence can never be
+ * mistaken for proof. The open-PR listing is a compensating control: bounded
+ * and racy, never an idempotency claim.
+ */
+function replayRemote(gh: GhContext, owner: string, repo: string): PrReconcileRemote {
+  return {
+    listOpenPulls: async () => {
+      try {
+        return await listPulls(gh, { owner, repo, state: "open" })
+      } catch {
+        return undefined
+      }
+    },
+    viewPull: async (number) => {
+      try {
+        return await viewPull(gh, { owner, repo, number })
+      } catch {
+        return undefined
+      }
+    },
+  }
 }
 
 function requireOrchestrator(agent: string, options: OrchestratorOptions): void {
@@ -870,6 +1027,7 @@ const prCreateInput = {
     body: { type: "string" },
     expectedHeadSha: { type: "string", pattern: FULL_SHA_PATTERN, minLength: 40 },
     expectedBaseSha: { type: "string", pattern: FULL_SHA_PATTERN, minLength: 40 },
+    taskID: { type: "string", maxLength: 128 },
     confirm: { type: "boolean" },
   },
   required: ["owner", "repo", "title", "head", "base", "expectedHeadSha", "expectedBaseSha", "confirm"],
@@ -936,6 +1094,7 @@ const prMergeInput = {
     mergeMethod: { type: "string", enum: ["merge", "squash", "rebase"] },
     commitTitle: { type: "string" },
     commitMessage: { type: "string" },
+    taskID: { type: "string", maxLength: 128 },
     // Retained for backward compatibility with callers that still pass it; it
     // is no longer required and never constitutes user authorization.
     confirm: { type: "boolean" },

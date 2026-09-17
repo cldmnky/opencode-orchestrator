@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { parseOptions } from "../../src/core/config.js"
 import { GOAL_TOOL_PERMISSION, PEER_TOOL_PERMISSION, PUBLISH_TOOL_PERMISSION } from "../../src/core/permissions.js"
 import { addGoalTools } from "../../src/opencode-v2/goal/tools.js"
+import { completeLeadBoard, leadBoardStorageKey, parseLeadBoard } from "../../src/opencode-v2/orchestration/lead-board.js"
 import { addPeerTools } from "../../src/opencode-v2/peers/tools.js"
 import { addPublishTools } from "../../src/opencode-v2/publish/tools.js"
 import {
@@ -183,7 +184,20 @@ describe("goal tools", () => {
     expect(values.has(goalStorageKey({ ...location, project: { id: "origin" } }, sessionID))).toBe(true)
     expect(values.has(goalStorageKey(location, sessionID))).toBe(false)
 
-    // goal_update operates on the origin-keyed record.
+    // The new generation is enrolled on an origin-keyed board, and a
+    // board-governed goal cannot be completed directly.
+    const originLocation = { ...location, project: { id: "origin" } }
+    const boardKey = leadBoardStorageKey(originLocation, sessionID)
+    expect(values.has(boardKey)).toBe(true)
+    const refused = await tools
+      .get("goal_update")!
+      .execute({ status: "complete", evidence: "verified by tests" }, toolContext(sessionID, "orchestrator"))
+    expect(refused.content).toContain("complete the lead board")
+
+    // Once the board itself is complete, goal_update operates on the
+    // origin-keyed record.
+    const board = parseLeadBoard(values.get(boardKey))!
+    values.set(boardKey, completeLeadBoard(board, { revision: "a".repeat(40), reviewReference: "review/1/1" }))
     const updated = await tools
       .get("goal_update")!
       .execute({ status: "complete", evidence: "verified by tests" }, toolContext(sessionID, "orchestrator"))

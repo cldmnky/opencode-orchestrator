@@ -7,9 +7,27 @@ import {
   markStepCompleted,
   markStepDispatched,
   newPendingStepRecord,
+  parseStepRecord,
   removeSessionSteps,
+  removeStepRecord,
+  stepStorageKey,
   writeStepRecord,
 } from "../orchestration/step-state.js"
+import {
+  hydrateLeadBoard,
+  leadBoardStorageKey,
+  leadTaskPacketText,
+  leadTaskStepIdempotencyKey,
+  parseLeadBoard,
+  reconcileLeadBoard,
+  releaseLeadReservation,
+  removeLeadBoard,
+  reserveNextLeadTask,
+  transitionLeadTask,
+  writeLeadBoard,
+  type LeadBoard,
+  type LeadStepObservation,
+} from "../orchestration/lead-board.js"
 import {
   goalStorageKey,
   readAutomationStop,
@@ -96,6 +114,7 @@ export function startGoalContinuation(
           context.storage.remove(goalStorageKey(keyedLocation, sessionID)),
           context.storage.remove(runStorageKey(keyedLocation, sessionID)),
           context.storage.remove(stopStorageKey(keyedLocation, sessionID)),
+          removeLeadBoard(context.storage, keyedLocation, sessionID),
           removeSessionSteps(context.storage, keyedLocation, sessionID),
         ])
       })
@@ -156,11 +175,15 @@ export function startGoalContinuation(
 
     // Reserve the turn under the session lock: the ceiling, cooldown, halt,
     // controls gate, plan-run state, and duplicate-idle checks all happen
-    // atomically here so concurrent idle edges cannot exceed the ceiling. The
-    // only shared mutations performed while holding the lock are the goal
-    // reservation and its durable pending step receipt (S1 slice 1); the
-    // receipt write is best-effort and can never change the reservation.
-    const reserved = await withSessionLock(context.location, sessionID, async () => {
+    // atomically here so concurrent idle edges cannot exceed the ceiling.
+    //
+    // Two admission paths exist:
+    // - a board exists for this goal generation: hydrate, reconcile receipts
+    //   conservatively, reserve the next ready task + persist its pending step
+    //   receipt + bump the goal count (in that order) before any prompt;
+    // - no board (legacy goal): the goal-only path is unchanged, with a
+    //   best-effort pending receipt exactly like before.
+    const reserved = await withSessionLock(context.location, sessionID, async (): Promise<Reservation | undefined> => {
       const goal = await readGoal(context.storage, key)
       if (!goal || goal.status !== "active") return undefined
       if (goal.continuationCount >= options.goal.max_continuations) {
@@ -189,77 +212,200 @@ export function startGoalContinuation(
         return undefined
       }
 
-      const next: GoalRecord = {
+      const hydration = await hydrateLeadBoard(context.storage, context.location, sessionID, { goalGeneration: goal.createdAt })
+      if (hydration.status === "unavailable") {
+        // Malformed or identity-mismatched board: never overwrite, never
+        // dispatch. Recovery requires explicit lead/goal action.
+        console.warn(`opencode-orchestrator lead board unavailable for ${sessionID}: ${hydration.warning ?? "unknown"}`)
+        return undefined
+      }
+      if (hydration.status === "missing") {
+        // Legacy goal without an enrolled board: keep the goal-only
+        // continuation path exactly as before (board-missing is not an error).
+        const next: GoalRecord = {
+          ...goal,
+          continuationCount: goal.continuationCount + 1,
+          lastContinuationAt: now,
+          updatedAt: now,
+        }
+        await context.storage.set(key, next)
+        try {
+          await writeStepRecord(
+            context.storage,
+            keyedLocation,
+            newPendingStepRecord({
+              sessionID,
+              stepIndex: next.continuationCount,
+              idempotencyKey: continuationStepIdempotencyKey(sessionID, goal.createdAt, next.continuationCount),
+              now,
+            }),
+          )
+        } catch (error) {
+          console.warn(`opencode-orchestrator step receipt write failed for ${sessionID}`, error)
+        }
+        return { kind: "legacy", goal: next, run, stepIndex: next.continuationCount }
+      }
+
+      const board = hydration.board
+      if (!board || board.status !== "active") return undefined
+
+      // Deterministic restart recovery: rebuild observations for claim-holding
+      // tasks from their exact linked step receipts, then reconcile
+      // conservatively (ambiguous on possible effect, at most
+      // awaiting-validation on a completed idle edge). No mutation on read;
+      // the recovered board is persisted before any reservation.
+      const reconciled = await reconcileHydratedBoard(board, sessionID, keyedLocation)
+      let working = reconciled.board
+      if (reconciled.changed) {
+        try {
+          working = await writeLeadBoard(context.storage, keyedLocation, working)
+        } catch (error) {
+          console.warn(`opencode-orchestrator lead board recovery write failed for ${sessionID}`, error)
+          return undefined
+        }
+      }
+
+      const selection = reserveNextLeadTask(working, { stepIndex: goal.continuationCount + 1, now })
+      if (!selection.reservation) {
+        if (selection.board !== working) {
+          try {
+            await writeLeadBoard(context.storage, keyedLocation, selection.board)
+          } catch (error) {
+            console.warn(`opencode-orchestrator lead board promotion write failed for ${sessionID}`, error)
+          }
+        }
+        return undefined
+      }
+      const selectionTask = selection.board.tasks.find((task) => task.taskID === selection.reservation!.taskID)
+      if (!selectionTask) return undefined
+
+      // Persist reservation + step identity + pending receipt BEFORE queueing
+      // the prompt. Order: step, board, goal. Any failure aborts delivery and
+      // compensates what was already written, so a failed write is a safety
+      // outcome that is never guessed around.
+      const pending = newPendingStepRecord({
+        sessionID,
+        stepIndex: selection.reservation.stepIndex,
+        idempotencyKey: selection.reservation.stepIdempotencyKey,
+        attempt: selection.reservation.attempt,
+        ...(selectionTask.cursor !== undefined ? { cursor: selectionTask.cursor } : {}),
+        now,
+      })
+      try {
+        await writeStepRecord(context.storage, keyedLocation, pending)
+      } catch (error) {
+        console.warn(`opencode-orchestrator lead board step receipt write failed for ${sessionID}`, error)
+        return undefined
+      }
+      try {
+        await writeLeadBoard(context.storage, keyedLocation, selection.board)
+      } catch (error) {
+        console.warn(`opencode-orchestrator lead board reservation write failed for ${sessionID}`, error)
+        await removeStepRecord(context.storage, keyedLocation, sessionID, selection.reservation.stepIndex).catch(() => undefined)
+        return undefined
+      }
+      const nextGoal: GoalRecord = {
         ...goal,
-        continuationCount: goal.continuationCount + 1,
+        continuationCount: selection.reservation.stepIndex,
         lastContinuationAt: now,
         updatedAt: now,
       }
-      await context.storage.set(key, next)
-
-      // Durable per-step receipt: the reserved turn is recorded as `pending`
-      // under the same lock (so session cleanup serializes with it) before any
-      // prompt delivery. A receipt failure is logged and swallowed: receipts
-      // are observability and must never change an admission decision.
       try {
-        await writeStepRecord(
-          context.storage,
-          keyedLocation,
-          newPendingStepRecord({
-            sessionID,
-            stepIndex: next.continuationCount,
-            idempotencyKey: continuationStepIdempotencyKey(sessionID, goal.createdAt, next.continuationCount),
-            now,
-          }),
-        )
+        await context.storage.set(key, nextGoal)
       } catch (error) {
-        console.warn(`opencode-orchestrator step receipt write failed for ${sessionID}`, error)
+        console.warn(`opencode-orchestrator goal reservation write failed for ${sessionID}`, error)
+        await writeLeadBoard(context.storage, keyedLocation, working).catch(() => undefined)
+        await removeStepRecord(context.storage, keyedLocation, sessionID, selection.reservation.stepIndex).catch(() => undefined)
+        return undefined
       }
-      return { goal: next, run }
+      return {
+        kind: "board",
+        goal: nextGoal,
+        run,
+        taskID: selectionTask.taskID,
+        stepIndex: selection.reservation.stepIndex,
+        lifecycleVersion: selectionTask.lifecycleVersion,
+        boardRevision: selection.board.boardRevision,
+        packet: leadTaskPacketText(selectionTask),
+      }
     })
     if (!reserved || controller.signal.aborted) return
 
     // Admission gate, checked after the lock is released: the session prompt
     // must never be queued while holding the lock, but we still re-read the
-    // goal, halt flag, and plan run so a pause, completion, replacement, or
-    // /halt that raced the reservation fails closed. Only the exact records
-    // we reserved may be admitted: identity is compared on the fields the
-    // reservation wrote or that a replacement/update would change, so a goal
-    // or run that was replaced or updated (not just its continuation count)
-    // is never mistaken for the reservation.
+    // goal, halt flag, plan run, and (for board reservations) the board so a
+    // pause, completion, replacement, or /halt that raced the reservation
+    // fails closed. Only the exact records we reserved may be admitted.
     if (await readAutomationStop(context.storage, stopKey)) return
     const current = await readGoal(context.storage, key)
     if (!current || current.status !== "active") return
     if (!isSameReservation(current, reserved.goal)) return
     const currentRun = await readPlanRun(context.storage, runKey)
     if (!isSamePlanRun(currentRun, reserved.run)) return
+    if (reserved.kind === "board" && !(await boardReservationStillCurrent(reserved, keyedLocation, sessionID))) {
+      return
+    }
     if (gate) {
       // Re-check immediately before delivery: budget observations and the
       // review breaker may have changed since the reservation.
       const decision = await gate.allowDispatch(sessionID, "auto")
       if (!decision.allow) {
         console.warn(`opencode-orchestrator continuation stopped by controls before delivery for ${sessionID}: ${decision.reason}`)
+        if (reserved.kind === "board") {
+          await releaseStaleBoardReservation(reserved, keyedLocation, sessionID, "dispatch gate closed before delivery")
+        }
         return
       }
     }
 
-    await context.session.prompt({
-      sessionID,
-      text: buildContinuationPrompt(reserved.goal.objective, reserved.goal.continuationCount, options, reserved.run?.plan),
-      delivery: "queue",
-      // Phase A N1: a plugin-created goal continuation carries the bounded
-      // authority marker only in enforce mode, so the admission hook can
-      // re-consult the dispatch gate at admission time.
-      ...(options.authority.mode === "enforce" ? { metadata: authorityDispatchMetadata("continuation") } : {}),
-    })
+    try {
+      await context.session.prompt({
+        sessionID,
+        text: buildContinuationPrompt(
+          reserved.goal.objective,
+          reserved.goal.continuationCount,
+          options,
+          reserved.run?.plan,
+          reserved.kind === "board" ? reserved.packet : undefined,
+        ),
+        delivery: "queue",
+        // Phase A N1: a plugin-created goal continuation carries the bounded
+        // authority marker only in enforce mode, so the admission hook can
+        // re-consult the dispatch gate at admission time.
+        ...(options.authority.mode === "enforce" ? { metadata: authorityDispatchMetadata("continuation") } : {}),
+      })
+    } catch (error) {
+      // Delivery outcome is unknown: the prompt may or may not have been
+      // queued. Never resubmit blindly; a board reservation becomes ambiguous
+      // while its scope claim is retained.
+      if (reserved.kind === "board") {
+        await markBoardDeliveryUnknown(reserved, keyedLocation, sessionID)
+      }
+      throw error
+    }
 
-    // Delivery confirmed: update the receipt to `dispatched`. The update is
-    // serialized with session cleanup under the session lock, is idempotent,
-    // and is best-effort like the pending write: it can never fail the
-    // continuation or change an admission decision.
+    // Delivery confirmed: update the receipt to `dispatched` and (for a board
+    // reservation) advance the task to `in-progress`. Both writes are
+    // serialized with session cleanup under the session lock and are
+    // best-effort like the pending write: they can never fail the
+    // continuation, and a failed board write is reconciled conservatively on
+    // the next hydration.
     try {
       await withSessionLock(context.location, sessionID, async () => {
-        await markStepDispatched(context.storage, keyedLocation, sessionID, reserved.goal.continuationCount)
+        await markStepDispatched(context.storage, keyedLocation, sessionID, reserved.stepIndex)
+        if (reserved.kind === "board") {
+          const latest = parseLeadBoard(await context.storage.get(leadBoardStorageKey(keyedLocation, sessionID)))
+          const task = latest?.tasks.find((candidate) => candidate.taskID === reserved.taskID)
+          if (!latest || !task || task.status !== "reserved" || task.lifecycleVersion !== reserved.lifecycleVersion) return
+          const delivered = transitionLeadTask({
+            board: latest,
+            taskID: reserved.taskID,
+            expectedVersion: task.lifecycleVersion,
+            actorSessionID: sessionID,
+            action: "deliver",
+          })
+          if (delivered.ok) await writeLeadBoard(context.storage, keyedLocation, delivered.board)
+        }
       })
     } catch (error) {
       console.warn(`opencode-orchestrator step receipt update failed for ${sessionID}`, error)
@@ -268,9 +414,154 @@ export function startGoalContinuation(
     // completed. Tracking is memory-only and independent of the best-effort
     // update above: the completion mark targets the logical step, and a failed
     // dispatched write must not erase it.
-    lastDispatched.set(sessionID, reserved.goal.continuationCount)
+    lastDispatched.set(sessionID, reserved.stepIndex)
+  }
+
+  // Reads the exact linked step receipt for every claim-holding task and
+  // reconciles it conservatively. The step this process just delivered is
+  // skipped so a live turn is never mistaken for a crashed one.
+  async function reconcileHydratedBoard(
+    board: LeadBoard,
+    sessionID: string,
+    keyedLocation: LocationLike,
+  ): Promise<{ board: LeadBoard; changed: boolean }> {
+    const observations = new Map<string, LeadStepObservation>()
+    for (const task of board.tasks) {
+      if ((task.status !== "reserved" && task.status !== "in-progress") || task.stepIndex === undefined) continue
+      observations.set(task.taskID, await observeTaskStep(board, task.taskID, task.attempt, task.stepIndex, sessionID, keyedLocation))
+    }
+    const liveStepIndex = lastDispatched.get(sessionID)
+    const result = reconcileLeadBoard(board, {
+      observations,
+      ...(liveStepIndex !== undefined ? { liveStepIndex } : {}),
+    })
+    return { board: result.board, changed: result.changes.length > 0 }
+  }
+
+  // One conservative observation: a missing/malformed/unreadable receipt and a
+  // mismatched identity all reconcile the same way (never replay, never infer
+  // success). The step receipt is observability, so a read failure is an
+  // observation, not an error.
+  async function observeTaskStep(
+    board: LeadBoard,
+    taskID: string,
+    attempt: number,
+    stepIndex: number,
+    sessionID: string,
+    keyedLocation: LocationLike,
+  ): Promise<LeadStepObservation> {
+    try {
+      const value = await context.storage.get(stepStorageKey(keyedLocation, sessionID, stepIndex))
+      if (value === undefined) return { state: "missing" }
+      const record = parseStepRecord(value)
+      if (!record || record.sessionID !== sessionID || record.stepIndex !== stepIndex) return { state: "malformed" }
+      if (record.idempotencyKey !== leadTaskStepIdempotencyKey(board.boardID, taskID, attempt)) return { state: "malformed" }
+      return {
+        state: record.status,
+        stepIndex: record.stepIndex,
+        idempotencyKey: record.idempotencyKey,
+      }
+    } catch {
+      return { state: "unreadable" }
+    }
+  }
+
+  // Pre-delivery re-read: only the exact reserved board revision + task
+  // lifecycle version + step index may be delivered. Anything else is stale
+  // and is released/hold instead of delivered.
+  async function boardReservationStillCurrent(
+    reserved: BoardReservation,
+    keyedLocation: LocationLike,
+    sessionID: string,
+  ): Promise<boolean> {
+    const latest = parseLeadBoard(await context.storage.get(leadBoardStorageKey(keyedLocation, sessionID)))
+    if (!latest || latest.status !== "active") return false
+    const task = latest.tasks.find((candidate) => candidate.taskID === reserved.taskID)
+    if (
+      !task ||
+      task.status !== "reserved" ||
+      task.lifecycleVersion !== reserved.lifecycleVersion ||
+      task.stepIndex !== reserved.stepIndex ||
+      latest.boardRevision !== reserved.boardRevision
+    ) {
+      await releaseStaleBoardReservation(reserved, keyedLocation, sessionID, "stale pre-delivery board state")
+      return false
+    }
+    return true
+  }
+
+  async function releaseStaleBoardReservation(
+    reserved: BoardReservation,
+    keyedLocation: LocationLike,
+    sessionID: string,
+    reason: string,
+  ): Promise<void> {
+    try {
+      await withSessionLock(context.location, sessionID, async () => {
+        const latest = parseLeadBoard(await context.storage.get(leadBoardStorageKey(keyedLocation, sessionID)))
+        if (!latest) return
+        const released = releaseLeadReservation({
+          board: latest,
+          taskID: reserved.taskID,
+          expectedLifecycleVersion: reserved.lifecycleVersion,
+          expectedBoardRevision: reserved.boardRevision,
+          reason,
+        })
+        if (!released.ok) return
+        await writeLeadBoard(context.storage, keyedLocation, released.board)
+        // The reservation never delivered, so its pending receipt is an
+        // orphan: remove it best-effort. A failure leaves a bounded receipt
+        // that no task links to (it is never read for resume).
+        await removeStepRecord(context.storage, keyedLocation, sessionID, reserved.stepIndex).catch(() => undefined)
+      })
+    } catch (error) {
+      console.warn(`opencode-orchestrator lead board reservation release failed for ${sessionID}`, error)
+    }
+  }
+
+  // Delivery outcome unknown: retain the claim and mark the task ambiguous.
+  // Never resubmit; recovery is a fresh read plus explicit lead action.
+  async function markBoardDeliveryUnknown(reserved: BoardReservation, keyedLocation: LocationLike, sessionID: string): Promise<void> {
+    try {
+      await withSessionLock(context.location, sessionID, async () => {
+        const latest = parseLeadBoard(await context.storage.get(leadBoardStorageKey(keyedLocation, sessionID)))
+        const task = latest?.tasks.find((candidate) => candidate.taskID === reserved.taskID)
+        if (!latest || !task || task.status !== "reserved" || task.lifecycleVersion !== reserved.lifecycleVersion) return
+        const ambiguous = transitionLeadTask({
+          board: latest,
+          taskID: reserved.taskID,
+          expectedVersion: task.lifecycleVersion,
+          actorSessionID: sessionID,
+          action: "ambiguous",
+          note: "prompt delivery outcome unknown",
+        })
+        if (ambiguous.ok) await writeLeadBoard(context.storage, keyedLocation, ambiguous.board)
+      })
+    } catch (error) {
+      console.warn(`opencode-orchestrator lead board ambiguity write failed for ${sessionID}`, error)
+    }
   }
 }
+
+type BoardReservation = {
+  kind: "board"
+  goal: GoalRecord
+  run: PlanRunRecord | undefined
+  taskID: string
+  stepIndex: number
+  lifecycleVersion: number
+  boardRevision: number
+  packet: string
+}
+
+type LegacyReservation = {
+  kind: "legacy"
+  goal: GoalRecord
+  run: PlanRunRecord | undefined
+  stepIndex: number
+}
+
+type Reservation = BoardReservation | LegacyReservation
 
 // Identity of the exact record the reservation wrote, used at admission time.
 // A replacement (`goal_set`) or update (`goal_update`) changes these fields,

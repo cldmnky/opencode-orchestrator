@@ -1,0 +1,235 @@
+{
+  "artifact": "D4-task-corpus",
+  "name": "Start-Simple Complexity Gate — Synthetic Task Corpus",
+  "version": 1,
+  "status": "design-only",
+  "date": "2026-08-30",
+  "measured": false,
+  "sourceType": "synthetic-design-case",
+  "labelStatement": "Every case label and referenceRecommendation is a design hypothesis, not a measurement. No case has been executed, and no telemetry exists. The corpus exists so the frozen protocol in d4-evaluation-template.json can later produce measured false-positive/false-negative rates.",
+  "labelsOverview": {
+    "trivial": 3,
+    "multi-step": 3,
+    "shared-state": 3,
+    "high-risk": 3,
+    "total": 12
+  },
+  "cases": [
+    {
+      "caseId": "d4-case-001",
+      "label": "trivial",
+      "sourceType": "synthetic-design-case",
+      "request": "Fix a one-line typo in the README install section.",
+      "features": {
+        "independent_subtasks": 0,
+        "dependent_stages": 0,
+        "files_modules": 1,
+        "independent_review": false,
+        "external_side_effects": false,
+        "shared_mutable_state": false,
+        "security_compliance_risk": false,
+        "expected_parallelism_value": "none"
+      },
+      "referenceRecommendation": "direct-execution-candidate",
+      "referenceBasis": "README.md:30 advises skipping the orchestrator for single-file trivial edits; gate table precedence rule 4 (single file, no review obligation, no side effects)."
+    },
+    {
+      "caseId": "d4-case-002",
+      "label": "trivial",
+      "sourceType": "synthetic-design-case",
+      "request": "Rename one local variable inside a single function in src/core/policy.ts and run the typecheck.",
+      "features": {
+        "independent_subtasks": 0,
+        "dependent_stages": 0,
+        "files_modules": 1,
+        "independent_review": false,
+        "external_side_effects": false,
+        "shared_mutable_state": false,
+        "security_compliance_risk": false,
+        "expected_parallelism_value": "none"
+      },
+      "referenceRecommendation": "direct-execution-candidate",
+      "referenceBasis": "Single file, zero subtasks, no side effects; README direct-execution default; D1 scaling heuristic 'simple fact or single-file tasks: direct execution or one worker'."
+    },
+    {
+      "caseId": "d4-case-003",
+      "label": "trivial",
+      "sourceType": "synthetic-design-case",
+      "request": "Correct a stale docstring on one exported function in src/core/config.ts.",
+      "features": {
+        "independent_subtasks": 0,
+        "dependent_stages": 0,
+        "files_modules": 1,
+        "independent_review": false,
+        "external_side_effects": false,
+        "shared_mutable_state": false,
+        "security_compliance_risk": false,
+        "expected_parallelism_value": "none"
+      },
+      "referenceRecommendation": "direct-execution-candidate",
+      "referenceBasis": "One file, local edit, no behavior change, no risk dimensions; gate table trivial label."
+    },
+    {
+      "caseId": "d4-case-004",
+      "label": "multi-step",
+      "sourceType": "synthetic-design-case",
+      "request": "Add a small configurable option end-to-end: schema field in src/core/config.ts, prompt text in src/core/prompts.ts, command wiring in src/opencode-v2/commands/index.ts, one unit test, and a README row.",
+      "features": {
+        "independent_subtasks": 2,
+        "dependent_stages": 4,
+        "files_modules": 5,
+        "independent_review": false,
+        "external_side_effects": false,
+        "shared_mutable_state": false,
+        "security_compliance_risk": false,
+        "expected_parallelism_value": "low"
+      },
+      "referenceRecommendation": "orchestrate-candidate",
+      "referenceBasis": "Dependent stages (schema -> prompts -> commands -> test/docs) and multiple files exceed the trivial rule; gate table precedence rule 3. Command data is split across config.ts and commands/index.ts per repository layout rules, so a single editor must update all of them."
+    },
+    {
+      "caseId": "d4-case-005",
+      "label": "multi-step",
+      "sourceType": "synthetic-design-case",
+      "request": "Extract a shared helper used by three modules into a new module, update all callers, and verify with the existing test suite.",
+      "features": {
+        "independent_subtasks": 1,
+        "dependent_stages": 3,
+        "files_modules": 4,
+        "independent_review": false,
+        "external_side_effects": false,
+        "shared_mutable_state": false,
+        "security_compliance_risk": false,
+        "expected_parallelism_value": "low"
+      },
+      "referenceRecommendation": "orchestrate-candidate",
+      "referenceBasis": "Extract -> update callers -> verify is a sequential dependency chain; gate table precedence rule 3."
+    },
+    {
+      "caseId": "d4-case-006",
+      "label": "multi-step",
+      "sourceType": "synthetic-design-case",
+      "request": "Migrate session-ledger record keys from v1 to v2 format with a read-compatibility shim and a write-path verification step.",
+      "features": {
+        "independent_subtasks": 1,
+        "dependent_stages": 3,
+        "files_modules": 3,
+        "independent_review": false,
+        "external_side_effects": false,
+        "shared_mutable_state": true,
+        "security_compliance_risk": false,
+        "expected_parallelism_value": "none"
+      },
+      "referenceRecommendation": "orchestrate-candidate",
+      "referenceBasis": "Deterministic gate precedence currently predicts orchestrate-serialized: shared_mutable_state is flagged true (storage keys are a single mutable namespace), so precedence rule 2 (orchestrate-serialized) dominates over the multi-step label. The multi-step label and orchestrate-candidate referenceRecommendation are the adjudication hypothesis under evaluation, not the deterministic prediction — when the gate output is compared with the labeled recommendation, this case should score a partial/mismatch rather than a pass. That tension is exactly what evaluation should measure."
+    },
+    {
+      "caseId": "d4-case-007",
+      "label": "shared-state",
+      "sourceType": "synthetic-design-case",
+      "request": "One task containing two changes that both edit src/core/policy.ts: append a new guardrail constant and reword an existing guidance line.",
+      "features": {
+        "independent_subtasks": 2,
+        "dependent_stages": 0,
+        "files_modules": 1,
+        "independent_review": false,
+        "external_side_effects": false,
+        "shared_mutable_state": true,
+        "security_compliance_risk": false,
+        "expected_parallelism_value": "low"
+      },
+      "referenceRecommendation": "orchestrate-serialized",
+      "referenceBasis": "Overlapping writable scope on one file; src/core/policy.ts orchestrationRules requires disjoint write scopes and serialization when ownership overlaps; gate table precedence rule 2."
+    },
+    {
+      "caseId": "d4-case-008",
+      "label": "shared-state",
+      "sourceType": "synthetic-design-case",
+      "request": "A feature change in the goal scheduler while a docs change rewrites the table of supported commands in the same README section — both writers touch overlapping markdown and command-name lists.",
+      "features": {
+        "independent_subtasks": 2,
+        "dependent_stages": 1,
+        "files_modules": 3,
+        "independent_review": false,
+        "external_side_effects": false,
+        "shared_mutable_state": true,
+        "security_compliance_risk": false,
+        "expected_parallelism_value": "low"
+      },
+      "referenceRecommendation": "orchestrate-serialized",
+      "referenceBasis": "Command names live in both src/core/config.ts and src/opencode-v2/commands/index.ts, so the two subtasks contend with each other and with the README table; serialize to keep the lists consistent; gate table precedence rule 2."
+    },
+    {
+      "caseId": "d4-case-009",
+      "label": "shared-state",
+      "sourceType": "synthetic-design-case",
+      "request": "Refactor validation in src/core/config.ts while a second change moves the shared options type into a new module both would import.",
+      "features": {
+        "independent_subtasks": 2,
+        "dependent_stages": 2,
+        "files_modules": 3,
+        "independent_review": false,
+        "external_side_effects": false,
+        "shared_mutable_state": true,
+        "security_compliance_risk": false,
+        "expected_parallelism_value": "low"
+      },
+      "referenceRecommendation": "orchestrate-serialized",
+      "referenceBasis": "Both subtasks mutate the same config module and its import graph; parallel writes would race; gate table precedence rule 2 and WORKTREE_BOUNDARY_GUIDANCE (prompt-level rules do not enforce isolation)."
+    },
+    {
+      "caseId": "d4-case-010",
+      "label": "high-risk",
+      "sourceType": "synthetic-design-case",
+      "request": "Enable GitHub mutations (github.enabled / allow_mutations) or add a new GitHub orchestration tool following the TOOL_AVAILABILITY_GUIDANCE preflight and evidence rules.",
+      "features": {
+        "independent_subtasks": 1,
+        "dependent_stages": 2,
+        "files_modules": 3,
+        "independent_review": true,
+        "external_side_effects": true,
+        "shared_mutable_state": false,
+        "security_compliance_risk": true,
+        "expected_parallelism_value": "none"
+      },
+      "referenceRecommendation": "orchestrate-with-review",
+      "referenceBasis": "Remote side effects and credential-adjacent behavior; src/core/policy.ts TOOL_AVAILABILITY_GUIDANCE and SECRET_HANDLING_GUIDANCE; gate table precedence rule 1 (highest)."
+    },
+    {
+      "caseId": "d4-case-011",
+      "label": "high-risk",
+      "sourceType": "synthetic-design-case",
+      "request": "Change the worktree root whitelist and add a merge-back policy to the worktree tools.",
+      "features": {
+        "independent_subtasks": 1,
+        "dependent_stages": 3,
+        "files_modules": 3,
+        "independent_review": true,
+        "external_side_effects": true,
+        "shared_mutable_state": true,
+        "security_compliance_risk": true,
+        "expected_parallelism_value": "none"
+      },
+      "referenceRecommendation": "orchestrate-with-review",
+      "referenceBasis": "Filesystem-affecting and isolation-affecting change; managed worktrees are safety-critical per MANAGED_WORKTREE_GUIDANCE and the plan's Phase 3 isolation work; gate table precedence rule 1 wins over shared-state."
+    },
+    {
+      "caseId": "d4-case-012",
+      "label": "high-risk",
+      "sourceType": "synthetic-design-case",
+      "request": "Modify SECRET_HANDLING_GUIDANCE text and the redactor patterns in the process runner.",
+      "features": {
+        "independent_subtasks": 1,
+        "dependent_stages": 2,
+        "files_modules": 2,
+        "independent_review": true,
+        "external_side_effects": false,
+        "shared_mutable_state": false,
+        "security_compliance_risk": true,
+        "expected_parallelism_value": "none"
+      },
+      "referenceRecommendation": "orchestrate-with-review",
+      "referenceBasis": "Credential/redaction handling is a security dimension regardless of local blast radius; src/core/policy.ts SECRET_HANDLING_GUIDANCE and src/opencode-v2/process/redact.ts; gate table precedence rule 1."
+    }
+  ]
+}

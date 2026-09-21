@@ -4,12 +4,13 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import { OpenCode } from "@opencode/sdk"
+import { activatePlugin } from "./helpers/activate-plugin.js"
 import { loadBuiltPlugin } from "./helpers/build-plugin.js"
 
 /**
  * Phase A pinned-host probe (measurement only; no N1/N2 enforcement).
  *
- * These contract tests record what the pinned beta-19507 host actually does for
+ * These contract tests record what the pinned 2.0.11 host actually does for
  * the three runtime-authority surfaces the plan's N1/N2 items depend on:
  *
  *   1. `session.hook("prompt")` mutations become the admitted prompt data.
@@ -17,7 +18,7 @@ import { loadBuiltPlugin } from "./helpers/build-plugin.js"
  *   3. `permission.hook("evaluate")` observes `allow`/`ask` and can change them
  *      to `deny`.
  *   4. A configured `deny` rule is final and bypasses the evaluation hook.
- *   5. Parent session `permission.rules` are inherited by a newly created child
+ *   5. Parent session permissions are inherited by a newly created child
  *      session and deny the tested action.
  *   6. Opt-in child-only admission probe (N2 direction): during the
  *      subagent-created child's own `session.hook("prompt")` admission, the
@@ -112,7 +113,7 @@ function authorityMarker(dispatch: "command" | "continuation"): Record<string, u
 }
 
 type AuthorityFaults = {
-  /** When set, the production plugin's child-rule write fails for that session. */
+  /** When set, the production plugin's child permission write fails for that session. */
   failRulesFor: string | undefined
 }
 
@@ -122,7 +123,7 @@ type AuthorityFaults = {
  * objects without per-plugin options (verified: `ctx.options` is always `{}`),
  * so the harness wraps the real `setup` with an options-injected context — the
  * production code path under test is unchanged. The same wrapper can inject a
- * fault into the plugin's `permission.rules` dependency for one armed session.
+ * fault into the plugin's `session.update` dependency for one armed session.
  */
 function wrapAuthorityPlugin(
   built: unknown,
@@ -136,13 +137,13 @@ function wrapAuthorityPlugin(
       return plugin.setup({
         ...ctx,
         options: { ...ctx.options, ...options },
-        permission: {
-          ...ctx.permission,
-          rules: async (input: { sessionID: string; permissions: unknown }) => {
+        session: {
+          ...ctx.session,
+          update: async (input: { sessionID: string; permissions: unknown }) => {
             if (faults.failRulesFor !== undefined && faults.failRulesFor === input.sessionID) {
               throw new Error("phase-a authority fault: child rule installation refused")
             }
-            return ctx.permission.rules(input)
+            return ctx.session.update(input)
           },
         },
       })
@@ -169,7 +170,7 @@ async function withAuthorityHost<T>(
       config: { directory, content: JSON.stringify({ agents: AGENTS }) },
     })
     try {
-      await host.plugin.awaitActivation()
+      await activatePlugin(host, directory)
       await waitFor(async () => {
         const plugins = (await host.plugin.list({ location: { directory } })).data as Array<{
           id: string
@@ -180,6 +181,10 @@ async function withAuthorityHost<T>(
           (plugin) => plugin.id === "opencode-orchestrator" && (plugin.status ?? plugin.state?.status) === "active",
         )
       })
+      probe.promptCalls.length = 0
+      probe.evaluateCalls.length = 0
+      probe.modelRequests.length = 0
+      probe.httpRequests.length = 0
       return await run({ host, directory, probe, faults })
     } finally {
       await host.close()
@@ -279,7 +284,7 @@ function createProbe() {
         }
 
         const rules = [{ action: CHILD_RULE_ACTION, resource: "*", effect: "deny" as const }]
-        await ctx.permission.rules({ sessionID: event.sessionID, permissions: rules })
+        await ctx.session.update({ sessionID: event.sessionID, permissions: rules })
         childAdmission.state.installedRules = [...rules]
         childAdmission.state.sequence.push("installer:done")
       })
@@ -356,7 +361,7 @@ async function withIsolatedHost<T>(
       config: { directory, content: JSON.stringify({ agents: AGENTS }) },
     })
     try {
-      await host.plugin.awaitActivation()
+      await activatePlugin(host, directory)
       await waitFor(async () => {
         const plugins = (await host.plugin.list({ location: { directory } })).data as Array<{
           id: string
@@ -367,6 +372,10 @@ async function withIsolatedHost<T>(
           (plugin) => plugin.id === "opencode-orchestrator" && (plugin.status ?? plugin.state?.status) === "active",
         )
       })
+      probe.promptCalls.length = 0
+      probe.evaluateCalls.length = 0
+      probe.modelRequests.length = 0
+      probe.httpRequests.length = 0
       return await run({ host, directory, probe })
     } finally {
       await host.close()
@@ -509,7 +518,7 @@ describe("phase A pinned-host hook contract", () => {
     await withIsolatedHost(async ({ host, directory, probe }) => {
       const sessionID = await createSession(host, directory, "phase-a permission")
 
-      await host.permission.rules({
+      await host.session.update({
         sessionID,
         permissions: [{ action: "phase-a.probe.ask", resource: "*", effect: "ask" }],
       })
@@ -536,7 +545,7 @@ describe("phase A pinned-host hook contract", () => {
     await withIsolatedHost(async ({ host, directory, probe }) => {
       const sessionID = await createSession(host, directory, "phase-a configured deny")
 
-      await host.permission.rules({
+      await host.session.update({
         sessionID,
         permissions: [
           { action: "phase-a.probe.ask", resource: "*", effect: "ask" },
@@ -610,7 +619,7 @@ describe("phase A pinned-host hook contract", () => {
         { action: "phase-a.probe.ask", resource: "*", effect: "ask" },
         { action: "phase-a.child.blocked", resource: "*", effect: "deny" },
       ]
-      await host.permission.rules({ sessionID: parentID, permissions: rules })
+      await host.session.update({ sessionID: parentID, permissions: rules })
 
       // A child created after the rule is set inherits the rule snapshot and
       // the inherited deny is final for the child session.
@@ -685,7 +694,7 @@ describe("phase A pinned-host hook contract", () => {
 
       // The child message admission runs the installer inside the child's prompt
       // hook; the hook is awaited, so admission cannot complete before
-      // `permission.rules` has finished.
+      // `session.update` has finished.
       const admitted = await host.session.prompt({
         sessionID: childID,
         text: "phase-a child admission",
@@ -924,7 +933,7 @@ describe("phase A production runtime authority (authority.mode enforce)", () => 
       // Configured deny is final: it bypasses the whole evaluation hook chain,
       // including the production hook, while the same session's ask action
       // still reaches the chain.
-      await host.permission.rules({
+      await host.session.update({
         sessionID,
         permissions: [
           { action: ENFORCED_ACTION, resource: "*", effect: "deny" },
@@ -948,7 +957,7 @@ describe("phase A production runtime authority (authority.mode enforce)", () => 
     await withAuthorityHost(ALLOWING_OPTIONS, async ({ host, directory, probe }) => {
       const parentID = await createSession(host, directory, "phase-a containment parent")
       const inherited = [{ action: "phase-a.keep", resource: "*", effect: "allow" as const }]
-      await host.permission.rules({ sessionID: parentID, permissions: inherited })
+      await host.session.update({ sessionID: parentID, permissions: inherited })
 
       const childID = await createChildViaSubagent(host, probe, parentID, "msg_phase_a_role_child", ROLE_CHILD_AGENT)
       const childBefore = await host.session.get({ sessionID: childID })
@@ -1051,7 +1060,7 @@ describe("phase A production runtime authority (authority.mode enforce)", () => 
     await withAuthorityHost(ALLOWING_OPTIONS, async ({ host, directory, probe, faults }) => {
       const parentID = await createSession(host, directory, "phase-a containment failure parent")
       const inherited = [{ action: "phase-a.keep", resource: "*", effect: "allow" as const }]
-      await host.permission.rules({ sessionID: parentID, permissions: inherited })
+      await host.session.update({ sessionID: parentID, permissions: inherited })
       const childID = await createChildViaSubagent(host, probe, parentID, "msg_phase_a_containment_failure", ROLE_CHILD_AGENT)
 
       // Fault injection: only this child's rule write inside the production

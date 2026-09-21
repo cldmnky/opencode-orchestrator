@@ -297,7 +297,7 @@ function tuiCommand(context: Context, name: string, description: string): Keymap
         }
         await context.client.session.command({
           sessionID,
-          command: name,
+          name,
           text: input?.trim() ?? "",
           delivery: "steer",
         })
@@ -514,7 +514,7 @@ function addModelChoice(
 }
 
 async function dispatchModelCommand(context: Context, sessionID: string, text: string): Promise<void> {
-  await context.client.session.command({ sessionID, command: "worker-models", text, delivery: "steer" })
+  await context.client.session.command({ sessionID, name: "worker-models", text, delivery: "steer" })
 }
 
 /**

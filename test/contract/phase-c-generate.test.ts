@@ -4,10 +4,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import { OpenCode } from "@opencode/sdk"
+import { activatePlugin } from "./helpers/activate-plugin.js"
+import { createMockOpenAI, openAIError, openAIText, type MockOpenAI } from "./helpers/mock-openai.js"
 
 /**
  * Phase C pinned-host contract probe for the sessionless `ctx.generate.text`
- * surface (pinned `@opencode/plugin`/`@opencode/sdk` `0.0.0-beta-19507`).
+ * surface (pinned `@opencode/plugin`/`@opencode/sdk` `2.0.11`).
  *
  * Measurement only: no production wiring, no configuration, no trace fields,
  * no tools, and no runtime behavior change. The probe boots an embedded host
@@ -20,9 +22,8 @@ import { OpenCode } from "@opencode/sdk"
  *   - the declared contract is sessionless: no session, inbox item, history,
  *     or tool call exists or changes, and the session-scoped `generate`,
  *     `model.request`, and `http.request` hooks never fire,
- *   - a deterministic in-process provider can be injected for the probe
- *     provider through `ctx.aisdk.hook("sdk")`/`("language")`, so the returned
- *     text is exactly the injected fixture output,
+ *   - a deterministic local OpenAI-compatible endpoint returns the fixture
+ *     text without contacting an external provider,
  *   - `Generate.ModelSelectionError` (unknown model) and
  *     `Generate.UnavailableError` (provider failure) are catchable and leave no
  *     session-side effects,
@@ -33,30 +34,18 @@ import { OpenCode } from "@opencode/sdk"
  *     can be restored on cleanup (never passed to the host, logged, or
  *     persisted).
  *
- * Harness facts measured here, not assumed:
- *   - The host's built-in generic provider plugin (`opencode.provider.dynamic`)
- *     owns the first `ctx.aisdk.hook("sdk")` registration; it loads
- *     `evt.package` from npm before a probe hook can supply an SDK. The probe
- *     therefore pins an installed, unmapped aisdk package
- *     (`aisdk:@ai-sdk/openai-compatible` with no `baseURL`) so the built-in
- *     loader resolves the pinned `@ai-sdk/openai-compatible` dependency locally
- *     and the probe's `language` hook supplies the returned model. A made-up
- *     package name fails at the built-in npm load before any probe hook runs
- *     (directly observed; recorded in the decision record).
- *   - Hook ordering places built-in hooks before directly-passed plugin hooks,
- *     so the probe's `sdk` hook overwrites the dynamically loaded SDK rather
- *     than preventing the load.
+ * Harness fact measured here, not assumed: released 2.0.11 resolves the
+ *   configured OpenAI-compatible model through its native provider route, so
+ *   this contract uses a loopback HTTP endpoint instead of the beta-era
+ *   in-process AISDK hook replacement.
  */
 
 const PROBE_PROVIDER = "phase-c-probe"
 const PROBE_MODEL = "deterministic"
 /**
- * An installed aisdk package that the pin's native mapping leaves unmapped when
- * no `baseURL` is configured (`mapPackage("@ai-sdk/openai-compatible")` returns
- * `undefined` without a base URL), which is what routes resolution through
- * `ctx.aisdk` hooks instead of a bundled native provider route.
+ * The native provider package used by the released host.
  */
-const PROBE_PACKAGE = "aisdk:@ai-sdk/openai-compatible"
+const PROBE_PACKAGE = "@ai-sdk/openai-compatible"
 const FIXTURE_PROMPT = "[phase-c-probe] deterministic fixture prompt"
 const FIXTURE_TEXT = "[phase-c-probe] deterministic fixture output"
 const PROVIDER_FAILURE = "[phase-c-probe] injected provider failure"
@@ -72,58 +61,15 @@ type Host = Awaited<ReturnType<typeof OpenCode.create>>
 type Probe = {
   plugin: ReturnType<typeof Plugin.define>
   generate: GenerateApi | undefined
-  /** `ctx.aisdk.hook("sdk")` calls, as `providerID:package`. */
-  sdkHooks: string[]
-  /** `ctx.aisdk.hook("language")` calls, as `providerID:modelID`. */
-  languageHooks: string[]
-  /** Raw `doStream` call options handed to the injected language model. */
-  languageCalls: Array<Record<string, unknown>>
   /** Session-scoped hooks that would fire if generation used a session. */
   sessionGenerateHooks: string[]
   modelRequestHooks: string[]
   httpRequestHooks: string[]
   /** Tool dispatches observed through `tool.hook("execute.before"/"after")`. */
   toolHooks: string[]
-  /** When true the injected language model rejects instead of streaming text. */
-  failNextCall: boolean
   setupCount: number
   started: Promise<void>
   stop: () => void
-}
-
-/** Minimal AI SDK v3 language model that streams one deterministic text part. */
-function deterministicLanguageModel(probe: Probe, text: string) {
-  return {
-    specificationVersion: "v3" as const,
-    provider: PROBE_PROVIDER,
-    modelId: PROBE_MODEL,
-    supportedUrls: {},
-    async doStream(options: Record<string, unknown>) {
-      probe.languageCalls.push(options)
-      if (probe.failNextCall) throw new Error(PROVIDER_FAILURE)
-      const parts = [
-        { type: "stream-start", warnings: [] },
-        { type: "text-start", id: "phase-c-text" },
-        { type: "text-delta", id: "phase-c-text", delta: text },
-        { type: "text-end", id: "phase-c-text" },
-        {
-          type: "finish",
-          finishReason: { unified: "stop", raw: "stop" },
-          usage: { inputTokens: {}, outputTokens: {} },
-        },
-      ]
-      const stream = new ReadableStream({
-        start(controller) {
-          for (const part of parts) controller.enqueue(part)
-          controller.close()
-        },
-      })
-      return { stream }
-    },
-    async doGenerate(): Promise<never> {
-      throw new Error("[phase-c-probe] doGenerate is not part of this probe")
-    },
-  }
 }
 
 function createProbe(): Probe {
@@ -135,14 +81,10 @@ function createProbe(): Probe {
   const probe: Probe = {
     plugin: undefined as never,
     generate: undefined,
-    sdkHooks: [],
-    languageHooks: [],
-    languageCalls: [],
     sessionGenerateHooks: [],
     modelRequestHooks: [],
     httpRequestHooks: [],
     toolHooks: [],
-    failNextCall: false,
     setupCount: 0,
     started,
     stop: () => controller.abort(),
@@ -153,25 +95,6 @@ function createProbe(): Probe {
     async setup(ctx) {
       probe.setupCount += 1
       probe.generate = ctx.generate as unknown as GenerateApi
-
-      // The provider scope keeps the injected model on the probe provider only.
-      const scope = { providerID: PROBE_PROVIDER }
-      await ctx.aisdk.hook(
-        "sdk",
-        (event) => {
-          probe.sdkHooks.push(`${event.model.providerID}:${event.package}`)
-          event.sdk = { languageModel: () => deterministicLanguageModel(probe, FIXTURE_TEXT) }
-        },
-        scope,
-      )
-      await ctx.aisdk.hook(
-        "language",
-        (event) => {
-          probe.languageHooks.push(`${event.model.providerID}:${event.model.id}`)
-          event.language = deterministicLanguageModel(probe, FIXTURE_TEXT)
-        },
-        scope,
-      )
 
       // Session-scoped recorders: a session-backed generation path would fire
       // these; the sessionless surface must not.
@@ -241,11 +164,12 @@ function installNetworkGuard(): NetworkGuard {
   return guard
 }
 
-function probeConfig(): string {
+function probeConfig(baseURL: string): string {
   return JSON.stringify({
     providers: {
       [PROBE_PROVIDER]: {
         name: "Phase C Probe",
+        settings: { baseURL },
         models: {
           [PROBE_MODEL]: { name: "Phase C Deterministic Probe", package: PROBE_PACKAGE },
         },
@@ -268,12 +192,27 @@ type WithProbeHostOptions = {
 }
 
 async function withProbeHost(
-  run: (input: { host: Host; probe: Probe; guard: NetworkGuard; directory: string }) => Promise<void>,
+  run: (input: {
+    host: Host
+    probe: Probe
+    guard: NetworkGuard
+    directory: string
+    mock: MockOpenAI
+    failNextCall: () => void
+  }) => Promise<void>,
   options: WithProbeHostOptions = {},
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "orchestrator-phase-c-"))
   const directory = join(root, "project")
   const probe = createProbe()
+  let failNextCall = false
+  const mock = createMockOpenAI(({ body }) => {
+    if (failNextCall) {
+      failNextCall = false
+      return openAIError(500, PROVIDER_FAILURE)
+    }
+    return openAIText(FIXTURE_TEXT, body.model)
+  })
   const guard = installNetworkGuard()
   // No live credential may be reachable by the probe host. The ambient value is
   // captured only so it can be restored on cleanup; it is never passed to the
@@ -291,20 +230,21 @@ async function withProbeHost(
         // populates the catalog.
         models: { fetch: false },
         database: { path: join(hostRoot, "database.sqlite") },
-        config: { directory: hostDirectory, content: probeConfig() },
+        config: { directory: hostDirectory, content: probeConfig(mock.baseURL) },
       }))
   let host: Host | undefined
   try {
     host = await createHost({ root, directory })
-    await host.plugin.awaitActivation()
+    await activatePlugin(host, directory)
     await probe.started
-    await run({ host, probe, guard, directory })
+    await run({ host, probe, guard, directory, mock, failNextCall: () => (failNextCall = true) })
   } finally {
     probe.stop()
     try {
       if (host) await host.close()
     } finally {
       guard.restore()
+      mock.close()
       if (credential === undefined) delete process.env.OPENCODE_API_KEY
       else process.env.OPENCODE_API_KEY = credential
       rmSync(root, { recursive: true, force: true })
@@ -331,11 +271,6 @@ function expectNoExternalTraffic(guard: NetworkGuard): void {
   expect(guard.externalAttempts).toEqual([])
 }
 
-/** Assert no fetch happened while the tagged phase was active. */
-function expectNoFetchInPhase(guard: NetworkGuard, phase: string): void {
-  expect(guard.calls.filter((call) => call.phase === phase)).toEqual([])
-}
-
 /** Session-scoped recorders that would fire on any session-backed generation. */
 function expectNoSessionSideEffects(probe: Probe): void {
   expect(probe.sessionGenerateHooks).toEqual([])
@@ -344,9 +279,9 @@ function expectNoSessionSideEffects(probe: Probe): void {
   expect(probe.toolHooks).toEqual([])
 }
 
-describe("phase C sessionless generate contract (pinned beta-19507)", () => {
-  test("returns the exact text envelope from an injected deterministic provider", async () => {
-    await withProbeHost(async ({ probe, guard }) => {
+describe("phase C sessionless generate contract (pinned 2.0.11)", () => {
+  test("returns the exact text envelope from a deterministic local provider", async () => {
+    await withProbeHost(async ({ probe, guard, mock }) => {
       const generate = probe.generate as GenerateApi
       expect(probe.setupCount).toBeGreaterThanOrEqual(1)
 
@@ -357,26 +292,22 @@ describe("phase C sessionless generate contract (pinned beta-19507)", () => {
       expect(Object.keys(result)).toEqual(["text"])
       expect(result.text).toBe(FIXTURE_TEXT)
 
-      // The probe provider was intercepted through the pinned aisdk seam, and
-      // the injected language model saw exactly one call.
-      expect(probe.sdkHooks).toEqual([`${PROBE_PROVIDER}:@ai-sdk/openai-compatible`])
-      expect(probe.languageHooks).toEqual([`${PROBE_PROVIDER}:${PROBE_MODEL}`])
-      expect(probe.languageCalls).toHaveLength(1)
+      expect(mock.requests).toHaveLength(1)
 
       // Accepted input shape: the fixture prompt is a single user text message
       // with no system parts, no history, and no tools.
-      const call = probe.languageCalls[0] as { prompt?: unknown; tools?: unknown }
-      expect(call.prompt).toEqual([{ role: "user", content: [{ type: "text", text: FIXTURE_PROMPT }] }])
-      expect(call.tools).toEqual([])
+      const call = mock.requests[0] as { messages?: unknown[]; tools?: unknown[] }
+      expect(call.messages).toEqual([{ role: "user", content: FIXTURE_PROMPT }])
+      expect(call.tools).toBeUndefined()
 
-      expectNoFetchInPhase(guard, "generate")
+      expect(mock.requests).toHaveLength(1)
       expectNoExternalTraffic(guard)
       expectNoSessionSideEffects(probe)
     })
   }, TEST_TIMEOUT)
 
   test("creates no session, inbox item, or session history", async () => {
-    await withProbeHost(async ({ host, probe, guard, directory }) => {
+    await withProbeHost(async ({ host, probe, guard, directory, mock }) => {
       const generate = probe.generate as GenerateApi
 
       // A pre-existing session (and its history) must be untouched by a
@@ -401,7 +332,7 @@ describe("phase C sessionless generate contract (pinned beta-19507)", () => {
       expect(inboxAfter).toEqual(inboxBefore)
 
       expectNoSessionSideEffects(probe)
-      expectNoFetchInPhase(guard, "generate")
+      expect(mock.requests).toHaveLength(1)
       expectNoExternalTraffic(guard)
     })
   }, TEST_TIMEOUT)
@@ -423,18 +354,17 @@ describe("phase C sessionless generate contract (pinned beta-19507)", () => {
       // provider call (the suite asserts an empty injected-call record).
       const sessions = await host.session.list({ location: { directory } })
       expect(sessions.data).toEqual([])
-      expect(probe.languageCalls).toEqual([])
+      expect(guard.calls.filter((entry) => entry.phase === "generate")).toEqual([])
       expectNoSessionSideEffects(probe)
-      expectNoFetchInPhase(guard, "generate")
       expectNoExternalTraffic(guard)
     })
   }, TEST_TIMEOUT)
 
   test("returns a catchable provider failure without session-side effects", async () => {
-    await withProbeHost(async ({ host, probe, guard, directory }) => {
+    await withProbeHost(async ({ host, probe, guard, directory, mock, failNextCall }) => {
       const generate = probe.generate as GenerateApi
       guard.phase = "generate"
-      probe.failNextCall = true
+      failNextCall()
 
       const error = await captureFailure(generate.text({ prompt: FIXTURE_PROMPT, model: probeModel() }))
 
@@ -445,9 +375,8 @@ describe("phase C sessionless generate contract (pinned beta-19507)", () => {
       // The rejected call is catchable and leaves no session-side effects.
       const sessions = await host.session.list({ location: { directory } })
       expect(sessions.data).toEqual([])
-      expect(probe.languageCalls).toHaveLength(1)
+      expect(mock.requests).toHaveLength(1)
       expectNoSessionSideEffects(probe)
-      expectNoFetchInPhase(guard, "generate")
       expectNoExternalTraffic(guard)
     })
   }, TEST_TIMEOUT)
@@ -468,12 +397,12 @@ describe("phase C sessionless generate contract (pinned beta-19507)", () => {
       standalone.restore()
     }
 
-    await withProbeHost(async ({ probe, guard }) => {
+    await withProbeHost(async ({ probe, guard, mock }) => {
       const generate = probe.generate as GenerateApi
       guard.phase = "generate"
       const result = await generate.text({ prompt: FIXTURE_PROMPT, model: probeModel() })
       expect(result.text).toBe(FIXTURE_TEXT)
-      expectNoFetchInPhase(guard, "generate")
+      expect(mock.requests).toHaveLength(1)
       // The host's own startup may probe loopback provider ports, but no
       // non-loopback request may be attempted anywhere in the probe lifetime.
       expect(guard.calls.every((call) => isLoopback(call.url))).toBe(true)

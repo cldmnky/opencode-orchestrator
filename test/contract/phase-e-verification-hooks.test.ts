@@ -4,18 +4,21 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { Plugin } from "@opencode/plugin"
 import { OpenCode } from "@opencode/sdk"
+import { activatePlugin } from "./helpers/activate-plugin.js"
+import { createMockOpenAI, openAIToolCall, openAIText, type MockOpenAI } from "./helpers/mock-openai.js"
 
 /**
  * Phase E pinned-host probe for native shell-tool execution hooks.
  *
  * This is deliberately measurement-only. It records bounded event shapes in
  * memory and does not wire receipts or change the production plugin. The
- * deterministic provider emits one native shell call, then a final response.
+ * deterministic loopback provider emits one native shell call, then a final
+ * response.
  */
 
 const PROBE_PROVIDER = "phase-e-probe"
 const PROBE_MODEL = "deterministic"
-const PROBE_PACKAGE = "aisdk:@ai-sdk/openai-compatible"
+const PROBE_PACKAGE = "@ai-sdk/openai-compatible"
 const COMMAND = "printf '[phase-e-probe] ok'"
 const TEST_TIMEOUT = 20_000
 
@@ -40,57 +43,16 @@ type Probe = {
   plugin: ReturnType<typeof Plugin.define>
   hooks: HookSnapshot[]
   modelCalls: Array<{ toolNames: string[]; input: unknown }>
+  command: string
+  toolCallSent: boolean
 }
 
 function createProbe(command = COMMAND, blockBefore = false): Probe {
-  const probe: Probe = { plugin: undefined as never, hooks: [], modelCalls: [] }
-  let toolCallSent = false
-
-  const languageModel = {
-    specificationVersion: "v3" as const,
-    provider: PROBE_PROVIDER,
-    modelId: PROBE_MODEL,
-    supportedUrls: {},
-    async doStream(options: Record<string, unknown>) {
-      const tools = Array.isArray(options.tools) ? options.tools : []
-      const toolNames = tools
-        .map((tool) => (tool && typeof tool === "object" && typeof (tool as { name?: unknown }).name === "string" ? (tool as { name: string }).name : ""))
-        .filter((name) => name.length > 0)
-      if (!toolCallSent) {
-        const toolName = toolNames.find((name) => name === "bash" || name === "shell")
-        if (!toolName) throw new Error(`phase-e-probe did not receive a native shell tool; tools=${toolNames.join(",")}`)
-        const input = JSON.stringify({ command })
-        probe.modelCalls.push({ toolNames, input: JSON.parse(input) })
-        toolCallSent = true
-        return stream([
-          { type: "stream-start", warnings: [] },
-          { type: "tool-call", toolCallId: "phase-e-tool-call", toolName, input },
-          { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: { inputTokens: {}, outputTokens: {} } },
-        ])
-      }
-      probe.modelCalls.push({ toolNames, input: undefined })
-      return stream([
-        { type: "stream-start", warnings: [] },
-        { type: "text-start", id: "phase-e-text" },
-        { type: "text-delta", id: "phase-e-text", delta: "[phase-e-probe] done" },
-        { type: "text-end", id: "phase-e-text" },
-        { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: { inputTokens: {}, outputTokens: {} } },
-      ])
-    },
-    async doGenerate(): Promise<never> {
-      throw new Error("phase-e probe only exercises streaming")
-    },
-  }
+  const probe: Probe = { plugin: undefined as never, hooks: [], modelCalls: [], command, toolCallSent: false }
 
   probe.plugin = Plugin.define({
     id: "phase-e-verification-probe",
     async setup(ctx) {
-      await ctx.aisdk.hook("sdk", (event) => {
-        event.sdk = { languageModel: () => languageModel }
-      }, { providerID: PROBE_PROVIDER })
-      await ctx.aisdk.hook("language", (event) => {
-        event.language = languageModel
-      }, { providerID: PROBE_PROVIDER })
       await ctx.tool.hook("execute.before", (event) => {
         probe.hooks.push(snapshot("before", event))
         if (blockBefore) throw new Error("phase-e before refusal")
@@ -103,15 +65,22 @@ function createProbe(command = COMMAND, blockBefore = false): Probe {
   return probe
 }
 
-function stream(parts: readonly Record<string, unknown>[]): { stream: ReadableStream<any> } {
-  return {
-    stream: new ReadableStream({
-      start(controller) {
-        for (const part of parts) controller.enqueue(part)
-        controller.close()
-      },
-    }),
+function respond(probe: Probe, body: { model?: string; tools?: unknown[] }): Response {
+  const tools = Array.isArray(body.tools) ? body.tools : []
+  const toolNames = tools
+    .map((tool) => (tool && typeof tool === "object" && typeof (tool as { function?: { name?: unknown } }).function?.name === "string"
+      ? (tool as { function: { name: string } }).function.name
+      : ""))
+    .filter((name) => name.length > 0)
+  const toolName = toolNames.find((name) => name === "bash" || name === "shell")
+  if (!toolName) return openAIText("title", body.model)
+  if (!probe.toolCallSent) {
+    probe.toolCallSent = true
+    probe.modelCalls.push({ toolNames, input: { command: probe.command } })
+    return openAIToolCall(toolName, { command: probe.command }, { model: body.model })
   }
+  probe.modelCalls.push({ toolNames, input: undefined })
+  return openAIText("[phase-e-probe] done", body.model)
 }
 
 function snapshot(phase: "before" | "after", event: Record<string, unknown>): HookSnapshot {
@@ -145,11 +114,12 @@ function resultFields(value: unknown): Pick<HookSnapshot, "resultExit" | "result
   }
 }
 
-function config(directory: string): string {
+function config(directory: string, baseURL: string): string {
   return JSON.stringify({
     providers: {
       [PROBE_PROVIDER]: {
         name: "Phase E Probe",
+        settings: { baseURL },
         models: { [PROBE_MODEL]: { name: "Phase E Deterministic Probe", package: PROBE_PACKAGE } },
       },
     },
@@ -164,11 +134,12 @@ function config(directory: string): string {
   })
 }
 
-describe("phase E native verification hook contract (pinned beta-19507)", () => {
+describe("phase E native verification hook contract (pinned 2.0.11)", () => {
   test("pairs a native shell call with stable identity and explicit result status", async () => {
     const root = mkdtempSync(join(tmpdir(), "orchestrator-phase-e-"))
     const directory = join(root, "project")
     const probe = createProbe()
+    const mock = createMockOpenAI(({ body }) => respond(probe, body))
     let host: Awaited<ReturnType<typeof OpenCode.create>> | undefined
     const ambientCredential = process.env.OPENCODE_API_KEY
     delete process.env.OPENCODE_API_KEY
@@ -178,9 +149,9 @@ describe("phase E native verification hook contract (pinned beta-19507)", () => 
         fs: { filewatcher: false },
         models: { fetch: false },
         database: { path: join(root, "database.sqlite") },
-        config: { directory, content: config(directory) },
+        config: { directory, content: config(directory, mock.baseURL) },
       })
-      await host.plugin.awaitActivation()
+      await activatePlugin(host, directory)
       const session = await host.session.create({ location: { directory }, agent: "orchestrator" })
       await host.session.switchModel({ sessionID: session.id, model: { providerID: PROBE_PROVIDER, id: PROBE_MODEL } })
       await host.session.prompt({ sessionID: session.id, text: "Run the verification command." })
@@ -211,6 +182,7 @@ describe("phase E native verification hook contract (pinned beta-19507)", () => 
       expect(after[0]?.resultStatus).toBe("completed")
     } finally {
       if (host) await host.close()
+      mock.close()
       if (ambientCredential === undefined) delete process.env.OPENCODE_API_KEY
       else process.env.OPENCODE_API_KEY = ambientCredential
       rmSync(root, { recursive: true, force: true })
@@ -221,6 +193,7 @@ describe("phase E native verification hook contract (pinned beta-19507)", () => 
     const root = mkdtempSync(join(tmpdir(), "orchestrator-phase-e-failure-"))
     const directory = join(root, "project")
     const probe = createProbe("exit 7")
+    const mock = createMockOpenAI(({ body }) => respond(probe, body))
     let host: Awaited<ReturnType<typeof OpenCode.create>> | undefined
     try {
       host = await OpenCode.create({
@@ -228,9 +201,9 @@ describe("phase E native verification hook contract (pinned beta-19507)", () => 
         fs: { filewatcher: false },
         models: { fetch: false },
         database: { path: join(root, "database.sqlite") },
-        config: { directory, content: config(directory) },
+        config: { directory, content: config(directory, mock.baseURL) },
       })
-      await host.plugin.awaitActivation()
+      await activatePlugin(host, directory)
       const session = await host.session.create({ location: { directory }, agent: "orchestrator" })
       await host.session.switchModel({ sessionID: session.id, model: { providerID: PROBE_PROVIDER, id: PROBE_MODEL } })
       await host.session.prompt({ sessionID: session.id, text: "Run the failing verification command." })
@@ -246,6 +219,7 @@ describe("phase E native verification hook contract (pinned beta-19507)", () => 
       expect(after?.resultStatus).toBe("completed")
     } finally {
       if (host) await host.close()
+      mock.close()
       rmSync(root, { recursive: true, force: true })
     }
   }, TEST_TIMEOUT)
@@ -254,6 +228,7 @@ describe("phase E native verification hook contract (pinned beta-19507)", () => 
     const root = mkdtempSync(join(tmpdir(), "orchestrator-phase-e-before-"))
     const directory = join(root, "project")
     const probe = createProbe(COMMAND, true)
+    const mock = createMockOpenAI(({ body }) => respond(probe, body))
     let host: Awaited<ReturnType<typeof OpenCode.create>> | undefined
     try {
       host = await OpenCode.create({
@@ -261,9 +236,9 @@ describe("phase E native verification hook contract (pinned beta-19507)", () => 
         fs: { filewatcher: false },
         models: { fetch: false },
         database: { path: join(root, "database.sqlite") },
-        config: { directory, content: config(directory) },
+        config: { directory, content: config(directory, mock.baseURL) },
       })
-      await host.plugin.awaitActivation()
+      await activatePlugin(host, directory)
       const session = await host.session.create({ location: { directory }, agent: "orchestrator" })
       await host.session.switchModel({ sessionID: session.id, model: { providerID: PROBE_PROVIDER, id: PROBE_MODEL } })
       await host.session.prompt({ sessionID: session.id, text: "Run the blocked verification command." })
@@ -273,6 +248,7 @@ describe("phase E native verification hook contract (pinned beta-19507)", () => 
       expect(probe.hooks.filter((event) => event.phase === "after")).toHaveLength(0)
     } finally {
       if (host) await host.close()
+      mock.close()
       rmSync(root, { recursive: true, force: true })
     }
   }, TEST_TIMEOUT)

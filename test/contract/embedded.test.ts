@@ -15,7 +15,7 @@ describe("embedded V2 host", () => {
       await assertPluginActive(host, directory)
 
       const session = await host.session.create({ location: { directory } })
-      await host.session.command({ sessionID: session.id, command: "goal", text: "ship the change", delivery: "queue" })
+      await host.session.command({ sessionID: session.id, name: "goal", text: "ship the change", delivery: "queue" })
       await waitFor(async () => {
         const messages = await host.message.list({ sessionID: session.id })
         return messages.data.some(

@@ -5,12 +5,13 @@ import { tmpdir } from "node:os"
 import { join, sep } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import { OpenCode } from "@opencode/sdk"
+import { activatePlugin } from "./helpers/activate-plugin.js"
 
 /**
  * Phase B pinned-host contract probe for the native `ctx.worktree` domain.
  *
  * Measurement only: no adapter, no strategy registration, no production
- * behavior change. Every probe runs in an embedded beta-19507 host against a
+ * behavior change. Every probe runs in an embedded 2.0.11 host against a
  * throwaway Git repository under the OS temp directory, and every native call
  * is routed to that repository through the domain's `location` input so the
  * repository's current checkout is never touched.
@@ -28,14 +29,11 @@ import { OpenCode } from "@opencode/sdk"
  *   - create/remove error classes and workspace-scoped location rejection.
  *
  * Harness facts measured here, not assumed:
- *   - `OpenCode.create({ config: { directory } })` does not move the host's
- *     default location: the plugin's boot `ctx.location` is the process working
- *     directory (this checkout), so every worktree call passes
- *     `location: { directory: <temp repo> }`. The domain resolves that ref to a
- *     location-scoped worktree service (`atWorktree`), and the plugin is
- *     instantiated once per active location (measured `setupCount: 2`), which is
- *     why event ids can be delivered more than once to a directly-passed plugin
- *     object; assertions dedupe by event id.
+ *   - Worktree operations are project-scoped in 2.0.11. The harness activates
+ *     one plugin instance in the ambient checkout and one in the fixture
+ *     repository, then passes the fixture's project ID to every operation.
+ *     Event ids can still be delivered more than once to a directly-passed
+ *     plugin object; assertions dedupe by event id.
  *   - A provider call is impossible: no session is created, no prompt is
  *     admitted, and `session.hook("http.request")`/`model.request` record every
  *     attempt. Every test asserts both recorders are empty.
@@ -55,10 +53,10 @@ type WorktreeEvent = {
 }
 
 type Domain = {
-  list(input?: unknown): Promise<Array<{ directory: string; strategy?: string }>>
-  create(input?: unknown): Promise<{ directory: string }>
-  remove(input: { directory: string; force: boolean }): Promise<void>
-  refresh(input?: unknown): Promise<unknown>
+  list(input: { projectID: string }): Promise<Array<{ directory: string; strategy?: string }>>
+  create(input: { projectID: string; directory?: string; name?: string; branch?: string; from?: string }): Promise<{ directory: string }>
+  remove(input: { projectID: string; directory: string; force: boolean }): Promise<void>
+  refresh(input: { projectID: string }): Promise<unknown>
 }
 
 type Probe = {
@@ -72,6 +70,7 @@ type Probe = {
   /** Native worktree domain captured at setup (equivalent across setups). */
   domain: Domain | undefined
   setupCount: number
+  projects: Array<{ directory: string; projectID: string }>
   started: Promise<void>
   stop: () => void
 }
@@ -96,6 +95,7 @@ function createWorktreeProbe(): Probe {
     bootProjectID: undefined,
     domain: undefined,
     setupCount: 0,
+    projects: [],
     started,
     stop: () => controller.abort(),
   }
@@ -105,6 +105,7 @@ function createWorktreeProbe(): Probe {
     async setup(ctx) {
       probe.setupCount += 1
       probe.bootProjectID ??= ctx.location.project.id
+      probe.projects.push({ directory: ctx.location.directory, projectID: ctx.location.project.id })
       probe.domain = ctx.worktree as unknown as Domain
 
       await ctx.session.hook("http.request", (event) => {
@@ -166,7 +167,12 @@ function ambientCheckout(): string {
 
 async function withHost<T>(
   fixture: Fixture,
-  run: (input: { host: Awaited<ReturnType<typeof OpenCode.create>>; probe: Probe; domain: Domain; at: object }) => Promise<T>,
+  run: (input: {
+    host: Awaited<ReturnType<typeof OpenCode.create>>
+    probe: Probe
+    domain: Domain
+    at: { projectID: string }
+  }) => Promise<T>,
 ): Promise<T> {
   const probe = createWorktreeProbe()
   const host = await OpenCode.create({
@@ -175,10 +181,14 @@ async function withHost<T>(
     config: { directory: fixture.repo, content: JSON.stringify({ agents: AGENTS }) },
   })
   try {
-    await host.plugin.awaitActivation()
+    await activatePlugin(host, process.cwd())
     await probe.started
+    await activatePlugin(host, fixture.repo)
+    await waitFor(() => probe.projects.some((project) => realpathSync(project.directory) === fixture.canonicalRepo))
     const domain = probe.domain as unknown as Domain
-    return await run({ host, probe, domain, at: { location: { directory: fixture.repo } } })
+    const project = [...probe.projects].reverse().find((entry) => realpathSync(entry.directory) === fixture.canonicalRepo)
+    if (!project) throw new Error(`fixture plugin did not activate: ${fixture.repo}`)
+    return await run({ host, probe, domain, at: { projectID: project.projectID } })
   } finally {
     probe.stop()
     await host.close()
@@ -187,11 +197,12 @@ async function withHost<T>(
 
 /** Unique `worktree.updated` events routed through the fixture repository. */
 function updateEvents(probe: Probe, fixture: Fixture): WorktreeEvent[] {
+  const projectID = [...probe.projects]
+    .reverse()
+    .find((project) => realpathSync(project.directory) === fixture.canonicalRepo)?.projectID
   const unique = new Map<string, WorktreeEvent>()
   for (const event of probe.events) {
-    const directory = event.location?.directory
-    if (typeof directory !== "string") continue
-    if (realpathSync(directory) !== fixture.canonicalRepo) continue
+    if (event.type !== "worktree.updated" || event.data?.projectID !== projectID) continue
     if (typeof event.id === "string") unique.set(event.id, event)
   }
   return [...unique.values()]
@@ -224,12 +235,12 @@ async function captureFailure(promise: Promise<unknown>): Promise<Record<string,
   )
 }
 
-describe("phase B native worktree contract (pinned beta-19507)", () => {
+describe("phase B native worktree contract (pinned 2.0.11)", () => {
   test("scopes inventory to the routed project and returns a void refresh on a stable repository", async () => {
     const fixture = makeRepo("scope")
     const other = makeRepo("scope-other")
     try {
-      await withHost(fixture, async ({ probe, domain, at }) => {
+      await withHost(fixture, async ({ host, probe, domain, at }) => {
         const initial = await domain.list(at)
 
         // The first routed call resolves the repository's project: the inventory
@@ -253,7 +264,11 @@ describe("phase B native worktree contract (pinned beta-19507)", () => {
         expect(updatedIds(probe, fixture)).toHaveLength(0)
 
         // A different project's inventory is disjoint, in both directions.
-        const otherInventory = await domain.list({ location: { directory: other.repo } })
+        await activatePlugin(host, other.repo)
+        const otherProject = [...probe.projects].reverse().find((entry) => realpathSync(entry.directory) === other.canonicalRepo)
+        if (!otherProject) throw new Error(`other project plugin did not activate: ${other.repo}`)
+        const otherAt = { projectID: otherProject.projectID }
+        const otherInventory = await domain.list(otherAt)
         expect(otherInventory).toHaveLength(1)
         expect(otherInventory[0]?.directory).toBe(other.canonicalRepo)
         const fixtureInventory = await domain.list(at)
@@ -262,16 +277,8 @@ describe("phase B native worktree contract (pinned beta-19507)", () => {
         expect(fixtureInventory.some((entry) => entry.directory === other.canonicalRepo)).toBe(false)
         expect(otherInventory.some((entry) => entry.directory === fixture.canonicalRepo)).toBe(false)
 
-        // A workspace-scoped location is rejected before any worktree operation.
-        const workspaceError = await captureFailure(
-          domain.list({ location: { directory: fixture.repo, workspace: "wrk_phasebprobe" } }) as Promise<unknown>,
-        )
-        expect(workspaceError.name).toBe("Worktree.UnsupportedLocationError")
-        expect(workspaceError._tag).toBe("Worktree.UnsupportedLocationError")
-
-        // Routing bound a second plugin instantiation (one per active location);
-        // assertion counting dedupes by event id because both instances observe
-        // the same bus.
+        // Each project ID remains isolated, even after a third location-scoped
+        // plugin instance is activated for the comparison repository.
         expect(probe.setupCount).toBeGreaterThanOrEqual(2)
         expect(probe.httpRequests).toEqual([])
         expect(probe.modelRequests).toEqual([])
@@ -424,19 +431,20 @@ describe("phase B native worktree contract (pinned beta-19507)", () => {
         await domain.list(at)
         const baseline = updatedIds(probe, fixture).length
 
-        // A worktree created outside the native domain is adopted by list (the
-        // native list refreshes first); refresh itself returns void.
+        // A worktree created outside the native domain is adopted by an
+        // explicit refresh; list reads the saved inventory in 2.0.11.
         const external = join(fixture.trees, "external")
         git(fixture.repo, ["worktree", "add", "--detach", "--", external, "HEAD"])
         const discoveredDir = realpathSync(external)
-        expect(await domain.list(at)).toContainEqual({ directory: discoveredDir, strategy: "git" })
         expect(await domain.refresh(at)).toBeUndefined()
+        expect(await domain.list(at)).toContainEqual({ directory: discoveredDir, strategy: "git" })
         await waitFor(() => updatedIds(probe, fixture).length >= baseline + 1)
 
         // Removing it outside the native domain drops the inventory row on the
         // next list; there is no persistent orphaned record.
         const beforeRemovalIds = updatedIds(probe, fixture).length
         git(fixture.repo, ["worktree", "remove", external])
+        expect(await domain.refresh(at)).toBeUndefined()
         const afterExternal = await domain.list(at)
         expect(afterExternal.some((entry) => entry.directory === discoveredDir)).toBe(false)
         expect(afterExternal).toHaveLength(1)
@@ -448,6 +456,7 @@ describe("phase B native worktree contract (pinned beta-19507)", () => {
         // without an orphaned lifecycle state.
         const vanished = await domain.create({ ...at, directory: join(fixture.trees, "native"), name: "vanished" })
         rmSync(vanished.directory, { recursive: true, force: true })
+        expect(await domain.refresh(at)).toBeUndefined()
         const afterVanished = await domain.list(at)
         expect(afterVanished.some((entry) => entry.directory === vanished.directory)).toBe(false)
         expect(worktreePorcelain(fixture.repo)).toContain("prunable")

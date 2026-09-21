@@ -119,6 +119,7 @@ export type AuthorityDeps = {
   gate: DispatchGate
   session: {
     get(input: { sessionID: string }): Promise<unknown>
+    update(input: { sessionID: string; permissions: readonly PermissionRule[] }): Promise<unknown>
     hook(name: "prompt", callback: (event: SessionPrompt) => Promise<void> | void): Promise<AuthorityRegistration>
   }
   permission: {
@@ -126,7 +127,6 @@ export type AuthorityDeps = {
       name: "evaluate",
       callback: (event: PermissionEvaluation) => Promise<void> | void,
     ): Promise<AuthorityRegistration>
-    rules(input: { sessionID: string; permissions: readonly PermissionRule[] }): Promise<void>
   }
   /**
    * Durable sink for effective-authority snapshots (Phase C). When either is
@@ -298,7 +298,7 @@ export async function startAuthority(deps: AuthorityDeps): Promise<AuthorityRunt
     const merged = mergeContainmentRules(child.permissions ?? [])
     if (merged.added.length > 0) {
       try {
-        await deps.permission.rules({ sessionID: event.sessionID, permissions: merged.permissions })
+        await deps.session.update({ sessionID: event.sessionID, permissions: merged.permissions })
       } catch (error) {
         throw new Error(
           boundedAuthorityMessage(

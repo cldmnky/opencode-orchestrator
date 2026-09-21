@@ -47,7 +47,7 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
       location: ctx.location,
       options,
       runner,
-      catalog: ctx.catalog,
+      catalog: { model: ctx.model },
       agent: ctx.agent,
     })
     const agentResponse = await ctx.agent.list()

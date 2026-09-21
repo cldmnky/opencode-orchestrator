@@ -1,9 +1,9 @@
 # Native shell verification hook contract
 
 Measured against `@opencode/plugin` and `@opencode/sdk`
-`0.0.0-beta-19507` by `test/contract/phase-e-verification-hooks.test.ts`.
-The probe uses a deterministic in-process provider, a throwaway project, and no
-external network access.
+`2.0.11` by `test/contract/phase-e-verification-hooks.test.ts`.
+The probe uses a deterministic loopback OpenAI-compatible provider, a throwaway
+project, and no external network access.
 
 ## Observed shape
 

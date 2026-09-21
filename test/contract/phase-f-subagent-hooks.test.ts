@@ -4,14 +4,17 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { Plugin } from "@opencode/plugin"
 import { OpenCode } from "@opencode/sdk"
+import { activatePlugin } from "./helpers/activate-plugin.js"
+import { createMockOpenAI, openAIToolCall, openAIText } from "./helpers/mock-openai.js"
 
 /**
  * Phase F pinned-host probe for the native `subagent` tool boundary.
  *
- * The probe uses deterministic in-process language models, never reaches the
- * network, and records only bounded hook metadata. It deliberately measures
- * native dispatch behavior rather than importing the production admission
- * runtime so the contract remains independent of implementation assumptions.
+ * The probe uses a deterministic loopback OpenAI-compatible provider, never
+ * reaches an external network, and records only bounded hook metadata. It
+ * deliberately measures native dispatch behavior rather than importing the
+ * production admission runtime so the contract remains independent of
+ * implementation assumptions.
  */
 
 const PROVIDER = "phase-f-probe"
@@ -36,34 +39,15 @@ type Probe = {
   plugin: ReturnType<typeof Plugin.define>
   hooks: HookRecord[]
   toolCalls: number
+  parentToolCallSent: boolean
 }
 
 function createProbe(refuseSubagent = false): Probe {
-  const probe: Probe = { plugin: undefined as never, hooks: [], toolCalls: 0 }
-  const parentModel = model({
-    onToolCall() {
-      probe.toolCalls += 1
-      return {
-        agent: CHILD_AGENT,
-        description: "phase-f child",
-        prompt: "return a short result",
-        background: false,
-      }
-    },
-  })
-  const childModel = model()
+  const probe: Probe = { plugin: undefined as never, hooks: [], toolCalls: 0, parentToolCallSent: false }
 
   probe.plugin = Plugin.define({
     id: "phase-f-subagent-probe",
     async setup(ctx) {
-      await ctx.aisdk.hook("sdk", (event) => {
-        event.sdk = {
-          languageModel: () => event.model.id === PARENT_MODEL ? parentModel : childModel,
-        }
-      }, { providerID: PROVIDER })
-      await ctx.aisdk.hook("language", (event) => {
-        event.language = event.model.id === PARENT_MODEL ? parentModel : childModel
-      }, { providerID: PROVIDER })
       await ctx.tool.hook("execute.before", (event) => {
         probe.hooks.push({
           phase: "before",
@@ -94,65 +78,38 @@ function createProbe(refuseSubagent = false): Probe {
   return probe
 }
 
-function model(input: { onToolCall?: () => Record<string, unknown> } = {}) {
-  let sent = false
-  return {
-    specificationVersion: "v3" as const,
-    provider: PROVIDER,
-    modelId: input.onToolCall ? PARENT_MODEL : CHILD_MODEL,
-    supportedUrls: {},
-    async doStream(options: Record<string, unknown>) {
-      if (input.onToolCall && !sent) {
-        const tools = Array.isArray(options.tools) ? options.tools : []
-        const subagent = tools.find(
-          (tool) => tool && typeof tool === "object" && (tool as { name?: unknown }).name === "subagent",
-        )
-        if (!subagent) throw new Error("phase-f probe did not receive the native subagent tool")
-        sent = true
-        return stream([
-          { type: "stream-start", warnings: [] },
-          {
-            type: "tool-call",
-            toolCallId: "phase-f-subagent-call",
-            toolName: "subagent",
-            input: JSON.stringify(input.onToolCall()),
-          },
-          { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: { inputTokens: {}, outputTokens: {} } },
-        ])
-      }
-      return stream([
-        { type: "stream-start", warnings: [] },
-        { type: "text-start", id: "phase-f-text" },
-        { type: "text-delta", id: "phase-f-text", delta: "[phase-f-probe] done" },
-        { type: "text-end", id: "phase-f-text" },
-        { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: { inputTokens: {}, outputTokens: {} } },
-      ])
-    },
-    async doGenerate(): Promise<never> {
-      throw new Error("phase-f probe only exercises streaming")
-    },
-  }
-}
-
-function stream(parts: readonly Record<string, unknown>[]): { stream: ReadableStream<any> } {
-  return {
-    stream: new ReadableStream({
-      start(controller) {
-        for (const part of parts) controller.enqueue(part)
-        controller.close()
+function respond(probe: Probe, body: { model?: string; tools?: unknown[] }): Response {
+  const tools = Array.isArray(body.tools) ? body.tools : []
+  const hasSubagent = tools.some(
+    (tool) => tool && typeof tool === "object" && (tool as { function?: { name?: unknown } }).function?.name === "subagent",
+  )
+  if (!hasSubagent) return openAIText("title", body.model)
+  if (body.model === PARENT_MODEL && !probe.parentToolCallSent) {
+    probe.parentToolCallSent = true
+    probe.toolCalls += 1
+    return openAIToolCall(
+      "subagent",
+      {
+        agent: CHILD_AGENT,
+        description: "phase-f child",
+        prompt: "return a short result",
+        background: false,
       },
-    }),
+      { model: body.model, id: "phase-f-subagent-call" },
+    )
   }
+  return openAIText("[phase-f-probe] done", body.model)
 }
 
-function config(directory: string): string {
+function config(directory: string, baseURL: string): string {
   return JSON.stringify({
     providers: {
       [PROVIDER]: {
         name: "Phase F Probe",
+        settings: { baseURL },
         models: {
-          [PARENT_MODEL]: { name: "Phase F Parent", package: "aisdk:@ai-sdk/openai-compatible" },
-          [CHILD_MODEL]: { name: "Phase F Child", package: "aisdk:@ai-sdk/openai-compatible" },
+          [PARENT_MODEL]: { name: "Phase F Parent", package: "@ai-sdk/openai-compatible" },
+          [CHILD_MODEL]: { name: "Phase F Child", package: "@ai-sdk/openai-compatible" },
         },
       },
     },
@@ -177,6 +134,7 @@ async function withHost<T>(probe: Probe, run: (host: Awaited<ReturnType<typeof O
   const directory = join(root, "project")
   const ambientCredential = process.env.OPENCODE_API_KEY
   delete process.env.OPENCODE_API_KEY
+  const mock = createMockOpenAI(({ body }) => respond(probe, body))
   let host: Awaited<ReturnType<typeof OpenCode.create>> | undefined
   try {
     host = await OpenCode.create({
@@ -184,12 +142,13 @@ async function withHost<T>(probe: Probe, run: (host: Awaited<ReturnType<typeof O
       fs: { filewatcher: false },
       models: { fetch: false },
       database: { path: join(root, "database.sqlite") },
-      config: { directory, content: config(directory) },
+      config: { directory, content: config(directory, mock.baseURL) },
     })
-    await host.plugin.awaitActivation()
+    await activatePlugin(host, directory)
     return await run(host, directory)
   } finally {
     if (host) await host.close()
+    mock.close()
     if (ambientCredential === undefined) delete process.env.OPENCODE_API_KEY
     else process.env.OPENCODE_API_KEY = ambientCredential
     rmSync(root, { recursive: true, force: true })

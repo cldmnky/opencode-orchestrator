@@ -98,7 +98,7 @@ describe("TUI plugin contract", () => {
 
     expect(selections).toEqual(["Select worker agent", "Select model for explore"])
     expect(requests[0]).toEqual({ location: { directory: "/workspace" } })
-    expect(requests[1]).toMatchObject({ command: "worker-models", text: "explore=provider/model#fast", sessionID: "session" })
+    expect(requests[1]).toMatchObject({ name: "worker-models", text: "explore=provider/model#fast", sessionID: "session" })
   })
 
   test("registers the read-only sidebar.content slot and cleans up its subscriptions", async () => {

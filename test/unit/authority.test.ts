@@ -126,6 +126,16 @@ function createHarness(overrides: HarnessOverrides = {}) {
         if (value instanceof Error) throw value
         return value
       },
+      async update(input: { sessionID: string; permissions: readonly PermissionRule[] }) {
+        if (overrides.rulesFailure) throw overrides.rulesFailure
+        state.rulesCalls.push(input)
+        // Model the host: a session permission update is observable on the
+        // session immediately after the call.
+        const session = overrides.sessions?.[input.sessionID]
+        if (session && typeof session === "object") {
+          ;(session as { permissions?: readonly PermissionRule[] }).permissions = [...input.permissions]
+        }
+      },
       async hook(name: string, callback: (event: any) => Promise<void> | void) {
         state.promptHook = callback
         return { dispose: async () => void state.disposed.push(`prompt:${name}`) }
@@ -135,16 +145,6 @@ function createHarness(overrides: HarnessOverrides = {}) {
       async hook(name: string, callback: (event: any) => Promise<void> | void) {
         state.evaluateHook = callback
         return { dispose: async () => void state.disposed.push(`evaluate:${name}`) }
-      },
-      async rules(input: { sessionID: string; permissions: readonly PermissionRule[] }) {
-        if (overrides.rulesFailure) throw overrides.rulesFailure
-        state.rulesCalls.push(input)
-        // Model the pinned host: a session rule write is observable on the
-        // session immediately after the call.
-        const session = overrides.sessions?.[input.sessionID]
-        if (session && typeof session === "object") {
-          ;(session as { permissions?: readonly PermissionRule[] }).permissions = [...input.permissions]
-        }
       },
     },
     ...(overrides.storage ? { storage: overrides.storage } : {}),

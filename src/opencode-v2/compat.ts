@@ -1,7 +1,7 @@
 /**
- * Narrow compatibility boundary for the pinned beta-19507 plugin types.
+ * Narrow compatibility boundary for the pinned OpenCode 2.0.11 plugin types.
  *
- * beta-19507's runtime accepts the plugin's `tui: true` field, but its
+ * OpenCode 2.0.11's runtime accepts the plugin's `tui: true` field, but its
  * `Plugin.define` declaration omits that field. Tool registrations also need
  * one structural draft type because the generic editor signature is stricter
  * than the JSON-schema definitions assembled by this plugin. Keep both casts

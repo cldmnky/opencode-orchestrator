@@ -630,8 +630,8 @@ bun run scripts/package-smoke.ts  # verifies the packed tarball and typed consum
 
 Tested against:
 
-- `@opencode/plugin` `0.0.0-beta-19507`
-- `@opencode/sdk` `0.0.0-beta-19507` (integration tests)
+- `@opencode/plugin` `2.0.11`
+- `@opencode/sdk` `2.0.11` (integration tests)
 
 Main plugin sets `tui: true` and publishes `./tui`. CLI-only config belongs in `cli.json`.
 

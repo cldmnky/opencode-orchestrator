@@ -4,15 +4,17 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import { OpenCode } from "@opencode/sdk"
+import { activatePlugin } from "./helpers/activate-plugin.js"
 import { APICallError } from "ai"
 import { loadBuiltPlugin } from "./helpers/build-plugin.js"
+import { createMockOpenAI, openAIError, openAIText, type MockOpenAI } from "./helpers/mock-openai.js"
 
 /**
  * Phase D (N5) pinned-host contract probe and production wiring measurement
- * (pinned `@opencode/plugin`/`@opencode/sdk` `0.0.0-beta-19507`).
+ * (pinned `@opencode/plugin`/`@opencode/sdk` `2.0.11`).
  *
  * The probe boots embedded hosts against a throwaway directory with a
- * deterministic in-process provider. It performs no external network traffic:
+ * deterministic loopback OpenAI-compatible provider. It performs no external network traffic:
  * the host boots with `models.fetch: false`, a process-wide fetch guard
  * rejects every non-loopback URL before a real send, and the ambient
  * `OPENCODE_API_KEY` variable is removed for the lifetime of each host (its
@@ -43,7 +45,7 @@ import { loadBuiltPlugin } from "./helpers/build-plugin.js"
 
 const PROBE_PROVIDER = "phase-d-probe"
 const PROBE_MODEL = "deterministic"
-const PROBE_PACKAGE = "aisdk:@ai-sdk/openai-compatible"
+const PROBE_PACKAGE = "@ai-sdk/openai-compatible"
 const ORCHESTRATOR_AGENT = "orchestrator"
 const WORKER_AGENT = "build"
 const FIXTURE_TEXT = "[phase-d-probe] deterministic fixture output"
@@ -75,8 +77,6 @@ type ScheduledSnapshot = {
 
 type Probe = {
   plugin: ReturnType<typeof Plugin.define>
-  sdkHooks: string[]
-  languageHooks: string[]
   retryEvents: RetryEventSnapshot[]
   scheduledEvents: ScheduledSnapshot[]
   scheduledEventIDs: Set<string>
@@ -93,43 +93,6 @@ type Probe = {
   stop: () => void
 }
 
-function deterministicLanguageModel(probe: Probe) {
-  return {
-    specificationVersion: "v3" as const,
-    provider: PROBE_PROVIDER,
-    modelId: PROBE_MODEL,
-    supportedUrls: {},
-    async doStream() {
-      probe.streamCalls += 1
-      if (probe.failuresRemaining > 0) {
-        probe.failuresRemaining -= 1
-        throw probe.failureError
-      }
-      const parts = [
-        { type: "stream-start", warnings: [] },
-        { type: "text-start", id: "phase-d-text" },
-        { type: "text-delta", id: "phase-d-text", delta: FIXTURE_TEXT },
-        { type: "text-end", id: "phase-d-text" },
-        {
-          type: "finish",
-          finishReason: { unified: "stop", raw: "stop" },
-          usage: { inputTokens: {}, outputTokens: {} },
-        },
-      ]
-      const stream = new ReadableStream({
-        start(controller) {
-          for (const part of parts) controller.enqueue(part)
-          controller.close()
-        },
-      })
-      return { stream }
-    },
-    async doGenerate(): Promise<never> {
-      throw new Error("[phase-d-probe] doGenerate is not part of this probe")
-    },
-  }
-}
-
 function createProbe(): Probe {
   const controller = new AbortController()
   let resolveStarted: () => void = () => {}
@@ -138,8 +101,6 @@ function createProbe(): Probe {
   })
   const probe: Probe = {
     plugin: undefined as never,
-    sdkHooks: [],
-    languageHooks: [],
     retryEvents: [],
     scheduledEvents: [],
     scheduledEventIDs: new Set(),
@@ -157,24 +118,6 @@ function createProbe(): Probe {
     id: "phase-d-retry-probe",
     async setup(ctx) {
       probe.setupCount += 1
-
-      const scope = { providerID: PROBE_PROVIDER }
-      await ctx.aisdk.hook(
-        "sdk",
-        (event) => {
-          probe.sdkHooks.push(`${event.model.providerID}:${event.package}`)
-          event.sdk = { languageModel: () => deterministicLanguageModel(probe) }
-        },
-        scope,
-      )
-      await ctx.aisdk.hook(
-        "language",
-        (event) => {
-          probe.languageHooks.push(`${event.model.providerID}:${event.model.id}`)
-          event.language = deterministicLanguageModel(probe)
-        },
-        scope,
-      )
 
       probe.retryRegistration = await ctx.session.hook("retry", (event) => {
         const snapshot: RetryEventSnapshot = {
@@ -264,11 +207,12 @@ function installNetworkGuard(): NetworkGuard {
   return guard
 }
 
-function probeConfig(): string {
+function probeConfig(baseURL: string): string {
   return JSON.stringify({
     providers: {
       [PROBE_PROVIDER]: {
         name: "Phase D Probe",
+        settings: { baseURL },
         models: {
           [PROBE_MODEL]: { name: "Phase D Deterministic Probe", package: PROBE_PACKAGE },
         },
@@ -287,12 +231,27 @@ type WithProbeHostOptions = {
 }
 
 async function withProbeHost(
-  run: (input: { host: Host; probe: Probe; guard: NetworkGuard; directory: string }) => Promise<void>,
+  run: (input: { host: Host; probe: Probe; guard: NetworkGuard; directory: string; mock: MockOpenAI }) => Promise<void>,
   options: WithProbeHostOptions = {},
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "orchestrator-phase-d-"))
   const directory = join(root, "project")
   const probe = createProbe()
+  const mock = createMockOpenAI(({ body }) => {
+    probe.streamCalls += 1
+    if (probe.failuresRemaining > 0) {
+      probe.failuresRemaining -= 1
+      const failure = probe.failureError
+      const status = failure instanceof APICallError ? failure.statusCode ?? 500 : 500
+      if (!(failure instanceof APICallError)) return openAIError(500, failure.message, "server_error")
+      return openAIError(
+        status,
+        failure.message,
+        status === 429 ? "rate_limit_exceeded" : status === 401 ? "authentication_error" : "invalid_request_error",
+      )
+    }
+    return openAIText(FIXTURE_TEXT, body.model)
+  })
   const guard = installNetworkGuard()
   // No live credential may be reachable by the probe host. The ambient value
   // is captured only so it can be restored on cleanup.
@@ -305,17 +264,18 @@ async function withProbeHost(
       fs: { filewatcher: false },
       models: { fetch: false },
       database: { path: join(root, "database.sqlite") },
-      config: { directory, content: probeConfig() },
+      config: { directory, content: probeConfig(mock.baseURL) },
     })
-    await host.plugin.awaitActivation()
+    await activatePlugin(host, directory)
     await probe.started
-    await run({ host, probe, guard, directory })
+    await run({ host, probe, guard, directory, mock })
   } finally {
     probe.stop()
     try {
       if (host) await host.close()
     } finally {
       guard.restore()
+      mock.close()
       if (credential === undefined) delete process.env.OPENCODE_API_KEY
       else process.env.OPENCODE_API_KEY = credential
       rmSync(root, { recursive: true, force: true })
@@ -364,6 +324,19 @@ function rateLimitedFailure(): APICallError {
   })
 }
 
+function invalidRequestFailure(): APICallError {
+  return new APICallError({
+    message: FIXTURE_FAILURE,
+    url: "http://127.0.0.1/invalid",
+    requestBodyValues: {},
+    statusCode: 400,
+    responseHeaders: {},
+    responseBody: JSON.stringify({ error: { code: "invalid_request_error" } }),
+    isRetryable: false,
+    data: { error: { code: "invalid_request_error" } },
+  })
+}
+
 /**
  * Boots the real built plugin with injected options (the embedded SDK host
  * always hands directly-passed plugins `ctx.options = {}`, verified by the
@@ -407,7 +380,7 @@ function wrapBuiltPlugin(
   }
 }
 
-describe("phase D retry-hook contract (pinned beta-19507)", () => {
+describe("phase D retry-hook contract (pinned 2.0.11)", () => {
   test("delivers the documented callback shape with physical attempt numbering", async () => {
     await withProbeHost(async ({ host, probe, directory, guard }) => {
       const sessionID = await createSession(host, directory, "phase-d shape", ORCHESTRATOR_AGENT)
@@ -426,7 +399,7 @@ describe("phase D retry-hook contract (pinned beta-19507)", () => {
       expect(first.agent).toBe(ORCHESTRATOR_AGENT)
       expect(first.model).toEqual({ providerID: PROBE_PROVIDER, id: PROBE_MODEL, variant: "default" })
       expect(first.attempt).toBe(2)
-      expect(first.error).toEqual({ type: "provider.unknown", message: FIXTURE_FAILURE })
+      expect(first.error).toEqual({ type: "provider.internal", message: FIXTURE_FAILURE, status: 500 })
       expect(first.decision).toEqual({ retry: true, delay: expect.any(Number) })
 
       // The override delay 0 was honored: the second attempt ran immediately.
@@ -447,7 +420,7 @@ describe("phase D retry-hook contract (pinned beta-19507)", () => {
       const scheduled = probe.scheduledEvents[0]
       expect(scheduled.keys).toEqual(["assistantMessageID", "at", "attempt", "error", "sessionID"])
       expect(scheduled.attempt).toBe(2)
-      expect(scheduled.error).toEqual({ type: "provider.unknown", message: FIXTURE_FAILURE })
+      expect(scheduled.error).toEqual({ type: "provider.internal", message: FIXTURE_FAILURE, status: 500 })
       // The 0 ms override is honored: the scheduled retry time is essentially
       // the observation time instead of the host's ~2 s exponential delay.
       expect((scheduled.at as number) - scheduled.observedAt).toBeLessThan(250)
@@ -511,11 +484,10 @@ describe("phase D retry-hook contract (pinned beta-19507)", () => {
 
       await promptAndWait(host, sessionID, "phase-d prompt")
 
-      // The built-in schedule is `max(exponential, recurs(4))`: four physical
-      // retries (attempts 2..5), then the request fails with no further hook.
-      expect(probe.retryEvents.map((event) => event.attempt)).toEqual([2, 3, 4, 5])
-      expect(probe.scheduledEvents.map((event) => event.attempt)).toEqual([2, 3, 4, 5])
-      expect(probe.streamCalls).toBe(5)
+      // OpenCode 2.0.11 permits ten physical retries (attempts 2..11).
+      expect(probe.retryEvents.map((event) => event.attempt)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+      expect(probe.scheduledEvents.map((event) => event.attempt)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+      expect(probe.streamCalls).toBe(11)
     })
   }, TEST_TIMEOUT)
 
@@ -620,10 +592,10 @@ describe("phase D production wiring (retry.mode bounded vs default off)", () => 
         expect(probe.retryEvents[0].decision).toEqual({ retry: true, delay: 1 })
         expect(probe.streamCalls).toBe(2)
 
-        // Ambiguous class (provider.unknown): the production hook vetoes the
-        // host-proposed retry before the probe hook sees it.
+        // A deterministic invalid request is terminal in the released host;
+        // the production hook leaves the host's final decision untouched.
         probe.failuresRemaining = 1
-        probe.failureError = new Error(FIXTURE_FAILURE)
+        probe.failureError = invalidRequestFailure()
         await promptAndWait(host, sessionID, "phase-d prompt")
         expect(probe.retryEvents).toHaveLength(2)
         expect(probe.retryEvents[1].decision).toEqual({ retry: false })
@@ -656,7 +628,7 @@ describe("phase D production wiring (retry.mode bounded vs default off)", () => 
         }
         expect(last.attempts).toBe(3)
         expect(last.capped).toBe(1)
-        expect(last.vetoedClass).toBe(1)
+        expect(last.vetoedClass).toBe(0)
         expect(last.lastAction).toBe("host-terminal")
       },
       {
@@ -696,24 +668,31 @@ describe("phase D production wiring (retry.mode bounded vs default off)", () => 
         probe.failureError = rateLimitedFailure()
         await promptAndWait(host, orchestrator, "phase-d prompt")
         const firstRequest = probe.retryEvents.filter((event) => event.sessionID === orchestrator)
-        expect(firstRequest.map((event) => event.attempt)).toEqual([2, 3, 4, 5])
-        expect(firstRequest.map((event) => (event.decision as { retry: boolean }).retry)).toEqual([true, true, true, true])
+        expect(firstRequest.map((event) => event.attempt)).toEqual([2, 3, 4, 5, 6, 7, 8])
+        expect(firstRequest.map((event) => (event.decision as { retry: boolean }).retry)).toEqual([
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+        ])
 
         probe.failuresRemaining = Number.POSITIVE_INFINITY
         await promptAndWait(host, orchestrator, "phase-d prompt")
-        const secondRequest = probe.retryEvents.filter((event) => event.sessionID === orchestrator).slice(4)
-        // The seventh observation inside the burst window is vetoed, so the
-        // second request ends at that point (three observations) instead of
-        // reaching the built-in ceiling.
-        expect(secondRequest.map((event) => event.attempt)).toEqual([2, 3, 4])
-        expect(secondRequest.map((event) => (event.decision as { retry: boolean }).retry)).toEqual([true, true, false])
-        // Exactly one scheduled event per allowed retry: 4 (first request) + 2
-        // (second request) and none for the vetoed observation.
+        const secondRequest = probe.retryEvents.filter((event) => event.sessionID === orchestrator).slice(firstRequest.length)
+        // The burst window is full after the first request, so the next
+        // observation is vetoed immediately.
+        expect(secondRequest.map((event) => event.attempt)).toEqual([2])
+        expect(secondRequest.map((event) => (event.decision as { retry: boolean }).retry)).toEqual([false])
+        // Exactly one scheduled event per allowed retry: six in the first
+        // request and none for the vetoed observations.
         const orchestratorScheduled = probe.scheduledEvents.filter((event) => event.sessionID === orchestrator)
-        expect(orchestratorScheduled.map((event) => event.attempt)).toEqual([2, 3, 4, 5, 2, 3])
-        // 2 (worker) + 5 (first request) + 3 (second request: initial + two
-        // retries; the vetoed fourth hook call never runs a retry).
-        expect(probe.streamCalls).toBe(2 + 5 + 3)
+        expect(orchestratorScheduled.map((event) => event.attempt)).toEqual([2, 3, 4, 5, 6, 7])
+        // The released host records ten provider attempts across the worker
+        // request and the two orchestrator requests.
+        expect(probe.streamCalls).toBe(10)
       },
       {
         plugins: [

@@ -151,6 +151,19 @@ Check that it worked:
 opencode2 api get /api/plugin | jq -r '.data // . | .[].id' | grep opencode-orchestrator
 ```
 
+## Documentation
+
+- [Architecture and data flow](docs/architecture.md)
+- [Guidance versus enforcement boundaries](docs/enforcement-boundaries.md)
+- [Tool and command migration for 0.2](docs/tool-command-migration-0.2.md)
+- [Durable state and migration inventory](docs/state-migrations.md)
+- [Operator state recovery](docs/operations/state-recovery.md)
+- [Release verification](docs/operations/release-verification.md)
+- [Published package API and packed-install verification](docs/contracts/package-api.md)
+- [TUI progress RPC contract](docs/contracts/progress-rpc.md)
+- [Pinned native verification and subagent hook contracts](docs/contracts/verification-hook.md) and [subagent-hook.md](docs/contracts/subagent-hook.md)
+- [Phase 1 executable fixtures](docs/phase-1/README.md)
+
 ---
 
 ## Quick start
@@ -170,16 +183,12 @@ The orchestrator will research the codebase, plan the changes, delegate coherent
 
 ---
 
-## See it in action
-
-![Orchestrator demo — single prompt to tested, reviewed code](docs/assets/demo-placeholder.svg)
+## Workflow at a glance
 
 | What you'd see | You type |
 |----------------|----------|
 | Research → plan → parallel edits → review, all summarized in one reply | `/orchestrate add pagination to /api/items with tests` |
 | Goal keeps running while you step away | `/goal implement the plan at .orchestrator/plans/checkout.md` |
-
-> **Make it yours:** record a 20–40s GIF with [VHS](https://github.com/charmbracelet/vhs), Screen Studio, or Peek, save it as `docs/assets/orchestrate-demo.gif` (and `goal-demo.gif`), then swap the image above. See `docs/assets/README.md` for a ready-to-use VHS tape.
 
 ```mermaid
 flowchart LR
@@ -213,20 +222,12 @@ All commands are available after installation. They appear inside OpenCode — n
 
 ### Phase 7 surface migration (`0.2.0`)
 
-Phase 7 removes overlapping model-visible names. The replacements are:
-
-| Removed surface | Replacement |
-|---|---|
-| `orchestrator_goal_get`, `orchestrator_goal_set`, `orchestrator_goal_update` | `orchestrator_goal` with `get`, `set`, `pause`, `resume`, `complete`, or `clear` actions |
-| `orchestrator_lead_board_get` | `orchestrator_board_get` |
-| `orchestrator_lead_board_init`, `orchestrator_lead_board_task_create`, `orchestrator_lead_board_task_assign`, `orchestrator_lead_board_transition`, `orchestrator_lead_board_complete` | `orchestrator_board_action` with `init`, `create-task`, `assign-task`, `transition`, or `complete` actions |
-| `orchestrator_peer_list`, `orchestrator_session_status` | `orchestrator_status` with `mode: "single"` or `mode: "list"` |
-| `orchestrator_task_complexity_classify` | No replacement tool; use the concise decomposition guidance and the lead board's declared-scope admission |
-| `orchestrator_admission_transition` | No separate call; validation, review, and board operations apply legal lifecycle transitions internally |
-| `/restructure`, `/polish`, `/stress-plan` | `/orchestrate` for a new task, or `/run-plan` for a hand-authored plan |
-| `orchestrator_github_issue_view`, `orchestrator_github_issue_list`, `orchestrator_github_issue_create` | Removed from the core plugin; use a separately configured GitHub/MCP integration when issue workflows are needed |
-
-The D4 v1 pure contract and fixtures remain supported. D4 v2 classification and generation hints are removed; no caller-supplied coherence label or second model call affects admission or publication.
+The model-visible surface now has one canonical operation for each state
+family. The complete removed-name table and migration guidance are in
+[`docs/tool-command-migration-0.2.md`](docs/tool-command-migration-0.2.md).
+The D4 v1 pure contract and fixtures remain supported; D4 v2 classification,
+generation hints, and caller-supplied coherence labels are not runtime
+surfaces.
 
 Two workflows, pick one: **one-shot** (`/orchestrate` — research, plan, implement, review, report) or **persistent objective** (`/goal` keeps working across idle continuations, and can drive a hand-authored plan via `/goal implement the plan at .orchestrator/plans/checkout.md`). Use `/run-plan` to execute a written plan phase by phase.
 
@@ -272,16 +273,18 @@ Starting a plan run enrolls the current goal generation on its [durable lead boa
 
 ### The durable lead board (`/goal` and `/run-plan`)
 
-Every goal generation gets a durable **lead board** — a bounded task ledger keyed to the session's stable origin project, so it survives idle periods, restarts, and session moves and is removed with the session. `/goal` enrolls the new generation and `/run-plan` enrolls the current one (either can be re-enrolled explicitly with `orchestrator_board_action` using `action: "init"`), so plan continuations advance ledger tasks instead of re-deriving work.
+Every goal generation gets a bounded, durable task ledger keyed to the stable
+project and session. It orders dependencies, serializes overlapping declared
+scopes, and requires lead-owned verification and exact-revision review before
+completion. Inspect it with `orchestrator_board_get` and mutate it with
+`orchestrator_board_action`.
 
-- **Task DAG.** A board starts as one planned root task, and children are added through a strict validator (unique ids, known dependencies, no self-dependencies or cycles). A task becomes `ready` only when its dependencies are `completed`, reserves one continuation step at a time, and persists the step identity before a prompt is queued; restart recovery never replays a prior step.
-- **Conservative restart recovery.** A missing board is `board-missing` (the legacy goal-only path still works); a malformed or identity-mismatched board is `board-unavailable` — never auto-repaired and never dispatched from. A missing, malformed, unreadable, pending, dispatched, or failed receipt marks the claimed task `ambiguous` (the possible external effect is retained as a claim), and a completed idle-edge receipt advances a task at most to `awaiting-validation`, never to `completed`. Recovery is a fresh read plus an explicit lead transition.
-- **Advisory scope packets, conservative serialization.** Each task carries a bounded read/write packet (relative paths under a `project` or `managed-worktree` root). Write/write and write/read overlaps serialize, any broad, unknown, malformed, or unresolvable scope conflicts with active writes, and read/read work may proceed; a conflict leaves the task `ready`, not failed. Serialization is single-process only, and packets are coordination guidance — **not** filesystem isolation, a permission boundary, or a worktree binding.
-- **Lead-only completion.** A worker handoff is a report, never completion: the lead validates the unchanged D2 envelope, uses `orchestrator_verification_get` to select plugin-observed shell receipts for every required command, and binds them to the exact head revision. Completion also requires an approved exact-revision review for that same revision. The board completes only when every task is `completed`, aggregate verification passes in the lead context, the review matches, and the goal generation is unchanged; `orchestrator_goal` with `action: "complete"` refuses goal completion while an enrolled board is not `complete` (a malformed board fails closed; a missing board keeps the legacy path).
-- **V2 migration boundary.** Runtime state is stored under `lead-board/v2/...`. A legacy V1 board remains readable and can be migrated explicitly through `orchestrator_board_action` with `action: "init"` or enrollment; safe lifecycle states are preserved, while legacy validation/review claims are marked for revalidation and never authorize completion or publication. A fully completed V1 board is historical status only.
-- **Lost PR responses are reconciled.** For draft-PR creation and merge, a bounded replay descriptor is persisted before the mutation; a retry or restart reads fresh remote truth first — an exact-match open PR is adopted with no second POST, a `merged: true` PR is adopted with no second PUT, and a missing or mismatched read stays ambiguous/blocked instead of retrying blindly.
-
-The board is durable but **not transactional or cross-process isolated**: it runs under the same process-local session lock, with no exactly-once, event-log, or scheduler/lease guarantee, and a replay descriptor makes a replay detectable — never an external side effect idempotent. Inspect it read-only with `orchestrator_board_get` (a bounded projection, never raw receipts or transcripts); mutate it with `orchestrator_board_action` and strict expected revisions. Both canonical board tools share the existing orchestrator-only `orchestrator_validation` permission family, so no new permission action is needed. Review start/submit applies the legal board intent transition internally; a separate admission-transition call is not part of the review happy path.
+The board is durable but not a transaction, cross-process scheduler, or
+filesystem sandbox. Missing or malformed state remains visible as unknown and
+does not authorize completion or publication. See the [architecture
+overview](docs/architecture.md), [enforcement boundaries](docs/enforcement-boundaries.md),
+and [state migration inventory](docs/state-migrations.md) for the lifecycle and
+recovery details.
 
 ### Other commands
 
@@ -580,7 +583,9 @@ OpenCode’s native `subagent_depth` is a **top-level** config key and defaults 
 - **Terminal drive is the default ending.** For ship-shaped work, the Definition of Done is merged and cleaned up, or a named gate/capability refusal — not a paused “PR is open” state waiting for a merge instruction.
 - **State lives in OpenCode storage.** Goals, plan runs, and their durable lead boards are keyed to the current session and persist through its idle periods via `ctx.storage` with per-session locks; session deletion removes that state. Conversations remain the source of truth.
 
-Want the formal contracts? `docs/phase-1/` has them (D2 handoff, D4 gate, etc.) — you don’t need them to get started.
+The formal D2/D4 fixtures and pinned host contracts live in the
+[documentation index](#documentation); they are executable repository assets,
+not required reading for a quick start.
 
 </details>
 
@@ -615,7 +620,8 @@ bun run dev:v2           # standalone opencode2 with XDG dirs under dev/state
 bun run dev:v2:dist      # loads ../../dist/index.js (run bun run build first)
 bun run typecheck
 bun test
-bun run build            # emits dist/index.js, dist/tui.js, dist/commands.js, dist/installer.js, dist/cli/index.js
+bun run build            # emits JS bundles and declarations under dist/
+bun run scripts/package-smoke.ts  # verifies the packed tarball and typed consumer
 ```
 
 `dev/project/opencode.jsonc` and `dev/state/*` are gitignored — they never touch global `~/.config/opencode`. `bun run dev:reset` deletes only those generated local files; your source checkout and global config are left untouched.

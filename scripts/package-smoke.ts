@@ -27,6 +27,16 @@ try {
   if (extract.status !== 0) throw new Error(`tar extraction failed:\n${extract.stdout}\n${extract.stderr}`)
   const packageDirectory = join(extracted, "package")
   if (!existsSync(join(packageDirectory, "dist", "index.js"))) throw new Error("packed package has no dist/index.js")
+  for (const document of [
+    "docs/architecture.md",
+    "docs/enforcement-boundaries.md",
+    "docs/state-migrations.md",
+    "docs/tool-command-migration-0.2.md",
+    "docs/contracts/package-api.md",
+    "docs/operations/release-verification.md",
+  ]) {
+    if (!existsSync(join(packageDirectory, document))) throw new Error(`packed package has no ${document}`)
+  }
   symlinkSync(join(root, "node_modules"), join(packageDirectory, "node_modules"), "dir")
   symlinkSync(packageDirectory, join(consumer, "node_modules", packageName), "dir")
 

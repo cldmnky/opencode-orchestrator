@@ -140,6 +140,8 @@ export type LeadTaskValidation = {
   validatedAt: number
   revision: string
   checkIDs: string[]
+  /** Plugin-observed verification receipts used for required commands. */
+  receiptIDs?: string[]
 }
 
 export type LeadTaskReview = {
@@ -348,6 +350,7 @@ const taskValidationSchema = z
     validatedAt: z.number().finite().nonnegative(),
     revision: z.string().min(1).max(LEAD_REF_MAX_LENGTH),
     checkIDs: z.array(z.string().min(1).max(LEAD_CHECK_ID_MAX_LENGTH)).max(LEAD_MAX_CHECK_IDS),
+    receiptIDs: z.array(z.string().min(1).max(128)).max(64).optional(),
   })
   .strict()
 
@@ -986,6 +989,13 @@ export function transitionLeadTask(input: LeadTransitionInput): LeadTransitionRe
       checkIDs: input.validation.checkIDs
         .slice(0, LEAD_MAX_CHECK_IDS)
         .map((check) => boundedBoardText(check, LEAD_CHECK_ID_MAX_LENGTH, input.secrets ?? [])),
+      ...(input.validation.receiptIDs !== undefined
+        ? {
+            receiptIDs: input.validation.receiptIDs
+              .slice(0, 64)
+              .map((receiptID) => boundedBoardText(receiptID, 128, input.secrets ?? [])),
+          }
+        : {}),
     }
     if (input.cursor !== undefined) next.cursor = boundedBoardCursor(input.cursor, input.secrets ?? [])
     if (input.evidence && input.evidence.length > 0) {

@@ -8,6 +8,7 @@ import {
   type D2Handoff,
 } from "../../core/contracts.js"
 import type { AdmissionState } from "../../core/admission.js"
+import { matchVerificationReceipts, type VerificationReceiptCandidate } from "../../core/verification.js"
 import { GENERATION_HINT_MAX_HINT_CHARS, newGenerationHint, type GenerationHintRecord } from "../observability/trace.js"
 import { redact as defaultRedact } from "../process/redact.js"
 
@@ -22,7 +23,7 @@ import { redact as defaultRedact } from "../process/redact.js"
  *   C6 semantics, C7 redaction) and maps the verdict to worker-failed /
  *   blocked-unknown / worker-passed.
  * - `orchestrator` independently repeats the worker checks, then adds the
- *   honest parent checks (O2 VCS comparison, O3 required-command re-run
+ *   honest parent checks (O2 VCS comparison, O3 plugin-observed command receipt
  *   limitation, O4 local evidence file existence, O5 foreign-file attribution,
  *   O6-O9 typed-authority unavailability) and maps the verdict to
  *   orchestrator-failed / blocked-unknown / review-pending / admitted.
@@ -78,6 +79,9 @@ export const HANDOFF_VALIDATION_INPUT_SCHEMA = z
     level: z.enum(HANDOFF_LEVELS),
     handoff: z.unknown(),
     contract: HANDOFF_CONTRACT_SCHEMA,
+    receiptIDs: z.array(z.string().min(1).max(128)).max(64).optional(),
+    revision: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).optional(),
+    minimumCompletedAt: z.number().finite().nonnegative().optional(),
   })
   .strict()
 
@@ -116,6 +120,10 @@ export type ValidationDeps = {
   realpath: (directory: string) => Promise<string | undefined>
   /** Redaction function for C7; defaults to the shared credential redactor. */
   redactFn?: (text: string) => string
+  /** Plugin-observed shell receipts; absent means the host/runtime cannot prove command execution. */
+  verificationReceipts?: (rootSessionID: string, receiptIDs?: readonly string[]) => Promise<readonly VerificationReceiptCandidate[]>
+  /** Configured orchestrator agent identity used for receipt provenance. */
+  orchestratorAgentID?: string
 }
 
 export const HANDOFF_CHECK_IDS = {
@@ -333,6 +341,41 @@ function checkCommands(handoff: D2Handoff, contract: HandoffContract): HandoffCh
   return pass(HANDOFF_CHECK_IDS.c4Commands, detail)
 }
 
+async function checkObservedCommands(
+  contract: HandoffContract,
+  receiptIDs: readonly string[] | undefined,
+  revision: string | undefined,
+  minimumCompletedAt: number | undefined,
+  deps: ValidationDeps,
+  leadSessionID: string,
+): Promise<HandoffCheck> {
+  if (contract.requiredCommands.length === 0) {
+    return pass(HANDOFF_CHECK_IDS.c4Commands, "the contract declares no required commands")
+  }
+  if (!deps.verificationReceipts || !deps.orchestratorAgentID) {
+    return blocked(HANDOFF_CHECK_IDS.c4Commands, "plugin-observed verification receipts are unavailable; caller-supplied command checks are not proof")
+  }
+  if (!revision) return blocked(HANDOFF_CHECK_IDS.c4Commands, "an exact head revision is required to match verification receipts")
+  let receipts: readonly VerificationReceiptCandidate[]
+  try {
+    receipts = await deps.verificationReceipts(leadSessionID, receiptIDs)
+  } catch {
+    return blocked(HANDOFF_CHECK_IDS.c4Commands, "plugin-observed verification receipts could not be read; caller-supplied command checks are not proof")
+  }
+  const matched = matchVerificationReceipts({
+    requiredCommands: contract.requiredCommands,
+    receiptIDs: receiptIDs ?? [],
+    receipts,
+    rootSessionID: leadSessionID,
+    orchestratorAgentID: deps.orchestratorAgentID,
+    revision,
+    ...(minimumCompletedAt !== undefined ? { minimumCompletedAt } : {}),
+  })
+  return matched.ok
+    ? pass(HANDOFF_CHECK_IDS.c4Commands, `matched ${matched.matched.length} plugin-observed verification receipt(s) at the exact revision`)
+    : blocked(HANDOFF_CHECK_IDS.c4Commands, `${matched.reason}; caller-supplied command checks are not proof`)
+}
+
 async function checkArtifacts(
   handoff: D2Handoff,
   deps: ValidationDeps,
@@ -416,14 +459,14 @@ function checkVcsMatch(
   return pass(HANDOFF_CHECK_IDS.o2Vcs, "declared changed files match the observed VCS state within the write scope")
 }
 
-function checkRerun(contract: HandoffContract): HandoffCheck {
+function checkRerun(contract: HandoffContract, observedCommands: HandoffCheck): HandoffCheck {
   if (contract.requiredCommands.length === 0) {
     return pass(HANDOFF_CHECK_IDS.o3Rerun, "the contract declares no required commands to re-run")
   }
-  return blocked(
-    HANDOFF_CHECK_IDS.o3Rerun,
-    "the pinned V2 API cannot re-run the required commands here; the parent must independently re-run them with its own tools before downstream use, and worker-declared passes are never upgraded",
-  )
+  if (observedCommands.verdict === "pass") {
+    return pass(HANDOFF_CHECK_IDS.o3Rerun, "the plugin-observed shell receipts are the lead's direct command verification")
+  }
+  return blocked(HANDOFF_CHECK_IDS.o3Rerun, "required commands have no matching plugin-observed receipt; worker-declared passes are never upgraded")
 }
 
 async function checkEvidenceFiles(
@@ -758,7 +801,7 @@ export async function validateHandoff(
     }
   }
 
-  const { level, handoff, contract } = parsedInput.data
+  const { level, handoff, contract, receiptIDs, revision, minimumCompletedAt } = parsedInput.data
   const checks: HandoffCheck[] = []
   const limitations: string[] = [
     "raw-transcript authenticity cannot be detected generically from D2 content; a passing result never proves a worker's transcript was honest",
@@ -776,7 +819,11 @@ export async function validateHandoff(
 
   checks.push(checkStatus(d2, contract))
   checks.push(checkScope(d2, contract))
-  checks.push(checkCommands(d2, contract))
+  const commandCheck =
+    level === "worker"
+      ? checkCommands(d2, contract)
+      : await checkObservedCommands(contract, receiptIDs, revision, minimumCompletedAt, deps, sessionID)
+  checks.push(commandCheck)
 
   const session = await deps.sessionLocation(sessionID)
   checks.push(await checkArtifacts(d2, deps, session))
@@ -802,15 +849,13 @@ export async function validateHandoff(
   // honest parent checks below. VCS is read once and shared by O2 and O5.
   observed = session ? await deps.vcsStatus(session.directory, session.workspaceID) : undefined
   checks.push(checkVcsMatch(d2, contract, observed, session))
-  checks.push(checkRerun(contract))
+  checks.push(checkRerun(contract, commandCheck))
   const evidenceFilesCheck = await checkEvidenceFiles(d2, deps, session)
   checks.push(evidenceFilesCheck)
   checks.push(checkForeignFiles(contract, observed, session))
   checks.push(checkAuthority(d2, evidenceFilesCheck.verdict))
 
-  if (contract.requiredCommands.length > 0) {
-    limitations.push("the parent must independently re-run the required commands with its own tools; this validator cannot run them")
-  }
+  if (contract.requiredCommands.length > 0) limitations.push("lead validation accepts only plugin-observed shell receipts matched to the exact revision; caller-supplied command checks remain diagnostic")
   limitations.push(
     "cross-task dependency/receipt attribution is unavailable; validation covers only this single receipt",
   )

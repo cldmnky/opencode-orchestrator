@@ -21,7 +21,7 @@ export const CAPABILITY_VOCABULARY = [
   "Never describe guidance or recorded state as observed or enforced.",
 ].join("\n")
 
-/** Current boundaries before provenance-bound receipts and dispatch admission land. */
+/** Current boundaries after shell receipts; reviewer provenance and dispatch admission remain separate phases. */
 export const CURRENT_CAPABILITY_STATEMENTS: readonly CapabilityStatement[] = [
   {
     id: "parallel-dispatch",
@@ -30,8 +30,8 @@ export const CURRENT_CAPABILITY_STATEMENTS: readonly CapabilityStatement[] = [
   },
   {
     id: "lead-command-checks",
-    level: "recorded",
-    statement: "lead command checks are recorded claims until plugin-observed shell receipts are available.",
+    level: "enforced",
+    statement: "lead validation refuses required commands unless plugin-observed shell receipts match the lead, exact revision, lifecycle, and freshness bounds; caller-supplied pass labels remain diagnostic.",
   },
   {
     id: "bounded-review-identity",

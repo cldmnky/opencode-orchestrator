@@ -40,6 +40,7 @@ import {
 import { goalStorageKey, readGoal, withSessionLock, type LocationLike, type StorageLike } from "../goal/state.js"
 import { readReviewRecord } from "../observability/runtime.js"
 import { validateApprovedReviewRevision } from "../observability/review.js"
+import { listVerificationReceipts } from "../verification/state.js"
 
 /**
  * Serialized runtime orchestration tools (orchestrator_task_complexity_classify,
@@ -305,6 +306,18 @@ function resolveValidationDeps(deps: OrchestrationToolsDeps): ValidationDeps {
     pathExists: deps.pathExists ?? defaultPathExists,
     realpath: deps.realpath ?? resolveRealpath,
     redactFn: deps.redact,
+    orchestratorAgentID: deps.options.orchestrator,
+    verificationReceipts: async (rootSessionID, receiptIDs) =>
+      (await listVerificationReceipts(deps.storage, deps.location, rootSessionID, receiptIDs)).map((receipt) => ({
+        receiptID: receipt.receiptID,
+        rootSessionID: receipt.rootSessionID,
+        sessionID: receipt.sessionID,
+        agentID: receipt.agentID,
+        commandDigest: receipt.commandDigest,
+        status: receipt.status,
+        completedAt: receipt.completedAt,
+        headSha: receipt.repository.headSha,
+      })),
   }
 }
 
@@ -602,6 +615,12 @@ async function transitionLeadBoardTool(
       if (!task.validation) {
         return boardRefusal("missing-validation", "completion requires a persisted lead validation on this lifecycle")
       }
+      if (task.validation.receiptIDs === undefined) {
+        return boardRefusal(
+          "missing-verification-receipts",
+          "this legacy validation has no plugin-observed receipt IDs; validate the task again before completion",
+        )
+      }
       const review = await readReviewRecord(deps.storage, deps.location, sessionID)
       const check = validateApprovedReviewRevision({
         record: review,
@@ -668,15 +687,13 @@ async function runBoardValidateTool(
   const contract = parseContractInput(recordField(input)?.contract)
   if (!contract) return boardRefusal("invalid-contract", "a strict D2 contract { taskId, writeScope, requiredCommands, reviewRequired } is required")
   if (contract.taskId !== taskID) return boardRefusal("contract-mismatch", "contract.taskId must equal the board task id")
-  const checks = parseCheckInput(recordField(input)?.checks)
+  const checksInput = recordField(input)?.checks
+  const checks = checksInput === undefined ? { ok: true as const, value: [] as Array<{ id: string; verdict: "pass" | "fail" }> } : parseCheckInput(checksInput)
   if (!checks.ok) return boardRefusal("invalid-checks", "checks must be an array of { id, verdict: pass|fail }")
-  if (checks.value.some((check) => check.verdict === "fail")) {
-    return boardRefusal("check-failed", "a supplied check failed; record request-changes or failed instead of validating")
-  }
-  for (const command of contract.requiredCommands) {
-    if (!checks.value.some((check) => check.id === command && check.verdict === "pass")) {
-      return boardRefusal("missing-command-rerun", "every required command needs a passing lead-run check entry")
-    }
+  if (checks.value.some((check) => check.verdict === "fail")) return boardRefusal("check-failed", "a supplied check failed; record request-changes or failed instead of validating")
+  const receiptIDs = arrayField(input, "receiptIDs")
+  if (contract.requiredCommands.length > 0 && receiptIDs.length === 0) {
+    return boardRefusal("missing-verification-receipts", "every required command needs plugin-observed receiptIDs; caller-supplied check verdicts are not proof")
   }
   const revision = stringField(input, "revision")
   if (!LEAD_SHA_PATTERN.test(revision)) {
@@ -698,13 +715,23 @@ async function runBoardValidateTool(
   const scopeIssue = validateContractScope(preTask, contract)
   if (scopeIssue) return boardRefusal("contract-scope", scopeIssue)
 
-  // The unchanged parent-side D2 validator runs in the lead context. Only the
-  // o3-rerun blocked-unknown (the pinned API cannot re-run commands) is
-  // tolerated, exactly because the caller-supplied checks above record the
-  // lead's own rerun results; any other failure or blocker refuses.
-  const result = await validateHandoff({ level: "orchestrator", handoff: recordField(input)?.handoff, contract }, validationDeps, sessionID)
+  // The parent-side D2 validator runs in the lead context. Required commands
+  // are accepted only when receipt IDs match plugin-observed shell calls at
+  // this task's exact revision; caller-supplied checks remain diagnostic.
+  const result = await validateHandoff(
+    {
+      level: "orchestrator",
+      handoff: recordField(input)?.handoff,
+      contract,
+      ...(receiptIDs.length > 0 ? { receiptIDs } : {}),
+      revision,
+      minimumCompletedAt: preTask.updatedAt,
+    },
+    validationDeps,
+    sessionID,
+  )
   const failures = result.checks.filter((check) => check.verdict === "fail")
-  const blockers = result.checks.filter((check) => check.verdict === "blocked-unknown" && check.id !== HANDOFF_CHECK_IDS.o3Rerun)
+  const blockers = result.checks.filter((check) => check.verdict === "blocked-unknown")
   if (failures.length > 0 || blockers.length > 0) {
     return boardRefusal("validation-failed", "the unchanged D2 validator did not pass in the lead context", {
       checks: [...failures, ...blockers].slice(0, 8).map((check) => `${check.id}:${check.verdict}`),
@@ -718,6 +745,7 @@ async function runBoardValidateTool(
     validatedAt: Date.now(),
     revision,
     checkIDs,
+    receiptIDs,
   }
 
   // Locked re-check + persist: a concurrent writer that moved the task is a
@@ -755,17 +783,17 @@ async function completeLeadBoardTool(
   const expectedRevision = numberField(input, "expectedBoardRevision")
   const revision = stringField(input, "revision")
   const contract = parseContractInput(recordField(input)?.contract)
-  const checks = parseCheckInput(recordField(input)?.checks)
+  const checksInput = recordField(input)?.checks
+  const checks = checksInput === undefined ? { ok: true as const, value: [] as Array<{ id: string; verdict: "pass" | "fail" }> } : parseCheckInput(checksInput)
   if (expectedRevision === undefined || !LEAD_SHA_PATTERN.test(revision) || !contract || !checks.ok) {
-    return boardRefusal("invalid-input", "expectedBoardRevision, an exact revision SHA, a strict contract, and checks are required")
+    return boardRefusal("invalid-input", "expectedBoardRevision, an exact revision SHA, and a strict contract are required")
   }
   if (checks.value.some((check) => check.verdict === "fail")) {
     return boardRefusal("check-failed", "a supplied check failed; the board cannot complete")
   }
-  for (const command of contract.requiredCommands) {
-    if (!checks.value.some((check) => check.id === command && check.verdict === "pass")) {
-      return boardRefusal("missing-command-rerun", "every required command needs a passing lead-run check entry")
-    }
+  const receiptIDs = arrayField(input, "receiptIDs")
+  if (contract.requiredCommands.length > 0 && receiptIDs.length === 0) {
+    return boardRefusal("missing-verification-receipts", "every required command needs plugin-observed receiptIDs; caller-supplied check verdicts are not proof")
   }
   const pre = await readBoard(deps, sessionID)
   if (pre.status !== "ok") return boardRefusal(pre.status, `no usable board: ${pre.status}`)
@@ -778,9 +806,19 @@ async function completeLeadBoardTool(
   if (contract.taskId !== pre.board.boardID) {
     return boardRefusal("contract-mismatch", "the aggregate contract taskId must equal the board id")
   }
-  const result = await validateHandoff({ level: "orchestrator", handoff: recordField(input)?.handoff, contract }, validationDeps, sessionID)
+  const result = await validateHandoff(
+    {
+      level: "orchestrator",
+      handoff: recordField(input)?.handoff,
+      contract,
+      ...(receiptIDs.length > 0 ? { receiptIDs } : {}),
+      revision,
+    },
+    validationDeps,
+    sessionID,
+  )
   const failures = result.checks.filter((check) => check.verdict === "fail")
-  const blockers = result.checks.filter((check) => check.verdict === "blocked-unknown" && check.id !== HANDOFF_CHECK_IDS.o3Rerun)
+  const blockers = result.checks.filter((check) => check.verdict === "blocked-unknown")
   if (failures.length > 0 || blockers.length > 0) {
     return boardRefusal("validation-failed", "the aggregate D2 verification did not pass in the lead context", {
       checks: [...failures, ...blockers].slice(0, 8).map((check) => `${check.id}:${check.verdict}`),
@@ -1001,6 +1039,9 @@ const validateInput = {
       required: ["taskId", "writeScope", "requiredCommands", "reviewRequired"],
       additionalProperties: false,
     },
+    receiptIDs: { type: "array", maxItems: 64, items: { type: "string", minLength: 1, maxLength: 128 } },
+    revision: { type: "string", pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    minimumCompletedAt: { type: "number", minimum: 0 },
   },
   required: ["level", "handoff", "contract"],
   additionalProperties: false,
@@ -1158,6 +1199,7 @@ const boardTransitionInput = {
     note: { type: "string", maxLength: 512 },
     cursor: { type: "string", maxLength: 512 },
     revision: { type: "string", maxLength: 512 },
+    receiptIDs: { type: "array", maxItems: 64, items: { type: "string", minLength: 1, maxLength: 128 } },
     handoff: { type: "object" },
     contract: boardHandoffContractJsonSchema,
     checks: boardChecksJsonSchema,
@@ -1172,10 +1214,11 @@ const boardCompleteInput = {
   properties: {
     expectedBoardRevision: { type: "number", minimum: 1 },
     revision: { type: "string", maxLength: 512 },
+    receiptIDs: { type: "array", maxItems: 64, items: { type: "string", minLength: 1, maxLength: 128 } },
     handoff: { type: "object" },
     contract: boardHandoffContractJsonSchema,
     checks: boardChecksJsonSchema,
   },
-  required: ["expectedBoardRevision", "revision", "handoff", "contract", "checks"],
+  required: ["expectedBoardRevision", "revision", "handoff", "contract"],
   additionalProperties: false,
 } as const

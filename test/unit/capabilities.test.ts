@@ -34,7 +34,7 @@ describe("capability vocabulary", () => {
     for (const prompt of prompts) {
       expect(prompt).toContain("Capability vocabulary:")
       expect(prompt).toContain("parallel-dispatch (guidance)")
-      expect(prompt).toContain("lead-command-checks (recorded)")
+      expect(prompt).toContain("lead-command-checks (enforced)")
       expect(prompt).toContain("bounded-review-identity (recorded)")
       expect(prompt).not.toMatch(/runtime concurrency cap/i)
       expect(prompt).not.toMatch(/reviewer[- ]proven/i)

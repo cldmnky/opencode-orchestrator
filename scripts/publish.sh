@@ -30,17 +30,20 @@ VERSION="$(node -p "require('./package.json').version")"
 TAG="v${VERSION}"
 echo "==> Publishing opencode-v2-agent-orchestrator@${VERSION} (tag ${TAG})"
 
-echo "==> 1/5 typecheck"
+echo "==> 1/6 typecheck"
 bun run typecheck
 
-echo "==> 2/5 test"
+echo "==> 2/6 test"
 bun test
 
-echo "==> 3/5 build"
+echo "==> 3/6 build"
 bun run build
 ls -lh dist/index.js dist/tui.js dist/commands.js dist/installer.js dist/cli/index.js
 
-echo "==> 4/5 npm pack --dry-run"
+echo "==> 4/6 packed-package smoke test"
+bun run scripts/package-smoke.ts
+
+echo "==> 5/6 npm pack --dry-run"
 npm pack --dry-run
 
 echo "==> Verify npm auth"
@@ -62,7 +65,7 @@ fi
 echo "   tarball: ${TARBALL} ($(du -h "${TARBALL}" | cut -f1))"
 
 # Publish
-echo "==> 5/5 npm publish (YubiKey touch or interactive OTP may be required)"
+echo "==> 6/6 npm publish (YubiKey touch or interactive OTP may be required)"
 if npm publish; then
   echo "   npm publish succeeded"
 else
@@ -117,7 +120,7 @@ Release ${TAG}
 
 ${LOG}
 
-Verified: bun run typecheck, bun test, bun run build
+Verified: bun run typecheck, bun test, bun run build, packed-package smoke
 
 Install:
 \`\`\`sh

@@ -16,10 +16,10 @@ items are checked only after their production behavior and tests are merged.
 - [x] Phase 7 model-visible surface reduction and D4 v2 removal.
 - [x] Phase 8 installer migration, live doctor, and state recovery.
 - [x] Phase 9 read-only orchestration progress RPC/TUI.
-- [ ] Phase 10 declarations, package API, and bundle cleanup.
-- [ ] Phase 11 final documentation and release verification.
+- [x] Phase 10 declarations, package API, and bundle cleanup.
+- [x] Phase 11 final documentation and release verification.
 
-The current branch implements the first eight foundational slices. Phase 3
+The current branch implements all eleven slices. Phase 3
 measured the pinned beta-19507 shell hook, added bounded plugin-observed
 receipts, and replaced lead command-proof claims with exact-revision receipt
 matching. Phase 4 binds new review approvals to the configured reviewer agent
@@ -42,6 +42,12 @@ and worktree families enabled to 23, and the default configuration exposes
 eight always-on orchestrator tools. Goal, board, and status families now use
 canonical action/mode variants; issue tools, generation hints, D4 v2, and the
 removed slash commands are documented with their replacements or boundaries.
+Phase 9 adds a bounded read-only progress projection over the server/TUI RPC
+boundary. Phase 10 publishes declarations for the supported package
+entrypoints, narrows the root API, centralizes beta compatibility casts, and
+verifies packed dependency resolution. Phase 11 moves the architectural,
+enforcement, migration, and release guidance into linked documents and removes
+stale demo-asset references from the README.
 
 ## Purpose
 

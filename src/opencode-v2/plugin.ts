@@ -27,6 +27,7 @@ import { createSessionMoveCoordinator } from "./session/move-coordinator.js"
 import { createWorkerModelRuntime, type WorkerModelRuntime } from "./worker-models/runtime.js"
 import { startVerificationRuntime } from "./verification/runtime.js"
 import { addVerificationTools } from "./verification/tools.js"
+import { startDispatchAdmission } from "./dispatch/runtime.js"
 import { redact } from "./process/redact.js"
 import { DISTRIBUTION_NAME, RUNTIME_PLUGIN_ID } from "../core/package-identity.js"
 
@@ -125,6 +126,14 @@ export const orchestratorPlugin = (Plugin.define as any)({
       )
 
       registrations.push(
+        await startDispatchAdmission({
+          options,
+          session: ctx.session,
+          tool: ctx.tool,
+        }),
+      )
+
+      registrations.push(
         await ctx.agent.transform((draft) => {
           applyAgentTransform(draft, options, workerModels.overrides)
         }),
@@ -213,7 +222,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
             type: "text",
             text: [
               `Runtime role map: planning=${options.roles.planning}; research=${options.roles.research}; implementation=${options.roles.implementation}; review=${options.roles.review}.`,
-              `Configured dispatch preference: max_parallel=${options.max_parallel} (guidance until runtime admission is available).`,
+              `Configured dispatch admission: max_parallel=${options.max_parallel} for configured-role subagent calls in this plugin process; it is not a scheduler or cross-process limit.`,
               "Delegate with the child-task contract: Task, Expected outcome, Scope/file ownership, Must do, Must not do, Verification, and handoff.",
               `Nested delegation is bounded to the role graph: ${delegationGraphSummary()}.`,
               "A delegating worker stays accountable for its children, and research never delegates.",

@@ -12,14 +12,14 @@ items are checked only after their production behavior and tests are merged.
 - [x] Phase 3 plugin-observed verification receipts and read-only receipt discovery.
 - [x] Phase 4 reviewer-child provenance and review V2.
 - [x] Phase 5 lead-board V2 and completion-chain migration.
-- [ ] Phase 6 runtime parallel dispatch admission (or documented host limitation).
+- [x] Phase 6 runtime parallel dispatch admission (with documented beta-19507 completion limitation).
 - [ ] Phase 7 model-visible surface reduction and D4 v2 removal.
 - [ ] Phase 8 installer migration, live doctor, and state recovery.
 - [ ] Phase 9 read-only orchestration progress RPC/TUI.
 - [ ] Phase 10 declarations, package API, and bundle cleanup.
 - [ ] Phase 11 final documentation and release verification.
 
-The current branch implements the first five foundational slices. Phase 3
+The current branch implements the first six foundational slices. Phase 3
 measured the pinned beta-19507 shell hook, added bounded plugin-observed
 receipts, and replaced lead command-proof claims with exact-revision receipt
 matching. Phase 4 binds new review approvals to the configured reviewer agent
@@ -29,6 +29,14 @@ host-contract findings and any item that remains advisory because beta-19507
 cannot provide the required provenance. Phase 5 makes `lead-board/v2` the
 runtime authority, migrates V1 state conservatively without upgrading proof,
 and binds review/verification decisions to the board lifecycle.
+Phase 6 measured the native `subagent` before/after hook boundary, proved that
+before-hook refusal prevents child creation, and made `max_parallel` a
+process-local per-root admission ceiling for configured-role dispatches. The
+runtime serializes same-root admission, releases entries on delivered after
+events, bounds its in-memory tables, and clears them on disposal. The pinned
+probe does not establish a bounded parent completion guarantee when a child
+provider fails or is cancelled, so the implementation does not claim one; it
+releases on any host after event and documents the unsupported path.
 
 ## Purpose
 
@@ -666,6 +674,15 @@ presented as cross-process guarantees.
 ### Objective
 
 Turn `max_parallel` into a real process-local limit at the native subagent tool boundary without claiming a native autonomous scheduler.
+
+### Implementation status
+
+Complete in this phase: `test/contract/phase-f-subagent-hooks.test.ts` records
+the pinned host identity and refusal behavior; `src/opencode-v2/dispatch/runtime.ts`
+enforces same-root admission for configured-role calls; and the README, policy,
+capability vocabulary, and hook contract distinguish admission from scheduling,
+cross-process coordination, and isolation. Child failure/cancellation is not
+treated as proven unless beta-19507 delivers the corresponding after event.
 
 ### Contract probe
 

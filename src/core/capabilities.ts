@@ -21,12 +21,12 @@ export const CAPABILITY_VOCABULARY = [
   "Never describe guidance or recorded state as observed or enforced.",
 ].join("\n")
 
-/** Current boundaries after shell receipts and reviewer-child provenance; dispatch admission remains a later phase. */
+/** Current boundaries after shell receipts, reviewer-child provenance, and dispatch admission. */
 export const CURRENT_CAPABILITY_STATEMENTS: readonly CapabilityStatement[] = [
   {
     id: "parallel-dispatch",
-    level: "guidance",
-    statement: "max_parallel is an instructed dispatch ceiling, not a native dispatch coordinator or guaranteed runtime cap.",
+    level: "enforced",
+    statement: "max_parallel refuses excess configured-role subagent calls per root session in this plugin process; it is not a scheduler, cross-process limit, or filesystem boundary.",
   },
   {
     id: "lead-command-checks",

@@ -480,7 +480,7 @@ export function orchestrationRules(
   decompositionStrategy: DecompositionStrategy = "mvp",
 ): string {
   return [
-    `Treat max_parallel=${maxParallel} as an instructed dispatch ceiling; it is not a native dispatch coordinator or guaranteed runtime cap yet.`,
+    `max_parallel=${maxParallel} is enforced for configured-role subagent calls per root session in this plugin process; it is not a scheduler or cross-process limit.`,
     "Route by the configured semantic role map, never by model name.",
     DELEGATION_GRAPH_GUIDANCE,
     "Explore before planning when repository facts are unknown.",

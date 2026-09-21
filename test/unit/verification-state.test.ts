@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { createLeadBoard, leadBoardStorageKey } from "../../src/opencode-v2/orchestration/lead-board.js"
+import { createLeadBoardV2, leadBoardV2StorageKey } from "../../src/opencode-v2/orchestration/lead-board-v2.js"
 import {
   activeBoardVerificationReceiptIDs,
   evictVerificationReceipts,
@@ -59,14 +60,22 @@ describe("verification receipt state", () => {
       validation: { leadSessionID: rootSessionID, validatedAt: 1, revision: headSha, checkIDs: ["c4:pass"], receiptIDs: ["receipt-0"] },
     }
     values.set(leadBoardStorageKey(location, rootSessionID), board)
+    const v2Board = createLeadBoardV2({ projectID: "project", leadSessionID: rootSessionID, goalGeneration: 2, objective: "test v2", now: 2 })
+    v2Board.tasks[0] = {
+      ...v2Board.tasks[0]!,
+      status: "awaiting-validation",
+      validation: { actorSessionID: rootSessionID, validatedAt: 2, revision: headSha, checkIDs: ["c4:pass"], receiptIDs: ["receipt-1"] },
+    }
+    values.set(leadBoardV2StorageKey(location, rootSessionID), v2Board)
     const deps = storage(values)
     const protectedIDs = await activeBoardVerificationReceiptIDs(deps, location, rootSessionID)
-    expect(protectedIDs).toEqual(new Set(["receipt-0"]))
+    expect(protectedIDs).toEqual(new Set(["receipt-0", "receipt-1"]))
     await evictVerificationReceipts(deps, location, rootSessionID, protectedIDs)
     const receipts = await listVerificationReceipts(deps, location, rootSessionID)
     expect(receipts).toHaveLength(64)
     expect(receipts.some((candidate) => candidate.receiptID === "receipt-0")).toBe(true)
-    expect(receipts.some((candidate) => candidate.receiptID === "receipt-1")).toBe(false)
+    expect(receipts.some((candidate) => candidate.receiptID === "receipt-1")).toBe(true)
+    expect(receipts.some((candidate) => candidate.receiptID === "receipt-2")).toBe(false)
   })
 
   test("retains all receipts when active-board state cannot be inspected", async () => {

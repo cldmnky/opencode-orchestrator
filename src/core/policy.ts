@@ -415,21 +415,21 @@ export const REMOTE_ORCHESTRATION_GUIDANCE = [
 /**
  * Explicit bounded maker-checker review flow, embedded only when
  * `review.mode === "bounded"`. It uses separate lead-start and
- * reviewer-submit V2 tools. The flow is callable and advisory: nothing is
- * gated automatically and a self-declared D2 reviewState is never trusted as
- * reviewer proof.
+ * reviewer-submit V2 tools. The review operations are callable, while the
+ * board/publication completion checks remain fail-closed; a self-declared D2
+ * reviewState is never trusted as reviewer proof.
  */
 export const BOUNDED_REVIEW_GUIDANCE = [
   "Bounded review mode is configured: run the explicit provenance-bound maker-checker flow.",
   "Validate the maker handoff with orchestrator_handoff_validate before review.",
-  "Reach admission state review-pending through orchestrator_admission_transition (orchestrator-pass with reviewRequired=true) before starting a review record.",
   "Start V2 with orchestrator_review_start from the lead session using taskId, runId, and the exact head/base SHAs.",
   "Delegate the configured reviewer child, then have that child call orchestrator_review_submit with its lead session, round, and one fixed decision.",
   "The submit tool derives reviewer agent/session identity from ToolContext and refuses orchestrator self-approval or unrelated sessions.",
   "V1 records are readable as legacy-unproven status only and never authorize publication or completion.",
-  "Map the review decision through orchestrator_admission_transition (review-approve, review-reject, or review-block).",
+  "Review start and submit apply the legal board intent transition internally; no separate admission transition call is required.",
   "Stop when the review record is blocked or tripped; do not keep dispatching the same run past a terminal breaker.",
-  "These tools are callable/advisory, not an automatic completion gate: nothing is gated automatically and a self-declared D2 reviewState is never reviewer proof.",
+  "The review tools are callable; board completion and publication still fail closed on missing, stale, or legacy proof.",
+  "Self-declared D2 reviewState is never reviewer proof.",
 ].join("\n")
 
 /**

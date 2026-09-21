@@ -10,7 +10,7 @@ from an unknown version.
 | Goal | `goal/v1/<project>/<session>` | 1 | `src/opencode-v2/goal/state.ts` | Read strictly; move to a future V2 record only through an explicit migration. |
 | Plan run | `run/v1/<project>/<session>` | 1 | `src/opencode-v2/goal/state.ts` | Preserve active/paused/complete lifecycle; archive malformed records. |
 | Halt | `halt/v1/<project>/<session>` | 1 | `src/opencode-v2/goal/state.ts` | Preserve stop intent; never clear during passive reads. |
-| Lead board | `lead-board/v1/<project>/<lead-session>` | 1 | `src/opencode-v2/orchestration/lead-board.ts` | V1 remains readable; V2 validation proof must be rebuilt from observed receipts. |
+| Lead board | `lead-board/v2/<project>/<lead-session>` (legacy `lead-board/v1/...`) | 2 | `src/opencode-v2/orchestration/lead-board-v2.ts` | V2 is the runtime authority. V1 is readable and migrates only through an explicit conservative path; validation/review proof is rebuilt from observed receipts and reviewer-child records. |
 | Step receipts | `step/v1/<project>/<session>/<index>` | 1 | `src/opencode-v2/orchestration/step-state.ts` | Bounded receipts are historical; malformed entries are unavailable. |
 | Review | `review/v1/<project>/<session>` | 1 | `src/opencode-v2/observability/review.ts` | V1 is read for status as `legacy-unproven`; caller-supplied maker/checker identity never authorizes publication or completion. |
 | Review V2 | `review/v2/<project>/<session>` | 2 | `src/opencode-v2/observability/review-v2.ts` | Current bounded review authority; approved records require exact head/base SHAs, fixed checks, and plugin-observed reviewer-child provenance. |

@@ -220,7 +220,10 @@ export const orchestratorPlugin = (Plugin.define as any)({
               "Parallel writes require an exact disjoint write scope from every child.",
               "Separate established facts from assumptions.",
               "Use orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update for session goal state.",
-              "Use orchestrator_lead_board_get, orchestrator_lead_board_init, orchestrator_lead_board_task_create, orchestrator_lead_board_task_assign, orchestrator_lead_board_transition, and orchestrator_lead_board_complete for the durable lead board; a delivered prompt, an idle edge, or a step receipt never completes a task.",
+              "Use orchestrator_lead_board_get, orchestrator_lead_board_init, orchestrator_lead_board_task_create, orchestrator_lead_board_task_assign, orchestrator_lead_board_transition, and orchestrator_lead_board_complete for the durable V2 lead board. Use intent actions report-task, validate-task, request-rework, mark-blocked, and reconcile-ambiguous; a delivered prompt never completes a task.",
+              ...(options.review.mode === "bounded"
+                ? ["After plugin-observed validation, start review directly with orchestrator_review_start; review start/submit apply legal board state internally and do not require orchestrator_admission_transition."]
+                : []),
               "Inspect or toggle the durable project-scoped publication capability with /publish (status|enable|disable).",
               "It is a capability toggle, not caller authentication.",
               "It never mutates Git or GitHub and never weakens the static github/worktree gates.",
@@ -260,18 +263,19 @@ export const orchestratorPlugin = (Plugin.define as any)({
                 : []),
               ...(options.publish.enabled ? [PUBLICATION_POLICY_GUIDANCE] : []),
               ...(options.github.enabled || options.publish.enabled ? [terminalDriveGuidance(options)] : []),
-               "Use orchestrator_task_complexity_classify as advisory, user-overridable guidance only.",
-               "Use orchestrator_verification_get after lead shell checks to discover bounded receipt IDs; pass those IDs, never caller-supplied pass labels, to lead validation.",
-               "Use orchestrator_handoff_validate (callable, not an automatic gate) before using a worker handoff downstream.",
+              "Use orchestrator_task_complexity_classify as advisory, user-overridable guidance only.",
+              "Use orchestrator_verification_get after lead shell checks to discover bounded receipt IDs; pass those IDs, never caller-supplied pass labels, to lead validation.",
+              "Use orchestrator_handoff_validate (callable, not an automatic gate) before using a worker handoff downstream.",
               "Use orchestrator_admission_transition (stateless) to track admission state.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
-               ...(options.review.mode === "bounded"
-                 ? [
-                     "Bounded review is enabled.",
-                      "Use orchestrator_review_get and orchestrator_review_start from the lead; delegate the configured reviewer child and have it call orchestrator_review_submit.",
-                      "V2 submit derives reviewer agent/session identity from ToolContext; V1 records are legacy-unproven and never publication or completion proof.",
-                     "Stop when the record is blocked or tripped.",
-                   ]
+              ...(options.review.mode === "bounded"
+                ? [
+                    "Bounded review is enabled.",
+                    "Use orchestrator_review_get and orchestrator_review_start from the lead; delegate the configured reviewer child and have it call orchestrator_review_submit.",
+                    "Review start and submit apply legal board state internally; no separate orchestrator_admission_transition call is required for the review flow.",
+                    "V2 submit derives reviewer agent/session identity from ToolContext; V1 records are legacy-unproven and never publication or completion proof.",
+                    "Stop when the record is blocked or tripped.",
+                  ]
                 : []),
               ...(options.budget.mode === "stop-between-steps"
                 ? [

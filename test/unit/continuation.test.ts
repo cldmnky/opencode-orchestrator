@@ -18,13 +18,13 @@ import {
 } from "../../src/opencode-v2/orchestration/step-state.js"
 import { startGoalContinuation } from "../../src/opencode-v2/goal/continuation.js"
 import {
-  createLeadBoard,
-  leadBoardStorageKey,
+  createLeadBoardV2 as createLeadBoard,
+  leadBoardV2StorageKey as leadBoardStorageKey,
   leadTaskStepIdempotencyKey,
-  parseLeadBoard,
-  type LeadBoard,
-  type LeadTask,
-} from "../../src/opencode-v2/orchestration/lead-board.js"
+  parseLeadBoardV2 as parseLeadBoard,
+  type LeadBoardV2 as LeadBoard,
+  type LeadTaskV2 as LeadTask,
+} from "../../src/opencode-v2/orchestration/lead-board-v2.js"
 import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
 
 // The runtime passes the parsed plugin options to the continuation prompt
@@ -1008,7 +1008,7 @@ describe("goal continuation", () => {
     expect(prompts[0]?.text).toContain("orchestrator_review_submit")
     expect(prompts[0]?.text).toContain("stop-between-steps budget mode is configured")
     expect(prompts[0]?.text).toContain("in-flight provider and tool calls are never interrupted")
-    expect(prompts[0]?.text).toContain("not an automatic completion gate")
+    expect(prompts[0]?.text).toContain("board completion and publication still fail closed")
     stop()
   })
 
@@ -1126,7 +1126,7 @@ describe("goal continuation", () => {
     expect(text).toContain("Read scope: (none)")
     expect(text).toContain("Write scope: (none)")
     expect(text).toContain("Dependencies: (none)")
-    expect(text).toContain("orchestrator_lead_board_transition")
+    expect(text).toContain("report-task")
     expect(text).toContain("never completes a task")
     expect(text).toContain("approved exact-revision review")
     expect(text.split("Board task packet").length - 1).toBe(1)
@@ -1445,7 +1445,7 @@ function scanningStorage(values: Map<string, unknown>): StorageLike {
 
 function leadTask(overrides: Partial<LeadTask> = {}): LeadTask {
   return {
-    version: 1,
+    version: 2,
     taskID: "root",
     title: "root task",
     owner: { sessionID: "session", role: "lead" },

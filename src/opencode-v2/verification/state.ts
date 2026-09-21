@@ -2,6 +2,7 @@ import { z } from "zod"
 import { VERIFICATION_DIGEST_PATTERN, VERIFICATION_LABEL_MAX_LENGTH } from "../../core/verification.js"
 import { stableProjectID, type LocationLike, type StorageLike } from "../goal/state.js"
 import { leadBoardProjectPrefix, parseLeadBoard } from "../orchestration/lead-board.js"
+import { leadBoardV2ProjectPrefix, parseLeadBoardV2 } from "../orchestration/lead-board-v2.js"
 
 export const VERIFICATION_RECORD_VERSION = 1
 export const VERIFICATION_MAX_RECEIPTS_PER_SESSION = 64
@@ -145,9 +146,11 @@ export async function evictVerificationReceipts(
 }
 
 /**
- * Returns receipt IDs referenced by active V1 lead-board validations. An
- * unavailable scan or malformed board is `undefined`, which tells eviction to
- * retain every receipt rather than risk deleting active proof.
+ * Returns receipt IDs referenced by active lead-board validations. Both the
+ * current V2 record and a readable legacy V1 record are retained while the
+ * migration remains explicit. An unavailable scan or malformed board is
+ * `undefined`, which tells eviction to retain every receipt rather than risk
+ * deleting active proof.
  */
 export async function activeBoardVerificationReceiptIDs(
   storage: StorageLike,
@@ -157,25 +160,32 @@ export async function activeBoardVerificationReceiptIDs(
   const scan = storage.scan
   if (!scan) return undefined
   const projectID = await verificationKeyedProjectID(storage, location, rootSessionID)
-  const prefix = leadBoardProjectPrefix(projectID)
   const receiptIDs = new Set<string>()
-  let after: string | undefined
   try {
-    for (let page = 0; page < 8; page += 1) {
-      const result = await scan({ prefix, ...(after ? { after } : {}), limit: 128 })
-      for (const entry of result.entries) {
-        const board = parseLeadBoard(entry.value)
-        if (!board) return undefined
-        if (board.status !== "active" || board.leadSessionID !== rootSessionID) continue
-        for (const task of board.tasks) {
-          for (const receiptID of task.validation?.receiptIDs ?? []) receiptIDs.add(receiptID)
+    for (const family of ["v2", "v1"] as const) {
+      const prefix = family === "v2" ? leadBoardV2ProjectPrefix(projectID) : leadBoardProjectPrefix(projectID)
+      let after: string | undefined
+      let exhausted = false
+      for (let page = 0; page < 8; page += 1) {
+        const result = await scan({ prefix, ...(after ? { after } : {}), limit: 128 })
+        for (const entry of result.entries) {
+          const board = family === "v2" ? parseLeadBoardV2(entry.value) : parseLeadBoard(entry.value)
+          if (!board) return undefined
+          if (board.status !== "active" || board.leadSessionID !== rootSessionID) continue
+          for (const task of board.tasks) {
+            for (const receiptID of task.validation?.receiptIDs ?? []) receiptIDs.add(receiptID)
+          }
         }
+        if (!result.next) {
+          exhausted = true
+          break
+        }
+        after = result.next
       }
-      if (!result.next) return receiptIDs
-      after = result.next
+      if (!exhausted) return undefined
     }
+    return receiptIDs
   } catch {
     return undefined
   }
-  return undefined
 }

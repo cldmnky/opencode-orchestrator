@@ -20,12 +20,12 @@ import {
 import { GENERATION_HINT_MAX_HINT_CHARS, type GenerationHintRecord } from "../../src/opencode-v2/observability/trace.js"
 import { createRedactor } from "../../src/opencode-v2/process/redact.js"
 import {
-  createLeadBoard,
-  leadBoardStorageKey,
+  createLeadBoardV2 as createLeadBoard,
+  leadBoardV2StorageKey as leadBoardStorageKey,
   leadTaskStepIdempotencyKey,
-  parseLeadBoard,
-  type LeadBoard,
-} from "../../src/opencode-v2/orchestration/lead-board.js"
+  parseLeadBoardV2 as parseLeadBoard,
+  type LeadBoardV2 as LeadBoard,
+} from "../../src/opencode-v2/orchestration/lead-board-v2.js"
 import { reviewV2StorageKey, type ReviewV2Record } from "../../src/opencode-v2/observability/review-v2.js"
 import { goalStorageKey } from "../../src/opencode-v2/goal/state.js"
 import { verificationCommandDigest } from "../../src/core/verification.js"
@@ -1458,7 +1458,7 @@ function seedGoal(values: Map<string, unknown>, generation = 10, status = "activ
 
 function boardTask(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    version: 1,
+    version: 2,
     taskID: "t1",
     title: "task one",
     owner: { sessionID: "session-1", role: "lead" },
@@ -1632,14 +1632,14 @@ describe("lead board tools", () => {
     const tools = collect({ storage: memStorage(values) })
     const orchestrator = toolContext("session-1", "orchestrator")
     const missingEvidence = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 4, action: "report" }, orchestrator)).content,
+      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 4, action: "report-task" }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(missingEvidence.reason).toBe("missing-evidence")
     const reported = JSON.parse(
       (await tools
         .get("lead_board_transition")!
         .execute(
-          { taskID: "t1", expectedVersion: 4, action: "report", evidence: [{ kind: "command", reference: "bun test", description: "green" }] },
+          { taskID: "t1", expectedVersion: 4, action: "report-task", evidence: [{ kind: "command", reference: "bun test", description: "green" }] },
           orchestrator,
         )).content,
     ) as Record<string, unknown>
@@ -1715,7 +1715,7 @@ describe("lead board tools", () => {
         boardTask({
           status: "awaiting-review",
           lifecycleVersion: 6,
-          validation: { leadSessionID: "session-1", validatedAt: 3, revision: HEAD_SHA, checkIDs: ["c1-structure:pass"], receiptIDs: [] },
+          validation: { actorSessionID: "session-1", validatedAt: 3, revision: HEAD_SHA, checkIDs: ["c1-structure:pass"], receiptIDs: [] },
         }),
       ] as never,
     })
@@ -1769,7 +1769,21 @@ describe("lead board tools", () => {
     const incomplete = JSON.parse((await tools.get("lead_board_complete")!.execute(request, orchestrator)).content) as Record<string, unknown>
     expect(incomplete.reason).toBe("board-incomplete")
 
-    seedBoard(values, { tasks: [boardTask({ status: "completed" })] as never })
+    seedBoard(values, {
+      tasks: [
+        boardTask({
+          status: "completed",
+          validation: { actorSessionID: "session-1", validatedAt: 3, revision: HEAD_SHA, checkIDs: ["c1-structure:pass"], receiptIDs: [] },
+          review: {
+            reference: "review/v2/t1/r1",
+            revision: HEAD_SHA,
+            baseRevision: BASE_SHA,
+            approvedAt: 4,
+            reviewVersion: 2,
+          },
+        }),
+      ] as never,
+    })
     const contractMismatch = JSON.parse(
       (await tools.get("lead_board_complete")!.execute({ ...request, contract: contract({ taskId: "other", writeScope: [], requiredCommands: [], reviewRequired: true }) }, orchestrator)).content,
     ) as Record<string, unknown>
@@ -1795,7 +1809,21 @@ describe("lead board tools", () => {
     const pausedValues = new Map<string, unknown>()
     seedGoal(pausedValues, 10, "paused")
     seedReview(pausedValues)
-    const pausedBoard = seedBoard(pausedValues, { tasks: [boardTask({ status: "completed" })] as never })
+    const pausedBoard = seedBoard(pausedValues, {
+      tasks: [
+        boardTask({
+          status: "completed",
+          validation: { actorSessionID: "session-1", validatedAt: 3, revision: HEAD_SHA, checkIDs: ["c1-structure:pass"], receiptIDs: [] },
+          review: {
+            reference: "review/v2/t1/r1",
+            revision: HEAD_SHA,
+            baseRevision: BASE_SHA,
+            approvedAt: 4,
+            reviewVersion: 2,
+          },
+        }),
+      ] as never,
+    })
     const pausedTools = collect({ storage: memStorage(pausedValues), vcs: vcsReturning([]) })
     const paused = JSON.parse(
       (await pausedTools.get("lead_board_complete")!.execute({ ...request, expectedBoardRevision: pausedBoard.boardRevision }, orchestrator)).content,

@@ -11,11 +11,7 @@ import {
   type StorageLike,
   type GoalRecord,
 } from "./state.js"
-import {
-  createLeadBoard,
-  hydrateLeadBoard,
-  writeLeadBoard,
-} from "../orchestration/lead-board.js"
+import { createLeadBoardV2, hydrateLeadBoardV2, writeLeadBoardV2 } from "../orchestration/lead-board-v2.js"
 import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 
 type ToolDraftLike = {
@@ -62,13 +58,15 @@ export function addGoalTools(
         // planned root task. A board write failure leaves the goal on the
         // legacy board-missing path, never a synthesized ledger.
         try {
-          const board = createLeadBoard({
+          const hydration = await hydrateLeadBoardV2(storage, location, tool.sessionID)
+          if (hydration.status === "unavailable") return result(JSON.stringify(goal))
+          const board = createLeadBoardV2({
             projectID,
             leadSessionID: tool.sessionID,
             goalGeneration: goal.createdAt,
             objective: goal.objective,
           })
-          await writeLeadBoard(storage, stableLocation, board)
+          await writeLeadBoardV2(storage, stableLocation, board)
         } catch {
           // Reported by the goal record itself; the board can be re-enrolled
           // explicitly with orchestrator_lead_board_init.
@@ -106,9 +104,12 @@ export function addGoalTools(
         // exact-revision review). A missing board keeps the legacy path; an
         // unavailable/malformed board fails closed.
         if (status === "complete") {
-          const hydration = await hydrateLeadBoard(storage, location, tool.sessionID, { goalGeneration: goal.createdAt })
+          const hydration = await hydrateLeadBoardV2(storage, location, tool.sessionID, { goalGeneration: goal.createdAt })
           if (hydration.status === "unavailable") {
             return result("completion refused: the lead board is unavailable; repair or re-init it first")
+          }
+          if (hydration.status === "legacy") {
+            return result("completion refused: the lead board is still V1; migrate it with orchestrator_lead_board_init first")
           }
           if (hydration.status === "ok" && hydration.board?.status !== "complete") {
             return result("completion refused: complete the lead board with orchestrator_lead_board_complete first")

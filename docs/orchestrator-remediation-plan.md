@@ -11,7 +11,7 @@ items are checked only after their production behavior and tests are merged.
 - [x] Phase 2 capability vocabulary and initial claim/prompt alignment.
 - [x] Phase 3 plugin-observed verification receipts and read-only receipt discovery.
 - [x] Phase 4 reviewer-child provenance and review V2.
-- [ ] Phase 5 lead-board V2 and completion-chain migration.
+- [x] Phase 5 lead-board V2 and completion-chain migration.
 - [ ] Phase 6 runtime parallel dispatch admission (or documented host limitation).
 - [ ] Phase 7 model-visible surface reduction and D4 v2 removal.
 - [ ] Phase 8 installer migration, live doctor, and state recovery.
@@ -19,14 +19,16 @@ items are checked only after their production behavior and tests are merged.
 - [ ] Phase 10 declarations, package API, and bundle cleanup.
 - [ ] Phase 11 final documentation and release verification.
 
-The current branch implements the first four foundational slices. Phase 3
+The current branch implements the first five foundational slices. Phase 3
 measured the pinned beta-19507 shell hook, added bounded plugin-observed
 receipts, and replaced lead command-proof claims with exact-revision receipt
 matching. Phase 4 binds new review approvals to the configured reviewer agent
 and verified child-session ancestry; legacy V1 records remain status-only and
 are reported as `legacy-unproven`. Later status updates will record exact
 host-contract findings and any item that remains advisory because beta-19507
-cannot provide the required provenance.
+cannot provide the required provenance. Phase 5 makes `lead-board/v2` the
+runtime authority, migrates V1 state conservatively without upgrading proof,
+and binds review/verification decisions to the board lifecycle.
 
 ## Purpose
 
@@ -632,6 +634,30 @@ Board completion requires:
 - The happy path requires fewer model-visible calls than today.
 - Board completion and publication share the same receipt validators.
 - A stale revision invalidates both verification and review without partial completion.
+
+### Progress
+
+Phase 5 adds the strict `lead-board/v2` record with exact validation revisions,
+plugin-observed receipt IDs, validation timestamps, ToolContext-derived lead
+actors, and V2 review references. The pure V1 migration preserves safe
+nonterminal lifecycle states, moves unproven validation/completion work to
+`awaiting-validation`, keeps fully completed goals readable as historical, and
+never upgrades V1 proof. Malformed records and invalid task graphs remain
+unavailable. `lead_board_init`, `/run-plan`, and goal enrollment use the
+explicit migration boundary; continuation, task tools, pause/cleanup, and
+completion now read/write only V2 records.
+
+Review start/submit now applies the legal board intent transition internally,
+so the happy path does not require a separate admission-transition call. Board
+completion rechecks the goal generation, board revision, exact task head/base
+proof, aggregate observed receipts, and the approved V2 review under the
+session lock. The model-facing board surface now names intent actions such as
+`report-task`, `validate-task`, `request-rework`, `mark-blocked`, and
+`reconcile-ambiguous`; direct lifecycle aliases remain only for serialized
+compatibility. Review/board persistence rolls back on a write failure, and V1
+review records remain `legacy-unproven`. The remaining process-local storage
+and non-transactional limitations are unchanged and are deliberately not
+presented as cross-process guarantees.
 
 ---
 

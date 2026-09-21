@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test"
 import { parseOptions } from "../../src/core/config.js"
 import { GOAL_TOOL_PERMISSION, PEER_TOOL_PERMISSION, PUBLISH_TOOL_PERMISSION } from "../../src/core/permissions.js"
 import { addGoalTools } from "../../src/opencode-v2/goal/tools.js"
-import { completeLeadBoard, leadBoardStorageKey, parseLeadBoard } from "../../src/opencode-v2/orchestration/lead-board.js"
+import {
+  completeLeadBoardV2,
+  leadBoardV2StorageKey as leadBoardStorageKey,
+  parseLeadBoardV2 as parseLeadBoard,
+} from "../../src/opencode-v2/orchestration/lead-board-v2.js"
 import { addPeerTools } from "../../src/opencode-v2/peers/tools.js"
 import { addPublishTools } from "../../src/opencode-v2/publish/tools.js"
 import {
@@ -197,7 +201,43 @@ describe("goal tools", () => {
     // Once the board itself is complete, goal_update operates on the
     // origin-keyed record.
     const board = parseLeadBoard(values.get(boardKey))!
-    values.set(boardKey, completeLeadBoard(board, { revision: "a".repeat(40), reviewReference: "review/1/1" }))
+    const revision = "a".repeat(40)
+    const baseRevision = "b".repeat(40)
+    const completedTask = {
+      ...board.tasks[0]!,
+      status: "completed" as const,
+      lifecycleVersion: board.tasks[0]!.lifecycleVersion + 1,
+      validation: {
+        actorSessionID: sessionID,
+        validatedAt: 2,
+        revision,
+        checkIDs: ["c1-structure:pass"],
+        receiptIDs: [],
+      },
+      review: {
+        reference: "review/v2/t1/r1",
+        revision,
+        baseRevision,
+        approvedAt: 3,
+        reviewVersion: 2 as const,
+      },
+    }
+    const ready = {
+      ...board,
+      tasks: [completedTask],
+      boardRevision: board.boardRevision + 1,
+    }
+    values.set(
+      boardKey,
+      completeLeadBoardV2(ready, {
+        revision,
+        baseRevision,
+        reviewReference: "review/v2/t1/r1",
+        validationActorSessionID: sessionID,
+        receiptIDs: [],
+        evidence: [],
+      }),
+    )
     const updated = await tools
       .get("goal_update")!
       .execute({ status: "complete", evidence: "verified by tests" }, toolContext(sessionID, "orchestrator"))

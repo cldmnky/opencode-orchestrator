@@ -13,30 +13,32 @@ import {
   LEAD_MAX_CHECK_IDS,
   LEAD_ROLES,
   LEAD_SHA_PATTERN,
-  assignLeadTaskOwner,
-  boardCompletionEligible,
-  boardUnfinishedTasks,
+  assignLeadTaskOwnerV2,
+  boardCompletionEligibleV2,
+  boardCompletionRevisionIssuesV2,
+  boardUnfinishedTasksV2,
   boundedBoardText,
-  completeLeadBoard,
-  createLeadBoard,
-  createLeadTask,
-  hydrateLeadBoard,
-  leadBoardKeyedLocation,
-  leadBoardStorageKey,
+  completeLeadBoardV2,
+  createLeadBoardV2,
+  createLeadTaskV2,
+  hydrateLeadBoardV2,
+  leadBoardV2KeyedLocation,
+  leadBoardV2StorageKey,
+  migrateLeadBoardV1Storage,
   normalizeEvidenceRef,
   normalizeScopePacket,
-  parseLeadBoard,
+  parseLeadBoardV2,
   parseReplayDescriptor,
-  projectLeadBoard,
-  transitionLeadTask,
-  writeLeadBoard,
+  projectLeadBoardV2,
+  transitionLeadTaskV2,
+  writeLeadBoardV2,
   type EvidenceRef,
-  type LeadBoard,
+  type LeadBoardV2 as LeadBoard,
   type LeadRole,
-  type LeadTask,
-  type LeadTaskValidation,
+  type LeadTaskV2 as LeadTask,
+  type LeadTaskValidationV2 as LeadTaskValidation,
   type LeadTransitionAction,
-} from "./lead-board.js"
+} from "./lead-board-v2.js"
 import { goalStorageKey, readGoal, withSessionLock, type LocationLike, type StorageLike } from "../goal/state.js"
 import { readReviewRecord, readReviewRecordV2 } from "../observability/runtime.js"
 import { validateApprovedReviewV2Revision } from "../observability/review-v2.js"
@@ -216,7 +218,7 @@ export function addOrchestrationTools(draft: ToolDraftLike, deps: OrchestrationT
   draft.add({
     name: "lead_board_transition",
     description:
-      "Apply one lead-only lifecycle transition to a board task with the task id and its expected lifecycle version. Actions: ready, reserve, deliver, report, fail, ambiguous, validate, complete, request-changes, block, requeue, adopt, reconcile, record-replay. validate runs the unchanged D2 validator (orchestrator level) on the unchanged envelope and records bounded check identities + revision; complete additionally requires an approved exact-revision review for the same revision. Workers are rejected; worker-reported completion is never accepted as completion.",
+      "Apply one lead-only task intent with the task id and expected lifecycle version. Use report-task, validate-task, request-rework, mark-blocked, reconcile-ambiguous, requeue-task, or record-replay; the plugin selects the legal lifecycle edge. validate-task uses the unchanged D2 envelope and observed receipt IDs; reviewer submission completes approved tasks. Workers are rejected.",
     input: boardTransitionInput,
     options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
     execute: async (input, tool) => {
@@ -384,7 +386,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /* Lead board tool implementations (durable ledger, lead-only)         */
 /* ------------------------------------------------------------------ */
 
-const BOARD_TOOL_ACTIONS: readonly LeadTransitionAction[] = [
+const BOARD_INTENT_ACTIONS = [
+  "report-task",
+  "validate-task",
+  "request-rework",
+  "mark-blocked",
+  "reconcile-ambiguous",
+  "requeue-task",
+  "record-replay",
+] as const
+
+type BoardIntentAction = (typeof BOARD_INTENT_ACTIONS)[number]
+
+/** Direct action aliases remain accepted for serialized callers during migration. */
+const BOARD_LEGACY_ACTIONS: readonly LeadTransitionAction[] = [
   "ready",
   "report",
   "fail",
@@ -399,18 +414,33 @@ const BOARD_TOOL_ACTIONS: readonly LeadTransitionAction[] = [
   "record-replay",
 ]
 
+const BOARD_INTENT_TO_TRANSITION: Readonly<Record<Exclude<BoardIntentAction, "record-replay">, LeadTransitionAction>> = {
+  "report-task": "report",
+  "validate-task": "validate",
+  "request-rework": "request-changes",
+  "mark-blocked": "block",
+  "reconcile-ambiguous": "reconcile",
+  "requeue-task": "requeue",
+}
+
+function normalizeBoardAction(value: string): LeadTransitionAction | undefined {
+  if ((BOARD_LEGACY_ACTIONS as readonly string[]).includes(value)) return value as LeadTransitionAction
+  if (value === "record-replay") return "record-replay"
+  return BOARD_INTENT_TO_TRANSITION[value as Exclude<BoardIntentAction, "record-replay">]
+}
+
 type BoardRead =
   | { status: "ok"; board: LeadBoard; keyedLocation: LocationLike }
   | { status: "missing"; key: string }
   | { status: "unavailable"; key: string; issues: string[]; warning?: string }
 
 async function readBoard(deps: OrchestrationToolsDeps, sessionID: string): Promise<BoardRead> {
-  const hydration = await hydrateLeadBoard(deps.storage, deps.location, sessionID)
+  const hydration = await hydrateLeadBoardV2(deps.storage, deps.location, sessionID)
   if (hydration.status === "ok" && hydration.board) {
     return {
       status: "ok",
       board: hydration.board,
-      keyedLocation: await leadBoardKeyedLocation(deps.storage, deps.location, sessionID),
+      keyedLocation: await leadBoardV2KeyedLocation(deps.storage, deps.location, sessionID),
     }
   }
   if (hydration.status === "missing") return { status: "missing", key: hydration.key }
@@ -448,8 +478,8 @@ async function boardProjection(deps: OrchestrationToolsDeps, sessionID: string):
   }
   return {
     status: "ok",
-    key: leadBoardStorageKey(read.keyedLocation, sessionID),
-    board: projectLeadBoard(read.board),
+    key: leadBoardV2StorageKey(read.keyedLocation, sessionID),
+    board: projectLeadBoardV2(read.board),
     limitations: LEAD_BOARD_LIMITATIONS,
   }
 }
@@ -460,7 +490,7 @@ async function initLeadBoardTool(
   input: unknown,
 ): Promise<Record<string, unknown>> {
   return withSessionLock(deps.location, sessionID, async () => {
-    const keyedLocation = await leadBoardKeyedLocation(deps.storage, deps.location, sessionID)
+    const keyedLocation = await leadBoardV2KeyedLocation(deps.storage, deps.location, sessionID)
     const goal = await readGoal(deps.storage, goalStorageKey(keyedLocation, sessionID))
     if (!goal) {
       return boardRefusal("no-goal", "no goal is set for this session; set one with /goal first")
@@ -469,19 +499,48 @@ async function initLeadBoardTool(
     if (expected !== undefined && expected !== goal.createdAt) {
       return boardRefusal("goal-generation-mismatch", "the requested goal generation is not the current goal; re-read the goal first")
     }
-    const key = leadBoardStorageKey(keyedLocation, sessionID)
-    const existing = parseLeadBoard(await deps.storage.get(key))
-    if (existing && existing.goalGeneration === goal.createdAt) {
-      return { status: "exists", key, board: projectLeadBoard(existing), limitations: LEAD_BOARD_LIMITATIONS }
+    // Read without the generation filter so a valid board from an older goal
+    // can be replaced by the new deterministic generation. A malformed V2
+    // record is still unavailable and is never overwritten.
+    const hydration = await hydrateLeadBoardV2(deps.storage, deps.location, sessionID)
+    if (hydration.status === "unavailable") {
+      return boardRefusal("board-unavailable", hydration.warning ?? "the lead board is unavailable; repair it before migration")
     }
-    const board = createLeadBoard({
+    if (hydration.status === "legacy") {
+      if (hydration.board?.goalGeneration !== goal.createdAt) {
+        const board = createLeadBoardV2({
+          projectID: keyedLocation.project.id,
+          leadSessionID: sessionID,
+          goalGeneration: goal.createdAt,
+          objective: goal.objective,
+        })
+        await writeLeadBoardV2(deps.storage, keyedLocation, board)
+        return { status: "created", key: leadBoardV2StorageKey(keyedLocation, sessionID), board: projectLeadBoardV2(board), limitations: LEAD_BOARD_LIMITATIONS }
+      }
+      const migrated = await migrateLeadBoardV1Storage(deps.storage, deps.location, sessionID, { goalGeneration: goal.createdAt })
+      if (migrated.status === "migrated" && migrated.board) {
+        return {
+          status: "migrated",
+          key: leadBoardV2StorageKey(keyedLocation, sessionID),
+          board: projectLeadBoardV2(migrated.board),
+          limitations: LEAD_BOARD_LIMITATIONS,
+        }
+      }
+      return boardRefusal("migration-failed", migrated.message)
+    }
+    const key = leadBoardV2StorageKey(keyedLocation, sessionID)
+    const existing = hydration.board ?? parseLeadBoardV2(await deps.storage.get(key))
+    if (existing && existing.goalGeneration === goal.createdAt) {
+      return { status: "exists", key, board: projectLeadBoardV2(existing), limitations: LEAD_BOARD_LIMITATIONS }
+    }
+    const board = createLeadBoardV2({
       projectID: keyedLocation.project.id,
       leadSessionID: sessionID,
       goalGeneration: goal.createdAt,
       objective: goal.objective,
     })
-    await writeLeadBoard(deps.storage, keyedLocation, board)
-    return { status: "created", key, board: projectLeadBoard(board), limitations: LEAD_BOARD_LIMITATIONS }
+    await writeLeadBoardV2(deps.storage, keyedLocation, board)
+    return { status: "created", key, board: projectLeadBoardV2(board), limitations: LEAD_BOARD_LIMITATIONS }
   })
 }
 
@@ -517,7 +576,7 @@ async function createLeadBoardTaskTool(
     if (!ownerSessionID || !(LEAD_ROLES as readonly string[]).includes(ownerRole)) {
       return boardRefusal("invalid-owner", "ownerSessionID and a valid ownerRole are required")
     }
-    const created = createLeadTask(read.board, {
+    const created = createLeadTaskV2(read.board, {
       taskID: stringField(input, "taskID"),
       title: stringField(input, "title"),
       owner: { sessionID: ownerSessionID, role: ownerRole as LeadRole },
@@ -533,12 +592,12 @@ async function createLeadBoardTaskTool(
       boardRevision: read.board.boardRevision + 1,
       updatedAt: Date.now(),
     }
-    await writeLeadBoard(deps.storage, read.keyedLocation, next)
+    await writeLeadBoardV2(deps.storage, read.keyedLocation, next)
     return {
       status: "created",
-      key: leadBoardStorageKey(read.keyedLocation, sessionID),
+      key: leadBoardV2StorageKey(read.keyedLocation, sessionID),
       taskID: created.task.taskID,
-      board: projectLeadBoard(next),
+      board: projectLeadBoardV2(next),
       limitations: LEAD_BOARD_LIMITATIONS,
     }
   })
@@ -559,7 +618,7 @@ async function assignLeadBoardTaskTool(
   return withSessionLock(deps.location, sessionID, async () => {
     const read = await readBoard(deps, sessionID)
     if (read.status !== "ok") return boardRefusal(read.status, `no usable board: ${read.status}`)
-    const assigned = assignLeadTaskOwner({
+    const assigned = assignLeadTaskOwnerV2({
       board: read.board,
       taskID,
       expectedVersion,
@@ -567,13 +626,13 @@ async function assignLeadBoardTaskTool(
       owner: { sessionID: ownerSessionID, role: ownerRole as LeadRole },
     })
     if (!assigned.ok) return boardRefusal(assigned.reason, assigned.message)
-    await writeLeadBoard(deps.storage, read.keyedLocation, assigned.board)
+    await writeLeadBoardV2(deps.storage, read.keyedLocation, assigned.board)
     return {
       status: "assigned",
-      key: leadBoardStorageKey(read.keyedLocation, sessionID),
+      key: leadBoardV2StorageKey(read.keyedLocation, sessionID),
       taskID,
       owner: assigned.task.owner,
-      board: projectLeadBoard(assigned.board),
+      board: projectLeadBoardV2(assigned.board),
       limitations: LEAD_BOARD_LIMITATIONS,
     }
   })
@@ -585,11 +644,12 @@ async function transitionLeadBoardTool(
   sessionID: string,
   input: unknown,
 ): Promise<Record<string, unknown>> {
-  const action = stringField(input, "action") as LeadTransitionAction
+  const requestedAction = stringField(input, "action")
+  const action = normalizeBoardAction(requestedAction)
   const taskID = stringField(input, "taskID")
   const expectedVersion = numberField(input, "expectedVersion")
-  if (!(BOARD_TOOL_ACTIONS as readonly string[]).includes(action) || !taskID || expectedVersion === undefined) {
-    return boardRefusal("invalid-input", "action, taskID, and expectedVersion are required")
+  if (!action || !taskID || expectedVersion === undefined) {
+    return boardRefusal("invalid-input", "an intent action, taskID, and expectedVersion are required")
   }
   const evidence = parseEvidenceInput(input)
   if (!evidence.ok) return boardRefusal("invalid-evidence", "every evidence entry must be a bounded, safe ref")
@@ -625,6 +685,9 @@ async function transitionLeadBoardTool(
         readReviewRecordV2(deps.storage, deps.location, sessionID),
         readReviewRecord(deps.storage, deps.location, sessionID),
       ])
+      if (review && review.taskId !== taskID) {
+        return boardRefusal("review-task-mismatch", "the approved V2 review belongs to a different task")
+      }
       const check = validateApprovedReviewV2Revision({
         record: review,
         legacyRecord: legacyReview,
@@ -636,7 +699,7 @@ async function transitionLeadBoardTool(
       if (!check.valid || !LEAD_SHA_PATTERN.test(task.validation.revision)) {
         return boardRefusal(check.valid ? "invalid-revision" : check.verdict, check.message)
       }
-      const applied = transitionLeadTask({
+      const applied = transitionLeadTaskV2({
         board: read.board,
         taskID,
         expectedVersion,
@@ -645,20 +708,22 @@ async function transitionLeadBoardTool(
         review: {
           reference: `review/v2/${review!.taskId}/${review!.runId}`,
           revision: task.validation.revision,
+          baseRevision: review!.baseSha,
           approvedAt: review!.updatedAt,
+          reviewVersion: 2,
         },
       })
       if (!applied.ok) return boardRefusal(applied.reason, applied.message)
-      await writeLeadBoard(deps.storage, read.keyedLocation, applied.board)
+      await writeLeadBoardV2(deps.storage, read.keyedLocation, applied.board)
       return {
         status: "applied",
-        key: leadBoardStorageKey(read.keyedLocation, sessionID),
+        key: leadBoardV2StorageKey(read.keyedLocation, sessionID),
         message: applied.message,
-        board: projectLeadBoard(applied.board),
+        board: projectLeadBoardV2(applied.board),
         limitations: LEAD_BOARD_LIMITATIONS,
       }
     }
-    const applied = transitionLeadTask({
+    const applied = transitionLeadTaskV2({
       board: read.board,
       taskID,
       expectedVersion,
@@ -670,12 +735,12 @@ async function transitionLeadBoardTool(
       ...(replay !== undefined ? { replay } : {}),
     })
     if (!applied.ok) return boardRefusal(applied.reason, applied.message)
-    await writeLeadBoard(deps.storage, read.keyedLocation, applied.board)
+    await writeLeadBoardV2(deps.storage, read.keyedLocation, applied.board)
     return {
       status: "applied",
-      key: leadBoardStorageKey(read.keyedLocation, sessionID),
+      key: leadBoardV2StorageKey(read.keyedLocation, sessionID),
       message: applied.message,
-      board: projectLeadBoard(applied.board),
+      board: projectLeadBoardV2(applied.board),
       limitations: LEAD_BOARD_LIMITATIONS,
     }
   })
@@ -743,11 +808,13 @@ async function runBoardValidateTool(
       checks: [...failures, ...blockers].slice(0, 8).map((check) => `${check.id}:${check.verdict}`),
     })
   }
-  const checkIDs = [...result.checks.map((check) => `${check.id}:${check.verdict}`), ...checks.value.map((check) => `${check.id}:${check.verdict}`)]
+  // Only plugin-computed validator checks become durable identifiers. The
+  // caller-supplied checks are diagnostic input and never become proof.
+  const checkIDs = result.checks.map((check) => `${check.id}:${check.verdict}`)
     .slice(0, LEAD_MAX_CHECK_IDS)
     .map((value) => boundedBoardText(value, 128))
   const validation: LeadTaskValidation = {
-    leadSessionID: sessionID,
+    actorSessionID: sessionID,
     validatedAt: Date.now(),
     revision,
     checkIDs,
@@ -759,7 +826,7 @@ async function runBoardValidateTool(
   return withSessionLock(deps.location, sessionID, async () => {
     const read = await readBoard(deps, sessionID)
     if (read.status !== "ok") return boardRefusal(read.status, `no usable board: ${read.status}`)
-    const applied = transitionLeadTask({
+    const applied = transitionLeadTaskV2({
       board: read.board,
       taskID,
       expectedVersion,
@@ -769,12 +836,12 @@ async function runBoardValidateTool(
       ...(evidence.length > 0 ? { evidence } : {}),
     })
     if (!applied.ok) return boardRefusal(applied.reason, applied.message)
-    await writeLeadBoard(deps.storage, read.keyedLocation, applied.board)
+    await writeLeadBoardV2(deps.storage, read.keyedLocation, applied.board)
     return {
       status: "applied",
-      key: leadBoardStorageKey(read.keyedLocation, sessionID),
+      key: leadBoardV2StorageKey(read.keyedLocation, sessionID),
       message: applied.message,
-      board: projectLeadBoard(applied.board),
+      board: projectLeadBoardV2(applied.board),
       limitations: LEAD_BOARD_LIMITATIONS,
     }
   })
@@ -804,9 +871,9 @@ async function completeLeadBoardTool(
   const pre = await readBoard(deps, sessionID)
   if (pre.status !== "ok") return boardRefusal(pre.status, `no usable board: ${pre.status}`)
   if (sessionID !== pre.board.leadSessionID) return boardRefusal("actor-mismatch", "only the board's lead session may complete the board")
-  if (!boardCompletionEligible(pre.board)) {
+  if (!boardCompletionEligibleV2(pre.board)) {
     return boardRefusal("board-incomplete", "every task must be completed with none ambiguous/blocked/failed", {
-      unfinished: boardUnfinishedTasks(pre.board).slice(0, 16).map((task) => `${task.taskID}:${task.status}`),
+      unfinished: boardUnfinishedTasksV2(pre.board).slice(0, 16).map((task) => `${task.taskID}:${task.status}`),
     })
   }
   if (contract.taskId !== pre.board.boardID) {
@@ -830,32 +897,40 @@ async function completeLeadBoardTool(
       checks: [...failures, ...blockers].slice(0, 8).map((check) => `${check.id}:${check.verdict}`),
     })
   }
-  const [review, legacyReview] = await Promise.all([
-    readReviewRecordV2(deps.storage, deps.location, sessionID),
-    readReviewRecord(deps.storage, deps.location, sessionID),
-  ])
-  const reviewCheck = validateApprovedReviewV2Revision({
-    record: review,
-    legacyRecord: legacyReview,
-    leadSessionID: sessionID,
-    expectedReviewerAgentID: deps.options.roles.review,
-    headSha: revision,
-    baseSha: review?.baseSha ?? "",
-  })
-  if (!reviewCheck.valid) {
-    return boardRefusal(reviewCheck.verdict, `aggregate completion requires an approved exact-revision review: ${reviewCheck.message}`)
-  }
-  const reviewReference = `review/v2/${review!.taskId}/${review!.runId}`
-
   return withSessionLock(deps.location, sessionID, async () => {
     const read = await readBoard(deps, sessionID)
     if (read.status !== "ok") return boardRefusal(read.status, `no usable board: ${read.status}`)
     if (read.board.boardRevision !== expectedRevision) {
       return boardRefusal("version-mismatch", `board revision is ${read.board.boardRevision}, not the expected ${expectedRevision}`)
     }
-    if (!boardCompletionEligible(read.board)) {
+    if (!boardCompletionEligibleV2(read.board)) {
       return boardRefusal("board-incomplete", "the board changed and is no longer completion-eligible")
     }
+    const [review, legacyReview] = await Promise.all([
+      readReviewRecordV2(deps.storage, deps.location, sessionID),
+      readReviewRecord(deps.storage, deps.location, sessionID),
+    ])
+    if (!review) {
+      return boardRefusal("missing-review", "aggregate completion requires an approved V2 review")
+    }
+    const reviewCheck = validateApprovedReviewV2Revision({
+      record: review,
+      legacyRecord: legacyReview,
+      leadSessionID: sessionID,
+      expectedReviewerAgentID: deps.options.roles.review,
+      headSha: revision,
+      baseSha: review.baseSha,
+    })
+    if (!reviewCheck.valid) {
+      return boardRefusal(reviewCheck.verdict, `aggregate completion requires an approved exact-revision review: ${reviewCheck.message}`)
+    }
+    const revisionIssues = boardCompletionRevisionIssuesV2(read.board, { revision, baseRevision: review.baseSha })
+    if (revisionIssues.length > 0) {
+      return boardRefusal("revision-mismatch", "one or more completed tasks are not proven at the aggregate head/base revision", {
+        issues: revisionIssues.slice(0, 16),
+      })
+    }
+    const reviewReference = `review/v2/${review.taskId}/${review.runId}`
     // Goal identity is re-read under the same lock: a pause, replacement,
     // deletion, or generation change between verification and write cancels it.
     const goalKey = goalStorageKey(read.keyedLocation, sessionID)
@@ -864,10 +939,13 @@ async function completeLeadBoardTool(
       return boardRefusal("goal-identity-changed", "the goal was paused, replaced, deleted, or its generation changed; completion cancelled")
     }
     const now = Date.now()
-    const completed = completeLeadBoard(read.board, {
+    const completed = completeLeadBoardV2(read.board, {
       revision,
       reviewReference,
       validatedAt: now,
+      baseRevision: review.baseSha,
+      validationActorSessionID: sessionID,
+      receiptIDs,
       evidence: [
         {
           kind: "receipt",
@@ -883,7 +961,7 @@ async function completeLeadBoardTool(
         },
       ],
     })
-    await writeLeadBoard(deps.storage, read.keyedLocation, completed)
+    await writeLeadBoardV2(deps.storage, read.keyedLocation, completed)
     try {
       await deps.storage.set(goalKey, {
         ...goal,
@@ -898,16 +976,16 @@ async function completeLeadBoardTool(
     } catch (error) {
       // The goal write is the last step: restore the pre-completion board so a
       // complete board never sits under an active goal generation.
-      await writeLeadBoard(deps.storage, read.keyedLocation, read.board).catch(() => undefined)
+      await writeLeadBoardV2(deps.storage, read.keyedLocation, read.board).catch(() => undefined)
       return boardRefusal("goal-write-failed", "the goal completion write failed; the board was left active")
     }
     return {
       status: "complete",
-      key: leadBoardStorageKey(read.keyedLocation, sessionID),
+      key: leadBoardV2StorageKey(read.keyedLocation, sessionID),
       boardID: read.board.boardID,
       revision,
       reviewReference,
-      board: projectLeadBoard(completed),
+      board: projectLeadBoardV2(completed),
       limitations: LEAD_BOARD_LIMITATIONS,
     }
   })
@@ -1196,20 +1274,7 @@ const boardTransitionInput = {
     expectedVersion: { type: "number", minimum: 1 },
     action: {
       type: "string",
-      enum: [
-        "ready",
-        "report",
-        "fail",
-        "ambiguous",
-        "validate",
-        "complete",
-        "request-changes",
-        "block",
-        "requeue",
-        "adopt",
-        "reconcile",
-        "record-replay",
-      ],
+      enum: BOARD_INTENT_ACTIONS,
     },
     evidence: boardEvidenceJsonSchema,
     note: { type: "string", maxLength: 512 },

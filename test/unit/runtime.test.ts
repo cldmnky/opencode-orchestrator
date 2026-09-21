@@ -9,7 +9,7 @@ import type { CommandInvocationLike } from "../../src/opencode-v2/commands/index
 import { formatHandoverSummary, runCommand, statusMessage } from "../../src/opencode-v2/commands/runtime.js"
 import type { DispatchGate } from "../../src/opencode-v2/observability/runtime.js"
 import { goalStorageKey, runStorageKey, stopStorageKey } from "../../src/opencode-v2/goal/state.js"
-import { leadBoardStorageKey, parseLeadBoard } from "../../src/opencode-v2/orchestration/lead-board.js"
+import { leadBoardV2StorageKey as leadBoardStorageKey, parseLeadBoardV2 as parseLeadBoard } from "../../src/opencode-v2/orchestration/lead-board-v2.js"
 import { publishStorageKey, type PublishRecord } from "../../src/opencode-v2/publish/state.js"
 import { gatesStorageKey, type GatesRecord } from "../../src/opencode-v2/gates/state.js"
 import type { WorkerModelRuntime } from "../../src/opencode-v2/worker-models/runtime.js"

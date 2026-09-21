@@ -1,26 +1,23 @@
 /**
- * Conditional orchestrator-only S3/V1 runtime tools.
+ * Conditional S3 observability and V2 review tools.
  *
- * Registered ONLY when the corresponding mode is enabled, so the default
- * configuration preserves the existing tool contract/count:
- * - `observability_get` when trace or stop-between-steps budget is active.
- * - `review_get` / `review_transition` when review mode is `bounded`.
- *
- * All tools live under the `orchestrator` namespace with the shared
- * `orchestrator_observability` permission action; workers are denied them by
- * the installer/agent transform and each execute handler rejects non-
- * orchestrator agents regardless of visibility. They are callable/advisory
- * primitives: nothing reads these results automatically and no automatic gate
- * is enforced by a hook. Outputs carry explicit limitations (no CAS/cross-
- * process guarantee, caller identity cannot be proven, one bounded record per
- * session).
+ * Review V1 records remain readable through `review_get`, but the old generic
+ * transition tool is intentionally gone. A lead starts V2; only the
+ * configured reviewer child can submit the decision through its dedicated
+ * permission action.
  */
-import type { OrchestratorOptions } from "../../core/config.js"
-import { OBSERVABILITY_TOOL_PERMISSION } from "../../core/permissions.js"
-import { REVIEW_V1_CHECK_KEYS, REVIEW_V1_SIGNAL_SCHEMA, transitionReviewV1 } from "./review.js"
-import { readReviewRecord, setReviewRecord } from "./runtime.js"
-import { withSessionLock, type LocationLike, type StorageLike } from "../goal/state.js"
 import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
+import type { OrchestratorOptions } from "../../core/config.js"
+import { OBSERVABILITY_TOOL_PERMISSION, REVIEW_SUBMIT_TOOL_PERMISSION } from "../../core/permissions.js"
+import { withSessionLock, type LocationLike, type StorageLike } from "../goal/state.js"
+import { readReviewRecord, readReviewRecordV2, setReviewRecordV2 } from "./runtime.js"
+import {
+  REVIEW_V2_CHECK_KEYS,
+  reviewV2StartInputSchema,
+  reviewV2SubmitInputSchema,
+  startReviewV2,
+  submitReviewV2,
+} from "./review-v2.js"
 
 type ToolDraftLike = {
   add(tool: ToolInfo<any, undefined>): void
@@ -28,12 +25,18 @@ type ToolDraftLike = {
 
 type ToolResult = { content: string }
 
+type SessionLike = {
+  get(input: { sessionID: string }): Promise<unknown>
+}
+
 export type ObservabilityToolsDeps = {
   options: OrchestratorOptions
   storage: StorageLike
   location: LocationLike
   /** Active when trace or stop-between-steps budget is configured. */
   runtime?: ObservabilityRuntimeLike
+  /** Required to prove reviewer-session ancestry for review V2 submit. */
+  session?: SessionLike
 }
 
 type ObservabilityRuntimeLike = {
@@ -42,9 +45,10 @@ type ObservabilityRuntimeLike = {
 }
 
 const LIMITATIONS = [
-  "one bounded current record per session; no append-only ledger",
+  "one bounded current record per lead session; no append-only ledger",
   "process-local serialization only: no CAS, transactions, or cross-process guarantee",
-  "caller identity and child-session ownership cannot be proven by the plugin",
+  "V1 records are readable status only and are legacy-unproven for publication or completion",
+  "V2 approval records store only fixed checks and host-derived reviewer agent/session identity",
   "metadata only: no prompts, transcripts, tool input/output, or credentials are ever stored",
 ]
 
@@ -63,137 +67,134 @@ export function addObservabilityTools(draft: ToolDraftLike, deps: ObservabilityT
         if (!sessionID) return resultContent(JSON.stringify({ version: 1, error: "sessionID is required", limitations: LIMITATIONS }))
         const summary = await runtime.summary(sessionID)
         const evaluation = await runtime.evaluation(sessionID)
-        return resultContent(
-          JSON.stringify({
-            version: 1,
-            sessionID,
-            trace: summary ?? null,
-            budget: evaluation,
-            limitations: LIMITATIONS,
-          }),
-        )
+        return resultContent(JSON.stringify({ version: 1, sessionID, trace: summary ?? null, budget: evaluation, limitations: LIMITATIONS }))
       },
     })
   }
 
-  if (deps.options.review.mode === "bounded") {
-    draft.add({
-      name: "review_get",
-      description:
-        "Read the single bounded V1 review record for a session (review/v1 storage key). Returns null when no review has been started. Orchestrator-only; callable/advisory, not an automatic gate.",
-      input: reviewGetInput,
-      options: { namespace: "orchestrator", permission: OBSERVABILITY_TOOL_PERMISSION },
-      execute: async (input, tool) => {
-        requireOrchestrator(tool.agent, deps.options)
-        const sessionID = stringField(input, "sessionID")
-        if (!sessionID) return resultContent(JSON.stringify({ version: 1, error: "sessionID is required", limitations: LIMITATIONS }))
-        const record = await readReviewRecord(deps.storage, deps.location, sessionID)
-        return resultContent(
-          JSON.stringify({
-            version: 1,
-            sessionID,
-            record: record ?? null,
-            maxRounds: deps.options.review.max_rounds,
-            checkerRole: deps.options.roles.review,
-            limitations: LIMITATIONS,
-          }),
-        )
-      },
-    })
+  if (deps.options.review.mode !== "bounded") return
 
-    draft.add({
-      name: "review_transition",
-      description:
-        "Compute and persist the deterministic V1 review transition for one record. start requires exactly taskId, runId, maker, checker, and the review-pending admission signal, and may optionally pin an exact-revision receipt (headSha and baseSha together, each a full 40- or 64-character lowercase hex git SHA); approve requires exactly the fixed boolean checks diff, scope, and verification (all must be true); request-changes and block take exactly the action. Orchestrator-only; callable/advisory, not an automatic completion gate.",
-      input: reviewTransitionInput,
-      options: { namespace: "orchestrator", permission: OBSERVABILITY_TOOL_PERMISSION },
-      execute: async (input, tool) => {
-        requireOrchestrator(tool.agent, deps.options)
-        const sessionID = stringField(input, "sessionID")
-        if (!sessionID) {
-          return resultContent(
-            JSON.stringify({
-              version: 1,
-              accepted: false,
-              reason: "invalid-signal",
-              message: "sessionID is required",
-              requiresHuman: false,
-              terminal: false,
-              limitations: LIMITATIONS,
-            }),
-          )
-        }
-        const parsed = REVIEW_V1_SIGNAL_SCHEMA.safeParse((input as { signal?: unknown } | null | undefined)?.signal)
-        if (!parsed.success) {
-          return resultContent(
-            JSON.stringify({
-              version: 1,
-              accepted: false,
-              reason: "invalid-signal",
-              message:
-                "review_transition rejected the signal; start requires exactly taskId, runId, maker, checker, and admissionState review-pending with no extra fields (headSha and baseSha are optional but must both be present together, each a full 40- or 64-character lowercase hex git SHA); approve requires exactly the fixed boolean checks diff, scope, and verification; request-changes and block take exactly the action with no extra fields",
-              requiresHuman: false,
-              terminal: false,
-              limitations: LIMITATIONS,
-            }),
-          )
-        }
-        const signal = parsed.data
+  draft.add({
+    name: "review_get",
+    description:
+      "Read bounded review status for a lead session. V2 records include host-derived reviewer provenance; V1 records are returned as legacy-unproven status only and never authenticate publication or completion. Orchestrator-only.",
+    input: reviewGetInput,
+    options: { namespace: "orchestrator", permission: OBSERVABILITY_TOOL_PERMISSION },
+    execute: async (input, tool) => {
+      requireOrchestrator(tool.agent, deps.options)
+      const sessionID = stringField(input, "sessionID")
+      if (!sessionID) return resultContent(JSON.stringify({ version: 1, error: "sessionID is required", limitations: LIMITATIONS }))
+      const [v2, v1] = await Promise.all([
+        readReviewRecordV2(deps.storage, deps.location, sessionID),
+        readReviewRecord(deps.storage, deps.location, sessionID),
+      ])
+      return resultContent(
+        JSON.stringify({
+          version: v2 ? 2 : v1 ? 1 : null,
+          sessionID,
+          state: v2?.state ?? (v1 ? "legacy-unproven" : "none"),
+          record: v2 ?? v1 ?? null,
+          legacy: v2 && v1 ? { state: "legacy-unproven" } : null,
+          maxRounds: deps.options.review.max_rounds,
+          reviewerAgentID: deps.options.roles.review,
+          limitations: LIMITATIONS,
+        }),
+      )
+    },
+  })
 
-        // Caller-provided identity can never be proven by the plugin; the
-        // configured review role and maker/checker difference are still checked.
-        if (signal.action === "start" && signal.checker !== deps.options.roles.review) {
-          return resultContent(
-            JSON.stringify({
-              version: 1,
-              accepted: false,
-              reason: "checker-role-mismatch",
-              message: `checker must be the configured review role (${deps.options.roles.review})`,
-              requiresHuman: false,
-              terminal: false,
-              limitations: LIMITATIONS,
-            }),
-          )
-        }
-
-        // Read-modify-write under one withSessionLock so a concurrent
-        // transition for the same session cannot interleave. A pending
-        // different task can never be overwritten and a terminal old task may
-        // be replaced (both enforced by transitionReviewV1).
-        const transition = await withSessionLock(deps.location, sessionID, async () => {
-          const current = await readReviewRecord(deps.storage, deps.location, sessionID)
-          const result = transitionReviewV1({
-            record: current,
-            signal,
-            maxRounds: deps.options.review.max_rounds,
-            checkerRole: deps.options.roles.review,
-          })
-          if (result.accepted && result.record) {
-            await setReviewRecord(deps.storage, deps.location, sessionID, result.record)
-          }
-          return result
+  draft.add({
+    name: "review_start",
+    description:
+      "Lead-only: start or reopen one provenance-bound V2 review for the current lead session. Pins task, run, exact head/base SHAs, and the configured reviewer agent. Never accepts reviewer identity from input.",
+    input: reviewStartInput,
+    options: { namespace: "orchestrator", permission: OBSERVABILITY_TOOL_PERMISSION },
+    execute: async (input, tool) => {
+      requireOrchestrator(tool.agent, deps.options)
+      const parsed = reviewV2StartInputSchema.safeParse(input)
+      if (!parsed.success) return transitionResult({ accepted: false, reason: "invalid-signal", message: "review_start requires taskId, runId, and a full exact head/base SHA pair", requiresHuman: false, terminal: false })
+      const leadSessionID = tool.sessionID
+      const transition = await withSessionLock(deps.location, leadSessionID, async () => {
+        const current = await readReviewRecordV2(deps.storage, deps.location, leadSessionID)
+        const result = startReviewV2({
+          ...parsed.data,
+          record: current,
+          leadSessionID,
+          expectedReviewerAgentID: deps.options.roles.review,
+          maxRounds: deps.options.review.max_rounds,
         })
-        return resultContent(
-          JSON.stringify({
-            version: 1,
-            accepted: transition.accepted,
-            reason: transition.reason,
-            requiresHuman: transition.requiresHuman,
-            terminal: transition.terminal,
-            message: transition.message,
-            ...(transition.accepted && transition.record ? { record: transition.record } : {}),
-            limitations: LIMITATIONS,
-          }),
-        )
-      },
-    })
-  }
+        if (result.accepted && result.record) await setReviewRecordV2(deps.storage, deps.location, leadSessionID, result.record)
+        return result
+      })
+      return transitionResult(transition)
+    },
+  })
+
+  draft.add({
+    name: "review_submit",
+    description:
+      "Reviewer-only: submit exactly one approve, request-changes, or block decision for a pending V2 review. The host tool context supplies reviewer agent/session identity; the session must be a child of the named lead. Orchestrator self-approval and caller-supplied reviewer identities are refused.",
+    input: reviewSubmitInput,
+    options: { namespace: "orchestrator", permission: REVIEW_SUBMIT_TOOL_PERMISSION },
+    execute: async (input, tool) => {
+      const parsed = reviewV2SubmitInputSchema.safeParse(input)
+      if (!parsed.success) return transitionResult({ accepted: false, reason: "invalid-signal", message: "review_submit requires leadSessionID, round, and one strict decision", requiresHuman: false, terminal: false })
+      if (tool.agent !== deps.options.roles.review) {
+        return transitionResult({ accepted: false, reason: "reviewer-role-mismatch", message: "only the configured reviewer agent may submit a review V2 decision", requiresHuman: false, terminal: false })
+      }
+      const child = await isChildSession(deps.session, tool.sessionID, parsed.data.leadSessionID)
+      if (child !== true) {
+        return transitionResult({ accepted: false, reason: "reviewer-session-mismatch", message: "the reviewer session must be a verified child of the lead session", requiresHuman: false, terminal: false })
+      }
+      const transition = await withSessionLock(deps.location, parsed.data.leadSessionID, async () => {
+        const current = await readReviewRecordV2(deps.storage, deps.location, parsed.data.leadSessionID)
+        const result = submitReviewV2({
+          record: current,
+          leadSessionID: parsed.data.leadSessionID,
+          expectedRound: parsed.data.round,
+          maxRounds: deps.options.review.max_rounds,
+          expectedReviewerAgentID: deps.options.roles.review,
+          actorSessionID: tool.sessionID,
+          actorAgentID: tool.agent,
+          isChildSession: child,
+          decision: parsed.data.decision,
+        })
+        if (result.accepted && result.record) await setReviewRecordV2(deps.storage, deps.location, parsed.data.leadSessionID, result.record)
+        return result
+      })
+      return transitionResult(transition)
+    },
+  })
 }
 
 function requireOrchestrator(agent: string, options: OrchestratorOptions): void {
-  if (agent !== options.orchestrator) {
-    throw new Error("observability/review tools are available only to the orchestrator")
+  if (agent !== options.orchestrator) throw new Error("observability/review read/start tools are available only to the orchestrator")
+}
+
+async function isChildSession(session: SessionLike | undefined, childSessionID: string, leadSessionID: string): Promise<boolean | undefined> {
+  if (!session || childSessionID === leadSessionID) return false
+  let current = childSessionID
+  for (let depth = 0; depth < 32; depth += 1) {
+    let value: unknown
+    try {
+      value = await session.get({ sessionID: current })
+    } catch {
+      return undefined
+    }
+    const parentID = parentSessionID(value)
+    if (parentID === undefined) return false
+    if (parentID === leadSessionID) return true
+    current = parentID
   }
+  return undefined
+}
+
+function parentSessionID(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const data = (value as { data?: unknown }).data
+  const source = data && typeof data === "object" && !Array.isArray(data) ? data : value
+  const parentID = (source as { parentID?: unknown }).parentID
+  return typeof parentID === "string" && parentID.length > 0 ? parentID : undefined
 }
 
 function stringField(input: unknown, field: string): string | undefined {
@@ -206,58 +207,58 @@ function resultContent(content: string): ToolResult {
   return { content }
 }
 
+function transitionResult(transition: { accepted: boolean; reason: string; requiresHuman: boolean; terminal: boolean; message: string; record?: unknown }): ToolResult {
+  return {
+    content: JSON.stringify({
+      version: 2,
+      accepted: transition.accepted,
+      reason: transition.reason,
+      requiresHuman: transition.requiresHuman,
+      terminal: transition.terminal,
+      message: transition.message,
+      ...(transition.record ? { record: transition.record } : {}),
+      limitations: LIMITATIONS,
+    }),
+  }
+}
+
 /* ------------------------------------------------------------------ */
-/* JSON input schemas (model-facing; runtime validation stays in core) */
+/* JSON input schemas (model-facing; runtime validation stays in review-v2) */
 /* ------------------------------------------------------------------ */
 
 const observabilityGetInput = {
   type: "object",
-  properties: {
-    sessionID: { type: "string", minLength: 1 },
-  },
+  properties: { sessionID: { type: "string", minLength: 1 } },
   required: ["sessionID"],
   additionalProperties: false,
 } as const
 
 const reviewGetInput = {
   type: "object",
-  properties: {
-    sessionID: { type: "string", minLength: 1 },
-  },
+  properties: { sessionID: { type: "string", minLength: 1 } },
   required: ["sessionID"],
   additionalProperties: false,
 } as const
 
-// Strict per-action input variants: the model-facing JSON schema mirrors the
-// runtime REVIEW_V1_SIGNAL_SCHEMA exactly. start requires exactly action,
-// taskId, runId, maker, checker, admissionState and may optionally pin an
-// exact-revision receipt (headSha and baseSha together, full git object IDs);
-// approve requires exactly action plus the fixed checks (diff, scope,
-// verification); request-changes and block allow exactly action. Any extra
-// per-action field matches no variant and is rejected. The checks property
-// set and required list are derived from REVIEW_V1_CHECK_KEYS so the
-// model-facing and runtime schemas can never drift apart.
-export const reviewTransitionInput = {
+export const reviewStartInput = {
   type: "object",
   properties: {
-    sessionID: { type: "string", minLength: 1 },
-    signal: {
+    taskId: { type: "string", minLength: 1, maxLength: 128 },
+    runId: { type: "string", minLength: 1, maxLength: 128 },
+    headSha: { type: "string", pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    baseSha: { type: "string", pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+  },
+  required: ["taskId", "runId", "headSha", "baseSha"],
+  additionalProperties: false,
+} as const
+
+export const reviewSubmitInput = {
+  type: "object",
+  properties: {
+    leadSessionID: { type: "string", minLength: 1, maxLength: 512 },
+    round: { type: "integer", minimum: 1, maximum: 8 },
+    decision: {
       oneOf: [
-        {
-          type: "object",
-          properties: {
-            action: { type: "string", enum: ["start"] },
-            taskId: { type: "string", minLength: 1, maxLength: 128 },
-            runId: { type: "string", minLength: 1, maxLength: 128 },
-            maker: { type: "string", minLength: 1, maxLength: 128 },
-            checker: { type: "string", minLength: 1, maxLength: 128 },
-            admissionState: { type: "string", enum: ["review-pending"] },
-            headSha: { type: "string", pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
-            baseSha: { type: "string", pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
-          },
-          required: ["action", "taskId", "runId", "maker", "checker", "admissionState"],
-          additionalProperties: false,
-        },
         {
           type: "object",
           properties: {
@@ -269,7 +270,7 @@ export const reviewTransitionInput = {
                 scope: { type: "boolean" },
                 verification: { type: "boolean" },
               },
-              required: [...REVIEW_V1_CHECK_KEYS],
+              required: [...REVIEW_V2_CHECK_KEYS],
               additionalProperties: false,
             },
           },
@@ -278,23 +279,19 @@ export const reviewTransitionInput = {
         },
         {
           type: "object",
-          properties: {
-            action: { type: "string", enum: ["request-changes"] },
-          },
+          properties: { action: { type: "string", enum: ["request-changes"] } },
           required: ["action"],
           additionalProperties: false,
         },
         {
           type: "object",
-          properties: {
-            action: { type: "string", enum: ["block"] },
-          },
+          properties: { action: { type: "string", enum: ["block"] } },
           required: ["action"],
           additionalProperties: false,
         },
       ],
     },
   },
-  required: ["sessionID", "signal"],
+  required: ["leadSessionID", "round", "decision"],
   additionalProperties: false,
 } as const

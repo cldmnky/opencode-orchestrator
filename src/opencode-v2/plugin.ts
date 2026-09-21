@@ -176,6 +176,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
             options,
             storage: ctx.storage,
             location: ctx.location,
+            session: ctx.session,
             runtime: observability,
           })
           addPublishTools(draft, { storage: ctx.storage, location: ctx.location, options })
@@ -264,13 +265,13 @@ export const orchestratorPlugin = (Plugin.define as any)({
                "Use orchestrator_handoff_validate (callable, not an automatic gate) before using a worker handoff downstream.",
               "Use orchestrator_admission_transition (stateless) to track admission state.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
-              ...(options.review.mode === "bounded"
-                ? [
-                    "Bounded review is enabled.",
-                     "Use orchestrator_review_get and orchestrator_review_transition: start, delegate the reviewer, record fixed checks/decision, then map through orchestrator_admission_transition.",
-                     "V1 review records store supplied maker/checker identities; they do not prove which child session reviewed the work.",
-                    "Stop when the record is blocked or tripped.",
-                  ]
+               ...(options.review.mode === "bounded"
+                 ? [
+                     "Bounded review is enabled.",
+                      "Use orchestrator_review_get and orchestrator_review_start from the lead; delegate the configured reviewer child and have it call orchestrator_review_submit.",
+                      "V2 submit derives reviewer agent/session identity from ToolContext; V1 records are legacy-unproven and never publication or completion proof.",
+                     "Stop when the record is blocked or tripped.",
+                   ]
                 : []),
               ...(options.budget.mode === "stop-between-steps"
                 ? [

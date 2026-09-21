@@ -12,7 +12,8 @@ from an unknown version.
 | Halt | `halt/v1/<project>/<session>` | 1 | `src/opencode-v2/goal/state.ts` | Preserve stop intent; never clear during passive reads. |
 | Lead board | `lead-board/v1/<project>/<lead-session>` | 1 | `src/opencode-v2/orchestration/lead-board.ts` | V1 remains readable; V2 validation proof must be rebuilt from observed receipts. |
 | Step receipts | `step/v1/<project>/<session>/<index>` | 1 | `src/opencode-v2/orchestration/step-state.ts` | Bounded receipts are historical; malformed entries are unavailable. |
-| Review | `review/v1/<project>/<session>` | 1 | `src/opencode-v2/observability/review.ts` | V1 identity is unproven; future publication requires a V2 reviewer-child receipt. |
+| Review | `review/v1/<project>/<session>` | 1 | `src/opencode-v2/observability/review.ts` | V1 is read for status as `legacy-unproven`; caller-supplied maker/checker identity never authorizes publication or completion. |
+| Review V2 | `review/v2/<project>/<session>` | 2 | `src/opencode-v2/observability/review-v2.ts` | Current bounded review authority; approved records require exact head/base SHAs, fixed checks, and plugin-observed reviewer-child provenance. |
 | Trace | `trace/v1/<project>/<session>` | 1 | `src/opencode-v2/observability/trace.ts` | Replace in place only when the versioned schema changes. |
 | Retry trace | `retry-trace/v1/<project>/<session>` | 1 | `src/opencode-v2/observability/trace.ts` | Bounded metadata only; no raw provider output. |
 | Authority | `authority/v1/<project>/<session>` | 1 | `src/opencode-v2/authority/state.ts` | Snapshot is diagnostic and never an admission proof. |

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { commandDefinitions } from "../opencode-v2/commands/index.js"
 import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
-import { GOAL_TOOL_PERMISSION, orchestratorOnlyPermissionRules } from "../core/permissions.js"
+import { GOAL_TOOL_PERMISSION, REVIEW_SUBMIT_TOOL_PERMISSION, orchestratorOnlyPermissionRules } from "../core/permissions.js"
 import { DEFAULT_ROLES, ROLE_DELEGATION, type RoleName } from "../core/roles.js"
 import { parseOptions, type OrchestratorOptions } from "../core/config.js"
 import { parseModelReference } from "../core/model-reference.js"
@@ -286,6 +286,7 @@ function orchestratorPermissions(options: OrchestratorOptions): Array<Record<str
     // explicit permission action per family declared on each tool, so discrete
     // rules grant or revoke each set while workers stay denied.
     ...orchestratorOnlyPermissionRules("allow"),
+    { action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: "deny" },
     { action: "read", resource: "*", effect: "allow" },
     { action: "glob", resource: "*", effect: "allow" },
     { action: "grep", resource: "*", effect: "allow" },
@@ -319,6 +320,7 @@ function workerPermissions(role: RoleName, roles: Record<RoleName, string>): Arr
     // above change: the denies keep them invisible.
     { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "deny" },
     ...orchestratorOnlyPermissionRules("deny"),
+    { action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: "deny" },
     { action: "read", resource: "*", effect: "allow" },
     { action: "glob", resource: "*", effect: "allow" },
     { action: "grep", resource: "*", effect: "allow" },
@@ -332,7 +334,13 @@ function workerPermissions(role: RoleName, roles: Record<RoleName, string>): Arr
     return [...common, { action: "webfetch", resource: "*", effect: "allow" }, { action: "websearch", resource: "*", effect: "allow" }, ...sensitiveReadPermissions()]
   }
   if (role === "planning" || role === "review") {
-    return [...common, { action: "shell", resource: "*", effect: "ask" }, { action: "edit", resource: "*", effect: "deny" }, ...sensitiveReadPermissions()]
+    return [
+      ...common,
+      ...(role === "review" ? [{ action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: "allow" }] : []),
+      { action: "shell", resource: "*", effect: "ask" },
+      { action: "edit", resource: "*", effect: "deny" },
+      ...sensitiveReadPermissions(),
+    ]
   }
   return [
     ...common,

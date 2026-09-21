@@ -34,8 +34,7 @@ import {
   type ObservabilityDeps,
   type ObservabilityRuntime,
 } from "../../src/opencode-v2/observability/runtime.js"
-import { REVIEW_V1_CHECK_KEYS } from "../../src/opencode-v2/observability/review.js"
-import { addObservabilityTools, reviewTransitionInput, type ObservabilityToolsDeps } from "../../src/opencode-v2/observability/tools.js"
+import { addObservabilityTools, reviewStartInput, reviewSubmitInput, type ObservabilityToolsDeps } from "../../src/opencode-v2/observability/tools.js"
 
 const location = { directory: "/workspace", project: { id: "project" } }
 
@@ -744,17 +743,17 @@ describe("conditional orchestrator-only tool registration", () => {
     expect(tool.options?.permission).toBe(OBSERVABILITY_TOOL_PERMISSION)
   })
 
-  test("bounded review adds review_get and review_transition", () => {
+  test("bounded review adds separate review_get, review_start, and review_submit tools", () => {
     // Even with a runtime attached, bounded review alone does not register
     // observability_get (it requires trace or stop-between-steps budget).
     const tools = collect(parseOptions({ review: { mode: "bounded" } }), fakeRuntime() as ObservabilityToolsDeps["runtime"])
-    expect([...tools.keys()].sort()).toEqual(["review_get", "review_transition"])
-    for (const tool of tools.values()) {
-      expect(tool.options?.permission).toBe(OBSERVABILITY_TOOL_PERMISSION)
-    }
+    expect([...tools.keys()].sort()).toEqual(["review_get", "review_start", "review_submit"])
+    expect(tools.get("review_get")?.options?.permission).toBe(OBSERVABILITY_TOOL_PERMISSION)
+    expect(tools.get("review_start")?.options?.permission).toBe(OBSERVABILITY_TOOL_PERMISSION)
+    expect(tools.get("review_submit")?.options?.permission).toBe("orchestrator_review_submit")
   })
 
-  test("all modes together add all three tools and the transition enforces the review role", async () => {
+  test("all modes together add the trace and split V2 review tools", async () => {
     const options = parseOptions({ trace: { mode: "memory" }, review: { mode: "bounded", max_rounds: 2 } })
     const storage = memStorage()
     const tools = new Map<string, ToolEntry>()
@@ -767,240 +766,20 @@ describe("conditional orchestrator-only tool registration", () => {
         runtime: fakeRuntime() as ObservabilityToolsDeps["runtime"],
       },
     )
-    expect([...tools.keys()].sort()).toEqual(["observability_get", "review_get", "review_transition"])
-
-    const transition = tools.get("review_transition")!
-    // Wrong review role is rejected before any transition runs.
-    const wrongRole = await transition.execute(
-      {
-        sessionID: "s1",
-        signal: {
-          action: "start",
-          taskId: "task-1",
-          runId: "run-1",
-          maker: "implementer",
-          checker: "not-the-reviewer",
-          admissionState: "review-pending",
-        },
-      },
-      { sessionID: "s1", agent: "orchestrator" },
-    )
-    expect(wrongRole.content).toContain("checker-role-mismatch")
-    expect(storage.values.has("review/v1/project/s1")).toBe(false)
-
-    // A valid start persists the bounded record.
-    const started = await transition.execute(
-      {
-        sessionID: "s1",
-        signal: {
-          action: "start",
-          taskId: "task-1",
-          runId: "run-1",
-          maker: "implementer",
-          checker: "reviewer",
-          admissionState: "review-pending",
-        },
-      },
-      { sessionID: "s1", agent: "orchestrator" },
-    )
-    expect(started.content).toContain('"accepted":true')
-    expect(started.content).toContain("manual-start")
-    expect(JSON.parse(started.content).record.state).toBe("pending")
-    expect(storage.values.has("review/v1/project/s1")).toBe(true)
-
-    // Non-orchestrator agents are rejected regardless of visibility rules.
-    await expect(
-      transition.execute(
-        { sessionID: "s1", signal: { action: "block" } },
-        { sessionID: "s1", agent: "implementer" },
-      ),
-    ).rejects.toThrow("only to the orchestrator")
+    expect([...tools.keys()].sort()).toEqual(["observability_get", "review_get", "review_start", "review_submit"])
+    expect(tools.get("review_submit")?.options?.permission).toBe("orchestrator_review_submit")
   })
 
-  test("review_transition is scoped to the current record and persists fixed decisions", async () => {
-    const options = parseOptions({ review: { mode: "bounded", max_rounds: 2 } })
-    const storage = memStorage()
-    const tools = new Map<string, ToolEntry>()
-    addObservabilityTools(
-      { add: (tool) => tools.set(tool.name, tool as unknown as ToolEntry) },
-      {
-        options,
-        storage,
-        location,
-      },
-    )
-    const transition = tools.get("review_transition")!
-    const agent = { sessionID: "s1", agent: "orchestrator" }
-
-    const start = await transition.execute(
-      {
-        sessionID: "s1",
-        signal: { action: "start", taskId: "t1", runId: "r1", maker: "implementer", checker: "reviewer", admissionState: "review-pending" },
-      },
-      agent,
-    )
-    expect(JSON.parse(start.content).accepted).toBe(true)
-
-    // A pending different task cannot be overwritten.
-    const overwrite = await transition.execute(
-      {
-        sessionID: "s1",
-        signal: { action: "start", taskId: "t2", runId: "r2", maker: "implementer", checker: "reviewer", admissionState: "review-pending" },
-      },
-      agent,
-    )
-    expect(JSON.parse(overwrite.content)).toMatchObject({ accepted: false, reason: "pending-task-locked" })
+  test("model-facing V2 start and submit schemas keep identity out of input", () => {
+    expect(Object.keys(reviewStartInput.properties).sort()).toEqual(["baseSha", "headSha", "runId", "taskId"])
+    expect(reviewStartInput.required).toEqual(["taskId", "runId", "headSha", "baseSha"])
+    expect((reviewStartInput.properties.headSha as { pattern?: string }).pattern).toBe("^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    expect(Object.keys(reviewSubmitInput.properties).sort()).toEqual(["decision", "leadSessionID", "round"])
+    expect(reviewSubmitInput.required).toEqual(["leadSessionID", "round", "decision"])
+    expect(JSON.stringify(reviewSubmitInput)).not.toContain("reviewerAgentID")
+    expect(JSON.stringify(reviewSubmitInput)).not.toContain("reviewerSessionID")
   })
 
-  test("model-facing review_transition schema matches the runtime per-action strictness and fixed checks", () => {
-    const signalSchema = reviewTransitionInput.properties.signal as unknown as {
-      oneOf: Array<{
-        properties: Record<string, any>
-        required: string[]
-      }>
-    }
-    expect(signalSchema.oneOf).toHaveLength(4)
-    const byAction = new Map(
-      signalSchema.oneOf.map((variant) => [(variant.properties.action as { enum: string[] }).enum[0], variant]),
-    )
-
-    // start: the six required fields plus the optional exact-revision pair.
-    const startVariant = byAction.get("start")!
-    expect(Object.keys(startVariant.properties).sort()).toEqual([
-      "action",
-      "admissionState",
-      "baseSha",
-      "checker",
-      "headSha",
-      "maker",
-      "runId",
-      "taskId",
-    ])
-    expect(startVariant.required).toEqual(["action", "taskId", "runId", "maker", "checker", "admissionState"])
-    const startHead = startVariant.properties.headSha as { pattern?: string }
-    expect(startHead.pattern).toBe("^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
-
-    // approve: exactly the fixed checks, all required, nothing else.
-    const approveVariant = byAction.get("approve")!
-    expect(Object.keys(approveVariant.properties)).toEqual(["action", "checks"])
-    expect(approveVariant.required).toEqual(["action", "checks"])
-    const checks = approveVariant.properties.checks as { properties: Record<string, unknown>; required: string[] }
-    expect(Object.keys(checks.properties).sort()).toEqual([...REVIEW_V1_CHECK_KEYS].sort())
-    expect(checks.required).toEqual([...REVIEW_V1_CHECK_KEYS])
-
-    // request-changes / block: exactly the action.
-    for (const action of ["request-changes", "block"]) {
-      const variant = byAction.get(action)!
-      expect(Object.keys(variant.properties)).toEqual(["action"])
-      expect(variant.required).toEqual(["action"])
-    }
-  })
-
-  test("review_transition runtime rejects every per-action extra field and approve without all fixed checks", async () => {
-    const options = parseOptions({ review: { mode: "bounded", max_rounds: 2 } })
-    const storage = memStorage()
-    const tools = new Map<string, ToolEntry>()
-    addObservabilityTools(
-      { add: (tool) => tools.set(tool.name, tool as unknown as ToolEntry) },
-      { options, storage, location },
-    )
-    const transition = tools.get("review_transition")!
-    const agent = { sessionID: "s1", agent: "orchestrator" }
-    const startValid = {
-      action: "start",
-      taskId: "t1",
-      runId: "r1",
-      maker: "implementer",
-      checker: "reviewer",
-      admissionState: "review-pending",
-    }
-
-    const invalid: Array<Record<string, unknown>> = [
-      { signal: { ...startValid, memo: "extra" } },
-      { signal: { ...startValid, checks: { diff: true, scope: true, verification: true } } },
-      { signal: { action: "start", taskId: "t1", runId: "r1", maker: "implementer", checker: "reviewer" } }, // missing admissionState
-      { signal: { action: "approve" } },
-      { signal: { action: "approve", checks: { diff: true, scope: true } } }, // missing verification
-      { signal: { action: "approve", checks: { diff: true, scope: true, verification: true, extra: true } } },
-      { signal: { action: "approve", checks: { ratio: true, scope: true, verification: true } } },
-      { signal: { action: "request-changes", note: "why" } },
-      { signal: { action: "block", note: "why" } },
-    ]
-    for (const input of invalid) {
-      const result = await transition.execute({ sessionID: "s1", ...input }, agent)
-      expect(JSON.parse(result.content), JSON.stringify(input)).toMatchObject({ accepted: false, reason: "invalid-signal" })
-      expect(storage.values.has("review/v1/project/s1")).toBe(false)
-    }
-
-    // Valid approve with all fixed checks passes once a record exists.
-    const started = await transition.execute({ sessionID: "s1", signal: startValid }, agent)
-    expect(JSON.parse(started.content).accepted).toBe(true)
-    const approved = await transition.execute(
-      { sessionID: "s1", signal: { action: "approve", checks: { diff: true, scope: true, verification: true } } },
-      agent,
-    )
-    expect(JSON.parse(approved.content)).toMatchObject({ accepted: true, reason: "approval-complete" })
-    expect(JSON.parse(approved.content).record.state).toBe("approved")
-  })
-
-  test("review start may pin an exact head/base revision and rejects malformed or partial SHAs", async () => {
-    const options = parseOptions({ review: { mode: "bounded", max_rounds: 2 } })
-    const storage = memStorage()
-    const tools = new Map<string, ToolEntry>()
-    addObservabilityTools(
-      { add: (tool) => tools.set(tool.name, tool as unknown as ToolEntry) },
-      { options, storage, location },
-    )
-    const transition = tools.get("review_transition")!
-    const agent = { sessionID: "s1", agent: "orchestrator" }
-    const headSha = "a".repeat(40)
-    const baseSha = "b".repeat(40)
-    const startWithRevision = {
-      action: "start",
-      taskId: "t1",
-      runId: "r1",
-      maker: "implementer",
-      checker: "reviewer",
-      admissionState: "review-pending",
-      headSha,
-      baseSha,
-    }
-
-    // Malformed and partial revision fields never write a record.
-    const invalidSignals: Array<Record<string, unknown>> = [
-      { ...startWithRevision, headSha: "a".repeat(39) }, // too short
-      { ...startWithRevision, headSha: "A".repeat(40) }, // uppercase hex is not accepted
-      { ...startWithRevision, headSha: "abcdef0123456789" }, // not a full object ID
-      { ...startWithRevision, headSha: undefined }, // partial pair (baseSha present)
-      { ...startWithRevision, baseSha: undefined }, // partial pair (headSha present)
-    ]
-    for (const signal of invalidSignals) {
-      const result = await transition.execute({ sessionID: "s1", signal }, agent)
-      expect(JSON.parse(result.content), JSON.stringify(signal)).toMatchObject({ accepted: false, reason: "invalid-signal" })
-      expect(storage.values.has("review/v1/project/s1")).toBe(false)
-    }
-
-    // A valid pair persists the receipt and survives approval.
-    const started = await transition.execute({ sessionID: "s1", signal: startWithRevision }, agent)
-    expect(JSON.parse(started.content).accepted).toBe(true)
-    expect(JSON.parse(started.content).record).toMatchObject({ headSha, baseSha })
-    const approved = await transition.execute(
-      { sessionID: "s1", signal: { action: "approve", checks: { diff: true, scope: true, verification: true } } },
-      agent,
-    )
-    expect(JSON.parse(approved.content).record).toMatchObject({ state: "approved", headSha, baseSha })
-    expect(storage.values.get("review/v1/project/s1")).toMatchObject({ headSha, baseSha })
-
-    // The default (revision-less) start remains fully supported: a terminal
-    // old record may be replaced by a plain start with no receipt fields.
-    const plain = await transition.execute(
-      { sessionID: "s1", signal: { action: "start", taskId: "t2", runId: "r2", maker: "implementer", checker: "reviewer", admissionState: "review-pending" } },
-      agent,
-    )
-    expect(JSON.parse(plain.content).accepted).toBe(true)
-    expect(JSON.parse(plain.content).record.headSha).toBeUndefined()
-    expect(JSON.parse(plain.content).record.baseSha).toBeUndefined()
-  })
 })
 
 function fakeRuntime(): Pick<ObservabilityRuntime, "summary" | "evaluation"> {

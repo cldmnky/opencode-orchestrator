@@ -2,6 +2,7 @@ import type { OrchestratorOptions } from "../core/config.js"
 import {
   GH_TOOL_PERMISSION,
   GOAL_TOOL_PERMISSION,
+  REVIEW_SUBMIT_TOOL_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
   goalToolPermissionRule,
   hasExactPermissionRule,
@@ -93,7 +94,7 @@ export function applyAgentTransform(
       // deny-all; we must seed that explicitly so the appended rules do not
       // widen every other action. An explicit array — even `[]` — is the
       // user's policy and is preserved as-is.
-      agent.permissions = appendFeaturePermissions(agent.permissions, "allow")
+      agent.permissions = appendFeaturePermissions(agent.permissions, "allow", "deny")
     })
   }
 
@@ -118,7 +119,7 @@ export function applyAgentTransform(
       // policy, and the installer writes the bounded role-graph edges only for
       // agents it creates. Preserved agents keep whatever subagent policy the
       // operator wrote and are migrated by hand (see README).
-      agent.permissions = appendFeaturePermissions(agent.permissions, "deny")
+      agent.permissions = appendFeaturePermissions(agent.permissions, "deny", role === "review" ? "allow" : "deny")
     })
   }
 
@@ -128,6 +129,7 @@ export function applyAgentTransform(
 function appendFeaturePermissions(
   permissions: PermissionRuleLike[] | undefined,
   effect: PermissionEffect,
+  reviewSubmitEffect: PermissionEffect,
 ): PermissionRuleLike[] {
   // Pinned V2 permission semantics: with an explicit ruleset — even an empty
   // `[]` — a resource not matched by any rule defaults to effect `ask`, and
@@ -144,12 +146,16 @@ function appendFeaturePermissions(
       { action: "*", resource: "*", effect: "deny" },
       goalToolPermissionRule(effect),
       ...orchestratorOnlyPermissionRules(effect),
+      { action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: reviewSubmitEffect },
     ]
   }
   const existing = [...permissions]
   if (!hasExactPermissionRule(existing, GOAL_TOOL_PERMISSION)) existing.push(goalToolPermissionRule(effect))
   for (const permission of orchestratorOnlyPermissionRules(effect)) {
     if (!hasExactPermissionRule(existing, permission.action)) existing.push(permission)
+  }
+  if (!hasExactPermissionRule(existing, REVIEW_SUBMIT_TOOL_PERMISSION)) {
+    existing.push({ action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: reviewSubmitEffect })
   }
   return existing
 }

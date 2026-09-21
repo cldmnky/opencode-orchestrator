@@ -414,18 +414,19 @@ export const REMOTE_ORCHESTRATION_GUIDANCE = [
 
 /**
  * Explicit bounded maker-checker review flow, embedded only when
- * `review.mode === "bounded"`. It requires the serialized flow through the
- * existing admission tooling and the V1 review tools. The flow is callable and
- * advisory: nothing is gated automatically and a self-declared D2 reviewState
- * is never trusted as reviewer proof.
+ * `review.mode === "bounded"`. It uses separate lead-start and
+ * reviewer-submit V2 tools. The flow is callable and advisory: nothing is
+ * gated automatically and a self-declared D2 reviewState is never trusted as
+ * reviewer proof.
  */
 export const BOUNDED_REVIEW_GUIDANCE = [
-  "Bounded review mode is configured: run the explicit maker-checker flow.",
+  "Bounded review mode is configured: run the explicit provenance-bound maker-checker flow.",
   "Validate the maker handoff with orchestrator_handoff_validate before review.",
   "Reach admission state review-pending through orchestrator_admission_transition (orchestrator-pass with reviewRequired=true) before starting a review record.",
-  "Start the review record with orchestrator_review_transition using a start signal (taskId, runId, maker, checker, and the review-pending admission signal are required).",
-  "Delegate the reviewer (the configured review role), then record its fixed decision through orchestrator_review_transition: fixed boolean checks for approve, or request-changes / block.",
-  "V1 bounded review records caller-supplied maker/checker identities; they do not prove the reviewer child session.",
+  "Start V2 with orchestrator_review_start from the lead session using taskId, runId, and the exact head/base SHAs.",
+  "Delegate the configured reviewer child, then have that child call orchestrator_review_submit with its lead session, round, and one fixed decision.",
+  "The submit tool derives reviewer agent/session identity from ToolContext and refuses orchestrator self-approval or unrelated sessions.",
+  "V1 records are readable as legacy-unproven status only and never authorize publication or completion.",
   "Map the review decision through orchestrator_admission_transition (review-approve, review-reject, or review-block).",
   "Stop when the review record is blocked or tripped; do not keep dispatching the same run past a terminal breaker.",
   "These tools are callable/advisory, not an automatic completion gate: nothing is gated automatically and a self-declared D2 reviewState is never reviewer proof.",

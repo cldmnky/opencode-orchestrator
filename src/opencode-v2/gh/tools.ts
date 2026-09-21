@@ -6,8 +6,8 @@ import { liveEvidence, mutationEvidence } from "../orchestration/evidence.js"
 import { createRedactor } from "../process/redact.js"
 import type { ProcessRunner } from "../process/runner.js"
 import { requireGateEnabled } from "../gates/state.js"
-import { readReviewRecord } from "../observability/runtime.js"
-import { validateApprovedReviewRevision } from "../observability/review.js"
+import { readReviewRecord, readReviewRecordV2 } from "../observability/runtime.js"
+import { validateApprovedReviewV2Revision } from "../observability/review-v2.js"
 import {
   PUBLISH_REPLAY_LIMITATIONS,
   reconcilePrCreate,
@@ -311,9 +311,15 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
         }
         // Exact-revision internal review: the current bounded review record
         // must be APPROVED and carry the exact expected head/base pair.
-        const reviewRecord = await readReviewRecord(deps.storage, deps.location, tool.sessionID)
-        const review = validateApprovedReviewRevision({
+        const [reviewRecord, legacyReviewRecord] = await Promise.all([
+          readReviewRecordV2(deps.storage, deps.location, tool.sessionID),
+          readReviewRecord(deps.storage, deps.location, tool.sessionID),
+        ])
+        const review = validateApprovedReviewV2Revision({
           record: reviewRecord,
+          legacyRecord: legacyReviewRecord,
+          leadSessionID: tool.sessionID,
+          expectedReviewerAgentID: deps.options.roles.review,
           headSha: expectedHeadSha,
           baseSha: expectedBaseSha,
         })
@@ -425,7 +431,7 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
   draft.add({
     name: "github_pr_ready",
     description:
-      "Mark a draft pull request ready for review only when a fresh view proves the exact head revision, current remote base ancestry, draft:true, mergeable:true, and no dirty or unknown conflict state, then verifies the transition with a fresh post-view (open, unmerged, draft:false, exact head revision). Requires the durable publish capability 'pr-ready-transition' and confirm: true.",
+      "Mark a draft pull request ready for review only when a fresh view proves an approved V2 exact-revision review with reviewer-child provenance, the exact head revision, current remote base ancestry, draft:true, mergeable:true, and no dirty or unknown conflict state, then verifies the transition with a fresh post-view (open, unmerged, draft:false, exact head revision). Requires the durable publish capability 'pr-ready-transition' and confirm: true.",
     input: prReadyInput,
     options: { namespace: "orchestrator", permission: GH_TOOL_PERMISSION },
     execute: async (input, tool) => {
@@ -461,6 +467,23 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
             `github pr ready refused: expected head SHA does not match pull ${owner}/${repo}#${number} (head ${before.head?.sha ?? "(unknown)"})`,
           )
         }
+        const expectedBaseSha = before.base?.sha
+        if (!expectedBaseSha) {
+          return result(`github pr ready refused: pull ${owner}/${repo}#${number} has no exact base SHA for V2 review validation`)
+        }
+        const [reviewRecord, legacyReviewRecord] = await Promise.all([
+          readReviewRecordV2(deps.storage, deps.location, tool.sessionID),
+          readReviewRecord(deps.storage, deps.location, tool.sessionID),
+        ])
+        const review = validateApprovedReviewV2Revision({
+          record: reviewRecord,
+          legacyRecord: legacyReviewRecord,
+          leadSessionID: tool.sessionID,
+          expectedReviewerAgentID: deps.options.roles.review,
+          headSha: expectedHeadSha,
+          baseSha: expectedBaseSha,
+        })
+        if (!review.valid) return result(`github pr ready refused: ${review.message}`)
         if (before.mergeable !== true) {
           return result(
             `github pr ready refused: pull ${owner}/${repo}#${number} is not mergeable (mergeable=${String(before.mergeable)})`,
@@ -555,9 +578,15 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
         }
         // Exact internal receipt: the approved review record must carry the
         // exact expected head/base pair; anything else fails closed.
-        const reviewRecord = await readReviewRecord(deps.storage, deps.location, tool.sessionID)
-        const receipt = validateApprovedReviewRevision({
+        const [reviewRecord, legacyReviewRecord] = await Promise.all([
+          readReviewRecordV2(deps.storage, deps.location, tool.sessionID),
+          readReviewRecord(deps.storage, deps.location, tool.sessionID),
+        ])
+        const receipt = validateApprovedReviewV2Revision({
           record: reviewRecord,
+          legacyRecord: legacyReviewRecord,
+          leadSessionID: tool.sessionID,
+          expectedReviewerAgentID: deps.options.roles.review,
           headSha: expectedHeadSha,
           baseSha: expectedBaseSha,
         })
@@ -704,9 +733,15 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
         const capability = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "merge")
         if (!capability.ok) return result(`github pr merge refused: ${capability.message}`)
         // Exact-revision internal review receipt for the same head/base pair.
-        const reviewRecord = await readReviewRecord(deps.storage, deps.location, tool.sessionID)
-        const receipt = validateApprovedReviewRevision({
+        const [reviewRecord, legacyReviewRecord] = await Promise.all([
+          readReviewRecordV2(deps.storage, deps.location, tool.sessionID),
+          readReviewRecord(deps.storage, deps.location, tool.sessionID),
+        ])
+        const receipt = validateApprovedReviewV2Revision({
           record: reviewRecord,
+          legacyRecord: legacyReviewRecord,
+          leadSessionID: tool.sessionID,
+          expectedReviewerAgentID: deps.options.roles.review,
           headSha: expectedHeadSha,
           baseSha: expectedBaseSha,
         })

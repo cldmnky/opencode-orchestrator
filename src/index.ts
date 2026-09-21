@@ -201,6 +201,34 @@ export type {
 } from "./opencode-v2/observability/review.js"
 export type { DispatchGate, DispatchDecision, DispatchCheck } from "./opencode-v2/observability/runtime.js"
 
+// V2 provenance-bound review records. V1 helpers above remain readable for
+// migration/status reporting but are never accepted as publication proof.
+export {
+  REVIEW_V2_VERSION,
+  REVIEW_V2_STATES,
+  REVIEW_V2_DECISIONS,
+  REVIEW_V2_REASONS,
+  REVIEW_V2_CHECK_KEYS,
+  reviewV2RecordSchema,
+  reviewV2StartInputSchema,
+  reviewV2SubmitInputSchema,
+  startReviewV2,
+  submitReviewV2,
+  parseReviewV2Record,
+  reviewV2StorageKey,
+  validateApprovedReviewV2Revision,
+} from "./opencode-v2/observability/review-v2.js"
+export type {
+  ReviewV2State,
+  ReviewV2Decision,
+  ReviewV2Reason,
+  ReviewV2Checks,
+  ReviewV2Record,
+  ReviewV2Transition,
+  ReviewV2RevisionCheck,
+  ReviewV2RevisionVerdict,
+} from "./opencode-v2/observability/review-v2.js"
+
 // Durable project-scoped publication authorization policy. State helpers are
 // storage-only (never git/process) and the status view is what `/publish`
 // and orchestrator_publish_policy_get expose; the tools themselves stay wired

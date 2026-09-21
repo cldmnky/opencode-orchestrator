@@ -10,7 +10,7 @@ items are checked only after their production behavior and tests are merged.
 - [x] Phase 1 fresh temporary bundle for Phase A/D contract tests, verification scripts, CI workflow, and publish-tag ordering.
 - [x] Phase 2 capability vocabulary and initial claim/prompt alignment.
 - [x] Phase 3 plugin-observed verification receipts and read-only receipt discovery.
-- [ ] Phase 4 reviewer-child provenance and review V2.
+- [x] Phase 4 reviewer-child provenance and review V2.
 - [ ] Phase 5 lead-board V2 and completion-chain migration.
 - [ ] Phase 6 runtime parallel dispatch admission (or documented host limitation).
 - [ ] Phase 7 model-visible surface reduction and D4 v2 removal.
@@ -19,12 +19,14 @@ items are checked only after their production behavior and tests are merged.
 - [ ] Phase 10 declarations, package API, and bundle cleanup.
 - [ ] Phase 11 final documentation and release verification.
 
-The current branch implements the first three foundational slices. Phase 3
+The current branch implements the first four foundational slices. Phase 3
 measured the pinned beta-19507 shell hook, added bounded plugin-observed
 receipts, and replaced lead command-proof claims with exact-revision receipt
-matching. Later status updates will record exact host-contract findings and any
-item that remains advisory because beta-19507 cannot provide the required
-provenance.
+matching. Phase 4 binds new review approvals to the configured reviewer agent
+and verified child-session ancestry; legacy V1 records remain status-only and
+are reported as `legacy-unproven`. Later status updates will record exact
+host-contract findings and any item that remains advisory because beta-19507
+cannot provide the required provenance.
 
 ## Purpose
 
@@ -337,12 +339,14 @@ Add tests that assert prohibited phrases do not appear when the backing capabili
 ### Progress
 
 Phase 2 introduced `src/core/capabilities.ts` and embedded one shared
-vocabulary in orchestration, worker, continuation, and command prompts. Current
-wording calls `max_parallel` guidance, plugin-observed lead command validation
-enforced, V1 review identity recorded, and publication revision checks
-enforced. The GitHub guidance no longer contradicts the autonomous publication
-lifecycle. The remaining claim cleanup is coupled to the Phase 4–6 provenance
-work and will be updated as those phases land.
+vocabulary in orchestration, worker, continuation, and command prompts. At the
+Phase 2 boundary, wording called `max_parallel` guidance, plugin-observed lead
+command validation enforced, V1 review identity recorded, and publication
+revision checks enforced. Phase 4 now describes new V2 reviewer-child
+provenance as observed while retaining the V1 `legacy-unproven` boundary. The
+GitHub guidance no longer contradicts the autonomous publication lifecycle. The
+remaining claim cleanup is coupled to the Phase 5–6 work and will be updated as
+those phases land.
 
 ---
 
@@ -543,6 +547,24 @@ Update worktree push, PR create, ready, approval, merge, and board completion to
 - The orchestrator cannot create an approved V2 review record by calling a tool itself.
 - The configured reviewer child can submit exactly one decision for the active round.
 - Publication fails closed on V1, missing, stale, or revision-mismatched reviews.
+
+### Progress
+
+Phase 4 adds `review/v2/<project>/<lead-session>` records and replaces the
+caller-identity V1 transition surface with separate `review_start` and
+`review_submit` operations. The lead start pins task/run and exact head/base
+SHAs and records the configured review role. Submit derives the reviewer agent
+and session from `ToolContext`, verifies the session is a descendant of the
+lead through the host session API, enforces the active round, and persists only
+the bounded decision plus the fixed checks. Fresh installer and agent-transform
+rules expose submit only to the configured review agent.
+
+Worktree push, GitHub draft/ready/approve/merge operations, and lead-board
+completion now consume only approved V2 records at the exact requested
+revision. V1 records remain readable through review/status surfaces as
+`legacy-unproven`; they are never upgraded or accepted as publication or
+completion proof. The bounded current-record and process-local lock limitations
+remain unchanged until the later state-recovery and lead-board phases.
 
 ---
 

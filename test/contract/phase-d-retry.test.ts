@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { OpenCode } from "@opencode/sdk"
 import { APICallError } from "ai"
+import { loadBuiltPlugin } from "./helpers/build-plugin.js"
 
 /**
  * Phase D (N5) pinned-host contract probe and production wiring measurement
@@ -49,8 +49,6 @@ const WORKER_AGENT = "build"
 const FIXTURE_TEXT = "[phase-d-probe] deterministic fixture output"
 const FIXTURE_FAILURE = "[phase-d-probe] deterministic provider failure"
 const TEST_TIMEOUT = 20_000
-const BUILT_ENTRY = fileURLToPath(new URL("../../dist/index.js", import.meta.url))
-
 type Host = Awaited<ReturnType<typeof OpenCode.create>>
 
 type RetryEventSnapshot = {
@@ -363,16 +361,6 @@ function rateLimitedFailure(): APICallError {
     isRetryable: true,
     data: { error: { code: "rate_limit_exceeded" } },
   })
-}
-
-let cachedBuiltPlugin: unknown
-
-async function loadBuiltPlugin(): Promise<unknown> {
-  if (!existsSync(BUILT_ENTRY)) {
-    throw new Error(`missing built entry ${BUILT_ENTRY}; run \`bun run build\` before this contract suite`)
-  }
-  if (cachedBuiltPlugin === undefined) cachedBuiltPlugin = (await import(BUILT_ENTRY)).default
-  return cachedBuiltPlugin
 }
 
 /**

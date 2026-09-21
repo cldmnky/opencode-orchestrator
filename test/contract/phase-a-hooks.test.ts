@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { OpenCode } from "@opencode/sdk"
+import { loadBuiltPlugin } from "./helpers/build-plugin.js"
 
 /**
  * Phase A pinned-host probe (measurement only; no N1/N2 enforcement).
@@ -25,8 +25,8 @@ import { OpenCode } from "@opencode/sdk"
  *      that child only, through the same awaited prompt hook.
  *
  * Harness facts:
- *   - Each test boots an isolated `OpenCode.create` host that directly loads the
- *     built `dist/index.js` entry (run `bun run build` first) plus a test-only
+ *   - Each test boots an isolated `OpenCode.create` host that directly loads a
+ *     fresh test-owned bundle plus a test-only
  *     probe plugin registering the hooks under measurement.
  *   - No provider call is permitted. Every configured agent carries an
  *     unresolvable probe model, prompts are admitted with `delivery: "queue"`
@@ -49,8 +49,6 @@ const PROBE_MODEL = "phase-a-probe/none"
 const CHILD_AGENT = "phase-a-child"
 const CHILD_RULE_ACTION = "phase-a.child.admission"
 const CHILD_RULE_FAILURE = "phase-a child rule installer failed"
-const BUILT_ENTRY = fileURLToPath(new URL("../../dist/index.js", import.meta.url))
-
 /**
  * Per-case timeout for the five child-session cases that create a child through
  * the shared `createChildViaSubagent` helper.
@@ -343,16 +341,6 @@ const AGENTS = {
     model: PROBE_MODEL,
     permissions: [{ action: "*", resource: "*", effect: "allow" }],
   },
-}
-
-let cachedBuiltPlugin: unknown
-
-async function loadBuiltPlugin(): Promise<unknown> {
-  if (!existsSync(BUILT_ENTRY)) {
-    throw new Error(`missing built entry ${BUILT_ENTRY}; run \`bun run build\` before this contract suite`)
-  }
-  if (cachedBuiltPlugin === undefined) cachedBuiltPlugin = (await import(BUILT_ENTRY)).default
-  return cachedBuiltPlugin
 }
 
 async function withIsolatedHost<T>(

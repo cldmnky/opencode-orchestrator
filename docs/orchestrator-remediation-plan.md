@@ -1,5 +1,28 @@
 # OpenCode Orchestrator Remediation Plan
 
+## Implementation status
+
+Updated continuously as the remediation lands in mergeable PRs. Completed
+items are checked only after their production behavior and tests are merged.
+
+- [x] Baseline fixtures restored and committed.
+- [x] Phase 0 contract-fixture documentation, state inventory, and fixture-presence tests.
+- [x] Phase 1 fresh temporary bundle for Phase A/D contract tests, verification scripts, CI workflow, and publish-tag ordering.
+- [ ] Phase 2 capability vocabulary and claim/prompt alignment.
+- [ ] Phase 3 plugin-observed verification receipts (or documented host limitation).
+- [ ] Phase 4 reviewer-child provenance and review V2.
+- [ ] Phase 5 lead-board V2 and completion-chain migration.
+- [ ] Phase 6 runtime parallel dispatch admission (or documented host limitation).
+- [ ] Phase 7 model-visible surface reduction and D4 v2 removal.
+- [ ] Phase 8 installer migration, live doctor, and state recovery.
+- [ ] Phase 9 read-only orchestration progress RPC/TUI.
+- [ ] Phase 10 declarations, package API, and bundle cleanup.
+- [ ] Phase 11 final documentation and release verification.
+
+The current branch implements the first two foundational slices. Later status
+updates will record exact host-contract findings and any item that remains
+advisory because beta-19507 cannot provide the required provenance.
+
 ## Purpose
 
 This document is the implementation plan for hardening, simplifying, and completing the OpenCode V2 orchestrator plugin. It is written for an implementer agent expected to carry the work from the current repository state through tests, documentation, migration, and release readiness.
@@ -28,9 +51,9 @@ At the time this plan was written:
 
 - `bun run typecheck` passes.
 - The restored D2/D4 fixtures make the source unit suite green.
-- `bun test test/unit` reports 1,026 passing tests, one skipped test, and no failures.
-- Some contract tests load `dist/index.js` directly, but `dist/` is ignored and is not rebuilt by `bun test`. A stale local bundle therefore produces false contract failures, while a clean checkout may have no bundle at all.
-- There is no checked-in GitHub Actions workflow.
+- The latest full suite reports 1,075 passing tests, one skipped test, and no failures after a fresh build.
+- Contract tests for Phase A and Phase D build a private temporary bundle per test process; they no longer consume ignored `dist/` output.
+- A checked-in GitHub Actions workflow runs typecheck, unit tests, contract tests, build, and package smoke verification.
 - The plugin can register up to 38 model-visible tools and 11 slash commands.
 - `max_parallel` is prompt guidance, not a runtime limit.
 - Lead-board command checks are supplied by the orchestrator as `{ id, verdict }` values. The plugin does not prove that the lead actually ran those commands.

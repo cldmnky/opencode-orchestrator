@@ -4,25 +4,16 @@ set -euo pipefail
 # Local publish script for opencode-v2-agent-orchestrator
 # Usage:
 #   ./scripts/publish.sh              # interactive OTP prompt if needed
-#   ./scripts/publish.sh --otp 123456 # provide OTP directly
-#   NPM_OTP=123456 ./scripts/publish.sh
+#   NPM_CONFIG_OTP=123456 ./scripts/publish.sh # optional secure environment input
 #
 # Requirements: bun, npm (logged in), git, gh (for release), YubiKey touch if 2FA hardware key is enabled.
 # Run from repo root where YubiKey is physically accessible.
 
-OTP=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --otp)
-      OTP="$2"
-      shift 2
-      ;;
-    --otp=*)
-      OTP="${1#--otp=}"
-      shift
-      ;;
     -h|--help)
-      echo "Usage: $0 [--otp CODE]"
+      echo "Usage: $0"
+      echo "npm handles interactive 2FA; use NPM_CONFIG_OTP only through a secure environment mechanism."
       exit 0
       ;;
     *)
@@ -31,10 +22,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ -z "${OTP}" && -n "${NPM_OTP:-}" ]]; then
-  OTP="${NPM_OTP}"
-fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -65,7 +52,39 @@ fi
 echo "   npm user: $(npm whoami)"
 echo "   npm latest: $(npm view opencode-v2-agent-orchestrator version 2>&1 || echo 'unknown')"
 
-# Check if tag already exists (local or remote)
+# Create tarball for manual fallback
+echo "==> Packing tarball to /tmp"
+TARBALL="$(npm pack --pack-destination /tmp 2>&1 | tail -n1)"
+# npm pack prints filename as last line; fallback to known path
+if [[ -f "/tmp/opencode-v2-agent-orchestrator-${VERSION}.tgz" ]]; then
+  TARBALL="/tmp/opencode-v2-agent-orchestrator-${VERSION}.tgz"
+fi
+echo "   tarball: ${TARBALL} ($(du -h "${TARBALL}" | cut -f1))"
+
+# Publish
+echo "==> 5/5 npm publish (YubiKey touch or interactive OTP may be required)"
+if npm publish; then
+  echo "   npm publish succeeded"
+else
+  echo ""
+  echo "ERROR: npm publish failed. Common fixes:" >&2
+  echo "  - If you have a hardware key (YubiKey), run this script locally where you can touch the key." >&2
+  echo "  - If 2FA is TOTP, retry with npm's interactive prompt or a secure NPM_CONFIG_OTP environment mechanism." >&2
+  echo "  - Or publish the tarball directly: npm publish /tmp/opencode-v2-agent-orchestrator-${VERSION}.tgz" >&2
+  echo "  - Check npm whoami and token: cat ~/.npmrc" >&2
+  exit 1
+fi
+
+echo "==> Verify published version"
+sleep 2
+PUBLISHED="$(npm view opencode-v2-agent-orchestrator version 2>&1)"
+echo "   npm latest is now: ${PUBLISHED}"
+if [[ "${PUBLISHED}" != "${VERSION}" ]]; then
+  echo "WARN: published version mismatch (expected ${VERSION}, got ${PUBLISHED})" >&2
+fi
+
+# Create and push the tag only after verification, package creation, and npm
+# publication succeed. A failed publish must not leave a release tag behind.
 if git rev-parse "${TAG}" >/dev/null 2>&1; then
   echo "   tag ${TAG} already exists locally — skipping git tag"
 else
@@ -78,45 +97,6 @@ if git ls-remote --tags origin | grep -q "refs/tags/${TAG}$"; then
 else
   echo "==> Pushing git tag ${TAG}"
   git push origin "${TAG}"
-fi
-
-# Create tarball for manual fallback
-echo "==> Packing tarball to /tmp"
-TARBALL="$(npm pack --pack-destination /tmp 2>&1 | tail -n1)"
-# npm pack prints filename as last line; fallback to known path
-if [[ -f "/tmp/opencode-v2-agent-orchestrator-${VERSION}.tgz" ]]; then
-  TARBALL="/tmp/opencode-v2-agent-orchestrator-${VERSION}.tgz"
-fi
-echo "   tarball: ${TARBALL} ($(du -h "${TARBALL}" | cut -f1))"
-
-# Publish
-echo "==> 5/5 npm publish (YubiKey touch may be required)"
-PUBLISH_ARGS=()
-if [[ -n "${OTP}" ]]; then
-  PUBLISH_ARGS+=(--otp="${OTP}")
-  echo "   using OTP from CLI/env"
-else
-  echo "   no OTP provided — npm will prompt if 2FA requires it (touch YubiKey when asked)"
-fi
-
-if npm publish "${PUBLISH_ARGS[@]:-}"; then
-  echo "   npm publish succeeded"
-else
-  echo ""
-  echo "ERROR: npm publish failed. Common fixes:" >&2
-  echo "  - If you have a hardware key (YubiKey), run this script locally where you can touch the key." >&2
-  echo "  - If 2FA is TOTP, generate a fresh 6-digit code and retry: $0 --otp 123456" >&2
-  echo "  - Or publish the tarball directly: npm publish /tmp/opencode-v2-agent-orchestrator-${VERSION}.tgz --otp 123456" >&2
-  echo "  - Check npm whoami and token: cat ~/.npmrc" >&2
-  exit 1
-fi
-
-echo "==> Verify published version"
-sleep 2
-PUBLISHED="$(npm view opencode-v2-agent-orchestrator version 2>&1)"
-echo "   npm latest is now: ${PUBLISHED}"
-if [[ "${PUBLISHED}" != "${VERSION}" ]]; then
-  echo "WARN: published version mismatch (expected ${VERSION}, got ${PUBLISHED})" >&2
 fi
 
 # GitHub release (if not exists)

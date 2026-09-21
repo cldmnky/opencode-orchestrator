@@ -165,6 +165,7 @@ async function withAuthorityHost<T>(
     const faults: AuthorityFaults = { failRulesFor: undefined }
     const host = await OpenCode.create({
       plugins: [wrapAuthorityPlugin(await loadBuiltPlugin(), options, faults) as any, probe.plugin],
+      fs: { filewatcher: false },
       config: { directory, content: JSON.stringify({ agents: AGENTS }) },
     })
     try {
@@ -351,6 +352,7 @@ async function withIsolatedHost<T>(
     const probe = createProbe()
     const host = await OpenCode.create({
       plugins: [(await loadBuiltPlugin()) as any, probe.plugin],
+      fs: { filewatcher: false },
       config: { directory, content: JSON.stringify({ agents: AGENTS }) },
     })
     try {

@@ -175,6 +175,7 @@ describe("phase E native verification hook contract (pinned beta-19507)", () => 
     try {
       host = await OpenCode.create({
         plugins: [probe.plugin],
+        fs: { filewatcher: false },
         models: { fetch: false },
         database: { path: join(root, "database.sqlite") },
         config: { directory, content: config(directory) },
@@ -224,6 +225,7 @@ describe("phase E native verification hook contract (pinned beta-19507)", () => 
     try {
       host = await OpenCode.create({
         plugins: [probe.plugin],
+        fs: { filewatcher: false },
         models: { fetch: false },
         database: { path: join(root, "database.sqlite") },
         config: { directory, content: config(directory) },
@@ -256,6 +258,7 @@ describe("phase E native verification hook contract (pinned beta-19507)", () => 
     try {
       host = await OpenCode.create({
         plugins: [probe.plugin],
+        fs: { filewatcher: false },
         models: { fetch: false },
         database: { path: join(root, "database.sqlite") },
         config: { directory, content: config(directory) },

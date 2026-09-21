@@ -171,6 +171,7 @@ async function withHost<T>(
   const probe = createWorktreeProbe()
   const host = await OpenCode.create({
     plugins: [probe.plugin],
+    fs: { filewatcher: false },
     config: { directory: fixture.repo, content: JSON.stringify({ agents: AGENTS }) },
   })
   try {

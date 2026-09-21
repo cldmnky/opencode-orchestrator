@@ -11,6 +11,12 @@
 import { For } from "solid-js"
 import type { JSX } from "@opentui/solid"
 import type { RGBA } from "@opentui/core"
+import type {
+  ProgressBoardSummary,
+  ProgressBudgetSummary,
+  ProgressGateSummary,
+  ProgressPublicationSummary,
+} from "../opencode-v2/progress/rpc.js"
 
 /** Minimal structural view of a session; the SDK's SessionInfo satisfies it. */
 export type SessionLike = {
@@ -33,7 +39,7 @@ export type LiveStatus = "idle" | "running" | "busy" | "unknown"
 
 export type GoalSummaryStatus = "active" | "paused" | "complete"
 export type WorktreeSummaryStatus = "pending" | "ready" | "moved" | "dirty" | "orphaned" | "cleanup-failed"
-export type ReviewSummaryState = "pending" | "approved" | "changes-requested" | "blocked" | "tripped"
+export type ReviewSummaryState = "pending" | "approved" | "changes-requested" | "blocked" | "tripped" | "legacy-unproven"
 
 /**
  * Local cached summary of durable orchestrator state for one session.
@@ -48,6 +54,13 @@ export type CachedSessionSummary = {
   goal: { status: GoalSummaryStatus; objectiveHint: string } | null
   worktree: { status: WorktreeSummaryStatus; branch: string } | null
   review: { state: ReviewSummaryState } | null
+  /** Optional fields populated by the Phase 9 progress RPC. */
+  board?: ProgressBoardSummary
+  budget?: ProgressBudgetSummary
+  publication?: ProgressPublicationSummary
+  gates?: ProgressGateSummary
+  complete?: boolean
+  limitations?: readonly string[]
 }
 
 /** Keeps only sessions running the orchestrator agent. */
@@ -72,6 +85,7 @@ export function liveStatus(
 
 /** Sidebar rows are single-line: titles are collapsed and truncated to this length. */
 export const MAX_ROW_TITLE_LENGTH = 40
+export const MAX_ROW_BRANCH_LENGTH = 20
 
 /** Collapses whitespace, falls back to `(untitled)`, and truncates long titles. */
 export function cleanRowTitle(title?: string): string {
@@ -103,9 +117,17 @@ export function rowParts(input: {
 }): RowParts {
   const meta = [`$${Number.isFinite(input.cost) ? input.cost.toFixed(2) : "0.00"}`]
   if (input.summary?.goal) meta.push(`goal:${input.summary.goal.status}`)
-  if (input.summary?.worktree) meta.push(`tree:${input.summary.worktree.status}@${input.summary.worktree.branch}`)
+  if (input.summary?.worktree) meta.push(`tree:${input.summary.worktree.status}@${compactRowLabel(input.summary.worktree.branch, MAX_ROW_BRANCH_LENGTH)}`)
   if (input.summary?.review) meta.push(`review:${input.summary.review.state}`)
+  if (input.summary?.board) meta.push(`board:${input.summary.board.completed}/${input.summary.board.total}`)
+  if (input.summary?.complete === false) meta.push("incomplete")
   return { status: input.status, title: cleanRowTitle(input.title), meta: meta.join(" ") }
+}
+
+function compactRowLabel(value: string, maxLength: number): string {
+  const collapsed = value.replace(/\s+/g, " ").trim()
+  if (collapsed.length <= maxLength) return collapsed
+  return `${collapsed.slice(0, maxLength - 1)}…`
 }
 
 /** Formats one deterministic, human-readable sidebar row (always single-line). */

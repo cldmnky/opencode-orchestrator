@@ -3,6 +3,7 @@ import type { Context } from "@opencode/plugin/tui/context"
 import { tuiPlugin } from "../../src/tui.js"
 import { commandDefinitions } from "../../src/opencode-v2/commands/index.js"
 import { parseOptions } from "../../src/core/config.js"
+import { unavailableProgressView } from "../../src/opencode-v2/progress/rpc.js"
 
 describe("TUI plugin contract", () => {
   test("registers its keymap layer from the app slot before the first async boundary", async () => {
@@ -122,7 +123,8 @@ describe("TUI plugin contract", () => {
     expect(typeof claims[1]?.render).toBe("function")
 
     // Cleanup stops the failure notice and command refresh subscriptions,
-    // the app slot, then the sidebar's 8 session-refresh subscriptions and
+    // the app slot, then the sidebar's session-refresh and progress
+    // invalidation subscriptions and
     // its own slot. `stopped` records every teardown in order.
     expect(stopped).toEqual([
       "session.execution.failed",
@@ -133,11 +135,82 @@ describe("TUI plugin contract", () => {
       "session.execution.failed",
       "session.execution.interrupted",
       "session.status",
+      "session.idle",
       "session.usage.updated",
       "session.renamed",
       "session.created",
+      "tui.command.execute",
       "slot",
     ])
+  })
+
+  test("fetches visible progress through the connected RPC and refreshes on idle completion", async () => {
+    const stopped: string[] = []
+    const handlers = new Map<string, (event: any) => void>()
+    const calls: unknown[] = []
+    const sessions = [{ id: "session", agent: "orchestrator", title: "Goal" }]
+    const progress = unavailableProgressView("session", "test compatibility view")
+    const specs = commandDefinitions(parseOptions({}))
+    const context = {
+      options: {},
+      location: { directory: "/workspace" },
+      data: {
+        on: (type: string, handler: (event: any) => void) => {
+          handlers.set(type, handler)
+          return () => {
+            stopped.push(type)
+            handlers.delete(type)
+          }
+        },
+        session: {
+          list: () => sessions,
+          invalidate: () => {},
+          sync: async () => {},
+          status: () => "idle",
+          cost: () => 0,
+        },
+        location: {
+          default: () => ({ directory: "/workspace" }),
+          command: {
+            sync: async () => {},
+            invalidate: () => {},
+            list: () => specs.map((spec) => ({ name: spec.name, description: spec.description })),
+          },
+        },
+      },
+      ui: {
+        slot: (claim: { append?: string; render: (input: unknown) => unknown }) => {
+          if (claim.append !== "sidebar.content") claim.render({})
+          return () => stopped.push(`slot:${claim.append ?? "app"}`)
+        },
+        tabs: { list: () => [] },
+        router: { current: () => ({ type: "session", sessionID: "session" }) },
+        dialog: { alert: async () => {}, select: async () => undefined },
+        toast: { show: () => {} },
+      },
+      keymap: { layer: (definition: () => unknown) => void definition() },
+      client: {
+        rpc: (definition: { id: string }) => {
+          expect(definition.id).toBe("opencode-orchestrator.progress")
+          return {
+            get: async (input: unknown, requestOptions: unknown) => {
+              calls.push({ input, requestOptions })
+              return progress
+            },
+          }
+        },
+      },
+    } as unknown as Context
+
+    const cleanup = await tuiPlugin.setup(context)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(calls).toEqual([{ input: { sessionID: "session" }, requestOptions: { location: { directory: "/workspace" } } }])
+
+    handlers.get("session.idle")?.({ data: { sessionID: "session" } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(calls).toHaveLength(2)
+    await cleanup?.()
+    expect(stopped).toContain("session.idle")
   })
 
   test("registers palette commands with short /name titles", async () => {
@@ -176,13 +249,15 @@ describe("TUI plugin contract", () => {
     // Every runtime command is in the palette and `/` completion with a
     // short /name title; the group header already says "OpenCode
     // Orchestrator" so titles carry no redundant prefix.
-    expect(commands.map((command) => command.slash?.name).sort()).toEqual(specs.map((spec) => spec.name).sort())
-    for (const command of commands) {
+    const slashCommands = commands.filter((command) => command.slash)
+    expect(slashCommands.map((command) => command.slash?.name).sort()).toEqual(specs.map((spec) => spec.name).sort())
+    for (const command of slashCommands) {
       expect(command.title).toBe(`/${command.slash?.name}`)
       expect(command.group).toBe("OpenCode Orchestrator")
       expect(command.palette).toBe(true)
       expect(command.slash?.name).toBeTruthy()
     }
+    expect(commands.find((command) => command.title === "View orchestrator progress")?.palette).toBe(true)
   })
 
   test("opens the session gate picker and toggles gates through the server RPC", async () => {

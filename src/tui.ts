@@ -8,12 +8,15 @@ import { formatModelReference, parseModelReference, type ModelReference } from "
 import { workerAgentRoles } from "./core/roles.js"
 import { RUNTIME_PLUGIN_ID } from "./core/package-identity.js"
 import { filterOrchestratorSessions, renderSidebar, type SessionStatus, type SidebarTheme } from "./tui/sidebar.js"
+import { formatProgressDetail } from "./tui/progress.js"
+import { parseProgressView, progressRpcDefinition, unavailableProgressView, type ProgressView } from "./opencode-v2/progress/rpc.js"
 
 export const tuiPlugin = {
   id: RUNTIME_PLUGIN_ID,
   async setup(context: Context) {
     const options = parseOptions(context.options)
     const location = context.location ?? context.data.location.default()
+    const progress = createProgressCache(context, location, options)
 
     const stopFailureNotice = context.data.on("session.execution.failed", (event) => {
       const sessionID = event.data.sessionID
@@ -45,9 +48,12 @@ export const tuiPlugin = {
           return {
             mode: "global",
             priority: 20,
-            commands: commandDefinitions(options)
-              .filter((spec) => available.get(spec.name) === spec.description)
-              .map((spec) => tuiCommand(context, spec.name, spec.description)),
+            commands: [
+              ...commandDefinitions(options)
+                .filter((spec) => available.get(spec.name) === spec.description)
+                .map((spec) => tuiCommand(context, spec.name, spec.description)),
+              progressCommand(context, progress),
+            ],
           }
         })
         return null
@@ -56,7 +62,7 @@ export const tuiPlugin = {
 
     // Read-only live sidebar list of orchestrator sessions. Requires session
     // tabs to derive the "busy" state, so hosts without tabs skip it entirely.
-    const stopSidebar = registerSidebar(context, options)
+    const stopSidebar = registerSidebar(context, options, progress)
 
     try {
       await context.data.location.command.sync(location)
@@ -65,6 +71,7 @@ export const tuiPlugin = {
       stopCommandUpdates()
       stopLayer()
       stopSidebar?.()
+      progress.clear()
       throw error
     }
 
@@ -73,6 +80,7 @@ export const tuiPlugin = {
       stopCommandUpdates()
       stopLayer()
       stopSidebar?.()
+      progress.clear()
     }
   },
 } satisfies Definition
@@ -87,23 +95,158 @@ export const tuiPlugin = {
  * storage directly. Because the "busy" state comes from session tabs, hosts
  * that do not expose `context.ui.tabs` skip the contribution entirely.
  */
-function registerSidebar(context: Context, options: OrchestratorOptions): (() => void) | undefined {
+type ProgressCacheState = {
+  summaries: Record<string, ProgressView | null>
+}
+
+type ProgressCache = {
+  refresh(sessionID: string): Promise<ProgressView | undefined>
+  refreshVisible(): Promise<void>
+  get(sessionID: string): ProgressView | undefined
+  values(sessionIDs: readonly string[]): ProgressView[]
+  clear(): void
+}
+
+/**
+ * Client-local, ephemeral progress cache.  The server RPC is the only source
+ * of durable state; `memory` is used only to make slot renders reactive and to
+ * avoid a second sidebar/state implementation in the TUI plugin.
+ */
+function createProgressCache(context: Context, location: { directory: string }, options: OrchestratorOptions): ProgressCache {
+  const contextWithStorage = context as Context & {
+    storage?: {
+      memory?: (
+        key: string,
+        options: { initial: ProgressCacheState },
+      ) => readonly [ProgressCacheState, (mutation: (draft: ProgressCacheState) => void) => void]
+    }
+  }
+  const memory = contextWithStorage.storage?.memory
+  const [state, setState]: readonly [
+    ProgressCacheState,
+    ((mutation: (draft: ProgressCacheState) => void) => void) | undefined,
+  ] = memory
+    ? memory(`${RUNTIME_PLUGIN_ID}.progress.${location.directory}`, { initial: { summaries: {} } })
+    : [({ summaries: {} } satisfies ProgressCacheState), undefined]
+  const update = (mutation: (draft: ProgressCacheState) => void): void => {
+    if (setState) setState(mutation)
+    else mutation(state)
+  }
+  const inFlight = new Set<string>()
+
+  return { refresh, refreshVisible, get, values, clear }
+
+  async function refresh(sessionID: string): Promise<ProgressView | undefined> {
+    if (!sessionID || inFlight.has(sessionID)) return get(sessionID)
+    const visible = visibleSessionIDs()
+    if (!visible.includes(sessionID)) return get(sessionID)
+    inFlight.add(sessionID)
+    try {
+      const client = (context as unknown as { client?: { rpc?: (definition: unknown) => { get(input: unknown, options: unknown): Promise<unknown> } } }).client
+      if (!client?.rpc) throw new Error("progress RPC is unavailable")
+      const rpc = client.rpc(progressRpcDefinition)
+      const raw = await rpc.get({ sessionID }, { location })
+      const view = parseProgressView(raw)
+      const result = view ?? unavailableProgressView(sessionID, "progress RPC returned an invalid response")
+      update((draft) => {
+        draft.summaries[sessionID] = result ?? null
+      })
+      return result
+    } catch {
+      // A server plugin from before Phase 9, a disconnected remote, or a
+      // malformed response is represented as unknown.  Do not print transport
+      // errors or retain arbitrary response text in the TUI cache.
+      update((draft) => {
+        draft.summaries[sessionID] = unavailableProgressView(sessionID, "progress RPC is unavailable")
+      })
+      return get(sessionID)
+    } finally {
+      inFlight.delete(sessionID)
+    }
+  }
+
+  async function refreshVisible(): Promise<void> {
+    const sessionIDs = visibleSessionIDs()
+    const visible = new Set(sessionIDs)
+    update((draft) => {
+      for (const sessionID of Object.keys(draft.summaries)) {
+        if (!visible.has(sessionID)) delete draft.summaries[sessionID]
+      }
+    })
+    await Promise.all(sessionIDs.map((sessionID) => refresh(sessionID)))
+  }
+
+  function get(sessionID: string): ProgressView | undefined {
+    return state.summaries[sessionID] ?? undefined
+  }
+
+  function values(sessionIDs: readonly string[]): ProgressView[] {
+    return sessionIDs.map((sessionID) => state.summaries[sessionID]).filter((value): value is ProgressView => value !== null && value !== undefined)
+  }
+
+  function clear(): void {
+    update((draft) => {
+      draft.summaries = {}
+    })
+  }
+
+  function visibleSessionIDs(): string[] {
+    const sessions = context.data.session?.list?.() ?? []
+    return filterOrchestratorSessions(sessions, options.orchestrator).map((session) => session.id)
+  }
+}
+
+function progressCommand(context: Context, progress: ProgressCache): KeymapCommand {
+  return {
+    id: `${RUNTIME_PLUGIN_ID}.progress`,
+    title: "View orchestrator progress",
+    description: "Read-only goal, board, review, budget, worktree, and gate details",
+    group: "OpenCode Orchestrator",
+    palette: true,
+    enabled: () => activeSessionID(context) !== undefined,
+    run: async () => {
+      const sessionID = activeSessionID(context)
+      if (!sessionID) {
+        context.ui.toast.show({ title: "Orchestrator", message: "Open a session before viewing progress.", variant: "warning" })
+        return
+      }
+      const view = (await progress.refresh(sessionID)) ?? progress.get(sessionID)
+      if (!view) {
+        await context.ui.dialog.alert({
+          title: "Orchestrator progress",
+          message: "Progress is unknown or unavailable. The server plugin may be older, disconnected, or still loading.",
+        })
+        return
+      }
+      await context.ui.dialog.alert({ title: "Orchestrator progress", message: formatProgressDetail(view) })
+    },
+  }
+}
+
+function registerSidebar(context: Context, options: OrchestratorOptions, progress: ProgressCache): (() => void) | undefined {
   if (!context.ui.tabs) return undefined
 
   const refresh = (sessionID: string): void => {
     context.data.session.invalidate(sessionID)
     void context.data.session.sync(sessionID)
   }
+  const refreshWithProgress = (sessionID: string): void => {
+    refresh(sessionID)
+    void progress.refresh(sessionID)
+  }
   const stopRefresh = [
-    context.data.on("session.execution.started", (event) => refresh(event.data.sessionID)),
-    context.data.on("session.execution.succeeded", (event) => refresh(event.data.sessionID)),
-    context.data.on("session.execution.failed", (event) => refresh(event.data.sessionID)),
-    context.data.on("session.execution.interrupted", (event) => refresh(event.data.sessionID)),
-    context.data.on("session.status", (event) => refresh(event.data.sessionID)),
-    context.data.on("session.usage.updated", (event) => refresh(event.data.sessionID)),
-    context.data.on("session.renamed", (event) => refresh(event.data.sessionID)),
-    context.data.on("session.created", (event) => refresh(event.data.sessionID)),
+    context.data.on("session.execution.started", (event) => refreshWithProgress(event.data.sessionID)),
+    context.data.on("session.execution.succeeded", (event) => refreshWithProgress(event.data.sessionID)),
+    context.data.on("session.execution.failed", (event) => refreshWithProgress(event.data.sessionID)),
+    context.data.on("session.execution.interrupted", (event) => refreshWithProgress(event.data.sessionID)),
+    context.data.on("session.status", (event) => refreshWithProgress(event.data.sessionID)),
+    context.data.on("session.idle", (event) => refreshWithProgress(event.data.sessionID)),
+    context.data.on("session.usage.updated", (event) => refreshWithProgress(event.data.sessionID)),
+    context.data.on("session.renamed", (event) => refreshWithProgress(event.data.sessionID)),
+    context.data.on("session.created", () => void progress.refreshVisible()),
+    context.data.on("tui.command.execute", () => void progress.refreshVisible()),
   ]
+  void progress.refreshVisible()
   const stopSidebar = context.ui.slot({
     append: "sidebar.content",
     render: () => {
@@ -115,12 +258,13 @@ function registerSidebar(context: Context, options: OrchestratorOptions): (() =>
         statuses.set(session.id, context.data.session.status(session.id))
         costs.set(session.id, context.data.session.cost(session.id))
       }
-      return renderSidebar({ sessions, statuses, costs, tabs, theme: sidebarTheme(context) })
+      return renderSidebar({ sessions, statuses, costs, tabs, summaries: progress.values(sessions.map((session) => session.id)), theme: sidebarTheme(context) })
     },
   })
   return () => {
     for (const stop of stopRefresh) stop()
     stopSidebar()
+    progress.clear()
   }
 }
 

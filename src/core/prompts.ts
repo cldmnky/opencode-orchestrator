@@ -4,7 +4,6 @@ import {
   CAPABILITY_BOUNDARY_GUIDANCE,
   CHILD_TASK_CONTRACT,
   CLARIFY_GUIDANCE,
-  D4_V2_COHERENCE_GUIDANCE,
   DELEGATION_GRAPH_GUIDANCE,
   GITHUB_LIFECYCLE_GUIDANCE,
   HANDOFF_FORMAT,
@@ -103,7 +102,6 @@ export function buildWorkerSystem(role: keyof typeof ROLE_GUIDANCE, options?: Or
     "",
     verticalSliceGuidance(options?.decomposition?.strategy),
     CAPABILITY_BOUNDARY_GUIDANCE,
-    D4_V2_COHERENCE_GUIDANCE,
     "",
     CHILD_TASK_CONTRACT,
     REMOTE_ORCHESTRATION_GUIDANCE,
@@ -152,16 +150,9 @@ export function buildCommandPrompt(name: string, argumentsText: string, options?
     goal: [
       "Manage the session goal deterministically.",
       `The argument is: ${args}.`,
-      "Use the namespaced goal tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update with plugin-owned durable storage: set, show, pause, resume, or clear only the current session goal.",
+      "Use orchestrator_goal with plugin-owned durable storage: get, set, pause, resume, complete, or clear only the current session goal.",
       "Continue only while it is active.",
-      "Mark complete through orchestrator_goal_update with auditable evidence.",
-    ].join("\n"),
-    restructure: [
-      `Perform a conservative, test-backed restructuring of: ${args}.`,
-      "Research references and tests first.",
-      "Write a phased plan under .orchestrator/plans/.",
-      "Execute the phases in order with behavior-preserving edits only.",
-      "Then run a reviewer pass over the aggregate change.",
+      "Mark complete through orchestrator_goal with auditable evidence.",
     ].join("\n"),
     "run-plan": [
       `Execute the requested plan from .orchestrator/plans/: ${args}.`,
@@ -185,20 +176,6 @@ export function buildCommandPrompt(name: string, argumentsText: string, options?
       "Then separate established facts from assumptions.",
       "Then include completed work, pending work, decisions, verification, and blockers.",
     ].join("\n"),
-    polish: [
-      `Polish the requested scope without changing behavior: ${args}.`,
-      "Inspect changed files.",
-      "Make only justified cleanup edits.",
-      "Verify each affected area.",
-      "Request an independent aggregate review of the full change.",
-    ].join("\n"),
-    "stress-plan": [
-      `Create a robust plan for: ${args}.`,
-      "Gather repository facts.",
-      "Draft the plan.",
-      "Obtain independent critiques covering correctness, scope, security, and feasibility.",
-      "Then synthesize one revised plan with an explicit phase order under .orchestrator/plans/.",
-    ].join("\n"),
     gates: [
       `Manage the per-session orchestrator gates for: ${args}.`,
       "This control request is handled by the plugin before any model turn.",
@@ -219,11 +196,11 @@ export function buildCommandPrompt(name: string, argumentsText: string, options?
  */
 const LEAD_BOARD_OPERATING_GUIDANCE = [
   "The lead board is the durable task ledger for this goal generation.",
-  "Work the task in the packet above, then use report-task with bounded evidence; a delivered prompt, an idle edge, or a step receipt never completes a task.",
+  "Work the task in the packet above, then use orchestrator_board_action with action transition and intent report-task; a delivered prompt never completes a task.",
   "A worker handoff is a report until you validate it: call orchestrator_handoff_validate on the unchanged D2 envelope first.",
-  "Then rerun the required checks yourself and use validate-task with receipt IDs, revision, and bounded redacted refs.",
+  "Then rerun the required checks yourself and use orchestrator_board_action with action transition and intent validate-task, receipt IDs, revision, and bounded redacted refs.",
   "Start review directly with orchestrator_review_start after validation; the plugin applies the legal review-pending transition without a separate admission call.",
-  "Completion additionally requires an approved exact-revision review for the same revision; pass expectedVersion (the task lifecycle version) on every transition.",
+  "Completion additionally requires an approved exact-revision review for the same revision; pass expectedVersion on every board action.",
   "If an external outcome is unknowable, mark the task ambiguous instead of retrying; resume only from a lead-validated cursor.",
   "Scope packets are advisory: they are not filesystem isolation, permissions, or a worktree binding.",
 ].join("\n")
@@ -241,14 +218,13 @@ export function buildContinuationPrompt(
     ...(plan ? [planContinuationGuidance(plan)] : []),
     `This is continuation ${continuationCount}. Inspect the current repository and session state before acting.`,
     "Make concrete progress, delegate safely when useful, and stop only after the objective is complete or a blocker requires the user.",
-    "Read and update the goal with the namespaced tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update.",
-    "Completion requires a direct verification result and an evidence string through orchestrator_goal_update.",
+  "Read and update the goal with orchestrator_goal actions get, set, pause, resume, complete, or clear.",
+  "Completion requires a direct verification result and an evidence string through orchestrator_goal.",
     ...(taskPacket ? [taskPacket, LEAD_BOARD_OPERATING_GUIDANCE] : []),
     DELEGATION_GRAPH_GUIDANCE,
     PROMPTING_POLICY_GUIDANCE,
     verticalSliceGuidance(options?.decomposition?.strategy),
     CAPABILITY_BOUNDARY_GUIDANCE,
-    D4_V2_COHERENCE_GUIDANCE,
     REMOTE_ORCHESTRATION_GUIDANCE,
     featureGuidance(options),
     STRUCTURED_HANDOFF_GUIDANCE,
@@ -287,7 +263,7 @@ function planContinuationGuidance(plan: string): string {
  * disclosure, composed into every prompt kind that takes options:
  * - the peer disclosure is always present (it states the durable
  *   metadata-only/incomplete semantics and the same-project redaction
- *   boundary of orchestrator_peer_list);
+ *   boundary of orchestrator_status);
  * - the worktree lifecycle text appears only when `worktree.enabled`;
  * - the GitHub lifecycle text only when `github.enabled`;
  * - the publication capability policy only when `publish.enabled` (the

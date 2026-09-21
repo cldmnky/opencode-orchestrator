@@ -5,7 +5,7 @@
  * transitions, terminal/blocked semantics) as a pure primitive. It is
  * intentionally STATELESS: callers own the current state and persist
  * transitions. It is wired through optional tool invocation
- * (orchestrator_admission_transition) since the serialized runtime landed, but
+ * since the serialized validation runtime landed, but
  * it is NOT a gate: no plugin hook consumes these transitions automatically,
  * the orchestrator must call the tool explicitly, there is no completion gate,
  * and D2's `reviewState` (src/core/contracts.ts) is a separate axis that this

@@ -1,4 +1,4 @@
-import { readFile, readdir, realpath, stat } from "node:fs/promises"
+import { readFile, readdir, realpath } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { Model } from "@opencode/schema/model"
@@ -193,17 +193,10 @@ export async function runCommand(
 
   const planSelection = name === "run-plan" ? await startPlanRun(context, input.sessionID, args) : undefined
   if (name === "run-plan" && !planSelection) return
-  const validatedArguments = name === "restructure"
-    ? await validateRestructure(context, args, input.sessionID)
-    : name === "polish"
-      ? await polishScope(context, args, input.sessionID)
-      : args
-  if (validatedArguments === undefined) return
-
   try {
     const model = orchestratorModel ?? (await configuredModel(context, options.orchestrator))
     await activateOrchestrator(context, input.sessionID, options.orchestrator, model)
-    const commandArguments = planSelection ? `${planSelection.relativePath}\n\nValidated plan:\n${planSelection.content}` : validatedArguments
+    const commandArguments = planSelection ? `${planSelection.relativePath}\n\nValidated plan:\n${planSelection.content}` : args
     await context.session.prompt({
       sessionID: input.sessionID,
       text: buildCommandPrompt(name, commandArguments, options),
@@ -326,167 +319,6 @@ function unwrapSession(value: unknown): { location?: { directory?: unknown; work
   const session = source as { location?: unknown }
   if (!session.location || typeof session.location !== "object") return undefined
   return { location: session.location as { directory?: unknown; workspaceID?: unknown } }
-}
-
-async function polishScope(context: Context, args: string, sessionID: string): Promise<string | undefined> {
-  const sessionRoot = await sessionLocation(context, sessionID)
-  if (args.trim()) {
-    const scopes = args
-      .split(/[\s,]+/)
-      .map((value) => value.trim())
-      .filter(Boolean)
-    const safeScopes = await Promise.all(scopes.map((scope) => isSafeProjectPath(sessionRoot.directory, scope)))
-    if (scopes.length === 0 || scopes.some((scope, index) => scope.startsWith("--") || !safeScopes[index])) {
-      await emitStatus(
-        context,
-        sessionID,
-        statusMessage({
-          happened: "Polish scope must contain only relative paths inside the current project.",
-          means: "Nothing ran, so no file was changed.",
-          next: "Re-run /polish with one or more relative paths inside the project.",
-        }),
-      )
-      return undefined
-    }
-    return `Explicit scope: ${scopes.join(", ")}`
-  }
-  try {
-    const status = await context.vcs.status({ location: { directory: sessionRoot.directory, workspace: sessionRoot.workspaceID } })
-    const files = arrayData(status).map((item) => asRecord(item)?.file).filter((value): value is string => typeof value === "string")
-    if (files.length > 0) return `Changed files only: ${files.join(", ")}`
-  } catch {
-    // The model can still inspect the default working-copy scope.
-  }
-  await emitStatus(
-    context,
-    sessionID,
-    statusMessage({
-      happened: "No changed files were found for /polish.",
-      means: "There is nothing to polish in the working copy.",
-      next: "Pass an explicit relative scope, or make a change first.",
-    }),
-  )
-  return undefined
-}
-
-async function isSafeProjectPath(directory: string, value: string): Promise<boolean> {
-  if (!value || value.includes("\0") || isAbsolute(value)) return false
-  const target = await realpath(resolve(directory, value)).catch(() => undefined)
-  const root = await realpath(directory).catch(() => undefined)
-  if (!target || !root) return false
-  const remainder = relative(root, target)
-  return remainder !== ".." && !remainder.startsWith(`..${pathSeparator()}`) && !isAbsolute(remainder)
-}
-
-async function validateRestructure(
-  context: Context,
-  args: string,
-  sessionID: string,
-): Promise<string | undefined> {
-  const sessionRoot = await sessionLocation(context, sessionID)
-  const tokens = args.trim().split(/\s+/).filter(Boolean)
-  let scope = "file"
-  let risk = "conservative"
-  const target: string[] = []
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index]
-    if (token.startsWith("--scope=")) {
-      scope = token.slice("--scope=".length)
-      continue
-    }
-    if (token === "--scope") {
-      scope = tokens[++index] ?? ""
-      continue
-    }
-    if (token.startsWith("--risk=")) {
-      risk = token.slice("--risk=".length)
-      continue
-    }
-    if (token === "--risk") {
-      risk = tokens[++index] ?? ""
-      continue
-    }
-    if (token.startsWith("--")) {
-      await emitStatus(
-        context,
-        sessionID,
-        statusMessage({
-          happened: "/restructure received an unknown option, so nothing ran.",
-          means: "No restructuring prompt was delivered and no file was changed.",
-          next: "Usage: /restructure <target> [--scope=file|module|project] [--risk=conservative|broad]",
-        }),
-      )
-      return undefined
-    }
-    target.push(token)
-  }
-
-  const targetText = target.join(" ")
-  if (!targetText || !["file", "module", "project"].includes(scope) || !["conservative", "broad"].includes(risk)) {
-    await emitStatus(
-      context,
-      sessionID,
-      statusMessage({
-        happened: "/restructure received options that do not match the target, so nothing ran.",
-        means: "No restructuring prompt was delivered and no file was changed.",
-        next: "Usage: /restructure <target> [--scope=file|module|project] [--risk=conservative|broad]",
-      }),
-    )
-    return undefined
-  }
-  if (targetText.includes("\0") || isAbsolute(targetText)) {
-    await emitStatus(
-      context,
-      sessionID,
-      statusMessage({
-        happened: "Restructure target must be a relative path inside the current project.",
-        means: "Nothing ran, so no file was changed.",
-        next: "Re-run /restructure with a relative path inside the project.",
-      }),
-    )
-    return undefined
-  }
-  const projectRootTarget = scope === "project" && (targetText === "." || targetText === "project")
-  const resolvedTarget = resolve(sessionRoot.directory, projectRootTarget ? "." : targetText)
-  const remainder = relative(sessionRoot.directory, resolvedTarget)
-  if ((!remainder && !projectRootTarget) || remainder === ".." || remainder.startsWith(`..${pathSeparator()}`) || isAbsolute(remainder)) {
-    await emitStatus(
-      context,
-      sessionID,
-      statusMessage({
-        happened: "Restructure target must be a relative path inside the current project.",
-        means: "Nothing ran, so no file was changed.",
-        next: "Re-run /restructure with a relative path inside the project.",
-      }),
-    )
-    return undefined
-  }
-  const targetInfo = await stat(resolvedTarget).catch(() => undefined)
-  if (!targetInfo || (scope === "file" && !targetInfo.isFile())) {
-    await emitStatus(
-      context,
-      sessionID,
-      statusMessage({
-        happened: "Restructure target must exist and match the selected scope.",
-        means: "Nothing ran, so no file was changed.",
-        next: "Check the path, then retry with --scope=file, --scope=module, or --scope=project.",
-      }),
-    )
-    return undefined
-  }
-  if (!(await isSafeProjectPath(sessionRoot.directory, projectRootTarget ? "." : targetText))) {
-    await emitStatus(
-      context,
-      sessionID,
-      statusMessage({
-        happened: "Restructure target must remain inside the current project.",
-        means: "Nothing ran, so no file was changed.",
-        next: "Re-run /restructure with a target inside the project.",
-      }),
-    )
-    return undefined
-  }
-  return `Target: ${targetText}\nScope: ${scope}\nRisk: ${risk}`
 }
 
 export async function activateOrchestrator(

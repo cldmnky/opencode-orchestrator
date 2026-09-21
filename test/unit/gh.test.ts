@@ -1048,9 +1048,6 @@ describe("github tools", () => {
     expect([...tools.keys()]).toEqual([
       "github_capabilities",
       "github_repo_view",
-      "github_issue_view",
-      "github_issue_list",
-      "github_issue_create",
       "github_pr_view",
       "github_pr_list",
       "github_pr_create",
@@ -1073,9 +1070,6 @@ describe("github tools", () => {
     const { tools } = collectGhTools()
     const worker = toolContext("session-1", "explore")
     await expect(tools.get("github_repo_view")!.execute({}, worker)).rejects.toThrow(/only to the orchestrator/)
-    await expect(tools.get("github_issue_create")!.execute({ confirm: true }, worker)).rejects.toThrow(
-      /only to the orchestrator/,
-    )
     await expect(
       tools.get("github_pr_ready")!.execute(
         { owner: "acme", repo: "widgets", number: 7, expectedHeadSha: HEAD_SHA, confirm: true },
@@ -1096,13 +1090,6 @@ describe("github tools", () => {
   test("requires allow_mutations for the mutating tools but not for view or list", async () => {
     const { tools } = collectGhTools({ options: ghOptions({ github: { enabled: true, allow_mutations: false } }) })
     const session = toolContext("session-1", "orchestrator")
-    const viewed = await tools
-      .get("github_issue_view")!
-      .execute({ owner: "acme", repo: "widgets", number: 1 }, session)
-    expect(viewed.content).toContain("failed")
-    await expect(
-      tools.get("github_issue_create")!.execute({ owner: "acme", repo: "widgets", title: "T", confirm: true }, session),
-    ).rejects.toThrow(/allow_mutations/)
     await expect(
       tools.get("github_pr_create")!.execute(
         { owner: "acme", repo: "widgets", title: "T", head: "f", base: "m", expectedHeadSha: HEAD_SHA, expectedBaseSha: BASE_SHA, confirm: true },
@@ -1129,19 +1116,6 @@ describe("github tools", () => {
     ).rejects.toThrow(/allow_mutations/)
   })
 
-  test("create requires a literal confirm: true", async () => {
-    const { tools } = collectGhTools()
-    const session = toolContext("session-1", "orchestrator")
-    const missing = await tools
-      .get("github_issue_create")!
-      .execute({ owner: "acme", repo: "widgets", title: "T" }, session)
-    expect(missing.content).toContain("requires confirm: true")
-    const falsy = await tools
-      .get("github_issue_create")!
-      .execute({ owner: "acme", repo: "widgets", title: "T", confirm: false }, session)
-    expect(falsy.content).toContain("requires confirm: true")
-  })
-
   test("ready and approve require a literal confirm: true", async () => {
     const { tools } = collectGhTools()
     const session = toolContext("session-1", "orchestrator")
@@ -1160,53 +1134,6 @@ describe("github tools", () => {
         session,
       )
     expect(approve.content).toContain("github_pr_approve requires confirm: true")
-  })
-
-  test("issue_create writes through the client and reports verified evidence", async () => {
-    const { runner } = scriptedGh((call, _calls, body) => {
-      if (call.args.includes("repos/acme/widgets/issues")) {
-        expect(body).toEqual({ title: "Ship it", labels: ["bug"] })
-        return ok(JSON.stringify(ISSUE))
-      }
-      return undefined
-    })
-    const { tools } = collectGhTools({ runner })
-    const output = await tools
-      .get("github_issue_create")!
-      .execute(
-        { owner: "acme", repo: "widgets", title: "Ship it", labels: ["bug"], confirm: true },
-        toolContext("session-1", "orchestrator"),
-      )
-    const parsed = JSON.parse(output.content) as IssueInfo & { verified: boolean; evidence: unknown }
-    expect(parsed.verified).toBe(true)
-    expect(parsed.number).toBe(42)
-    expect(parsed.html_url).toBe(ISSUE.html_url)
-    expect(parsed.evidence).toEqual({
-      marker: "EVIDENCE_MUTATION",
-      freshness: "per-invocation",
-      authority: "authoritative-for-tested-fields",
-      version: 1,
-      source: "opencode-orchestrator.gh.issue.create",
-      sessionID: "session-1",
-      capturedAt: expect.any(Number),
-      mutation: { verified: true, id: 1001, number: 42, url: ISSUE.html_url },
-    })
-  })
-
-  test("issue_create failure surfaces the redacted gh error", async () => {
-    const { runner } = scriptedGh(() => fail("client_secret: leaked-leak super-dupersecret"))
-    const { tools } = collectGhTools({ runner, secrets: ["super-dupersecret"] })
-    const output = await tools
-      .get("github_issue_create")!
-      .execute(
-        { owner: "acme", repo: "widgets", title: "T", confirm: true },
-        toolContext("session-1", "orchestrator"),
-      )
-    expect(output.content).toContain("github issue create failed")
-    expect(output.content).not.toContain("leaked-leak")
-    expect(output.content).not.toContain("super-dupersecret")
-    // Errors remain redacted strings: no success evidence is attached.
-    expect(output.content).not.toContain("evidence")
   })
 
   test("repo_view tool resolves an explicit owner/repo", async () => {
@@ -1228,20 +1155,6 @@ describe("github tools", () => {
     })
     expect(repo.evidence.mutation).toBeUndefined()
     expect(evidenceSchema.safeParse(repo.evidence).success).toBe(true)
-  })
-
-  test("issue_list propagates client errors into the result", async () => {
-    const { runner } = scriptedGh((call) =>
-      call.args.includes("repos/acme/widgets/issues") ? fail("Not Found") : undefined,
-    )
-    const { tools } = collectGhTools({ runner })
-    const output = await tools
-      .get("github_issue_list")!
-      .execute({ owner: "acme", repo: "widgets" }, toolContext("session-1", "orchestrator"))
-    expect(output.content).toContain("github issue list failed")
-    expect(output.content).toContain("Not Found")
-    expect(output.content).not.toContain("evidence")
-    expect(() => JSON.parse(output.content)).toThrow()
   })
 
   test("capabilities tool probes the gh binary through the fake runner", async () => {
@@ -1271,34 +1184,6 @@ describe("github tools", () => {
     await expect(resolveRepo({ runner }, {})).rejects.toThrow(/unexpected gh call/)
   })
 
-  test("issue_list adds per-item live evidence while the top level stays an array", async () => {
-    const { runner } = scriptedGh((call) => {
-      if (call.args.includes("repos/acme/widgets/issues")) return ok(JSON.stringify([ISSUE, { ...ISSUE, id: 1002, number: 43 }]))
-      return undefined
-    })
-    const { tools } = collectGhTools({ runner })
-    const output = await tools
-      .get("github_issue_list")!
-      .execute({ owner: "acme", repo: "widgets", state: "open" }, toolContext("session-9", "orchestrator"))
-    const issues = JSON.parse(output.content) as Array<IssueInfo & { evidence: EvidenceRecord }>
-    expect(Array.isArray(issues)).toBe(true)
-    expect(issues).toHaveLength(2)
-    for (const issue of issues) {
-      expect(issue.number).toBeGreaterThan(0)
-      expect(issue.evidence).toMatchObject({
-        marker: "EVIDENCE_LIVE",
-        freshness: "per-invocation",
-        authority: "authoritative-for-tested-fields",
-        source: "opencode-orchestrator.gh.issue.list",
-        sessionID: "session-9",
-      })
-      expect(issue.evidence.mutation).toBeUndefined()
-      expect(evidenceSchema.safeParse(issue.evidence).success).toBe(true)
-    }
-    // The two items share one per-invocation evidence record.
-    expect(issues[0]?.evidence.capturedAt).toBe(issues[1]?.evidence.capturedAt)
-  })
-
   test("pr_list adds per-item live evidence", async () => {
     const { runner } = scriptedGh((call) => {
       if (call.args.includes("repos/acme/widgets/pulls")) return ok(JSON.stringify([PULL]))
@@ -1318,24 +1203,17 @@ describe("github tools", () => {
 
   test("read results carry per-session provenance matching the tool context", async () => {
     const { runner } = scriptedGh((call) => {
-      if (call.args.includes("repos/acme/widgets/issues/1")) return ok(JSON.stringify(ISSUE))
       if (call.args.includes("repos/acme/widgets/pulls/2")) {
         return ok(JSON.stringify({ ...PULL, number: 2 }))
       }
       return undefined
     })
     const { tools } = collectGhTools({ runner })
-    const sessionA = await tools
-      .get("github_issue_view")!
-      .execute({ owner: "acme", repo: "widgets", number: 1 }, toolContext("session-A", "orchestrator"))
     const sessionB = await tools
       .get("github_pr_view")!
       .execute({ owner: "acme", repo: "widgets", number: 2 }, toolContext("session-B", "orchestrator"))
-    const issue = JSON.parse(sessionA.content) as IssueInfo & { evidence: EvidenceRecord }
     const pull = JSON.parse(sessionB.content) as PullInfo & { evidence: EvidenceRecord }
-    expect(issue.evidence.sessionID).toBe("session-A")
     expect(pull.evidence.sessionID).toBe("session-B")
-    expect(issue.evidence.capturedAt).toBeGreaterThanOrEqual(0)
     expect(evidenceSchema.safeParse(pull.evidence).success).toBe(true)
   })
 

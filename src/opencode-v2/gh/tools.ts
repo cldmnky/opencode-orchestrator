@@ -19,19 +19,16 @@ import {
 import {
   assertIssueState,
   compareRefs,
-  createIssue,
   createPull,
   createPullReview,
   getBranchRef,
   getViewer,
-  listIssues,
   listPullReviews,
   listPulls,
   markPullReady,
   mergePull,
   probeCapabilities,
   resolveRepo,
-  viewIssue,
   viewPull,
   type GhContext,
   type PullMergeInput,
@@ -41,7 +38,7 @@ import {
  * `orchestrator_github_*` tools (stage 3), registered via the tool transform.
  *
  * Gating mirrors the worktree family: the whole set requires `github.enabled`,
- * mutating tools (issue_create / pr_create / pr_ready / pr_approve /
+ * mutating tools (pr_create / pr_ready / pr_approve /
  * pr_merge) additionally require `github.allow_mutations` plus a literal
  * `confirm: true` input field, and every tool is orchestrator-only via the
  * shared `orchestrator_gh` permission action plus the runtime agent check
@@ -159,79 +156,6 @@ export function addGhTools(draft: ToolDraftLike, deps: GhToolsDeps): void {
         return result(JSON.stringify({ ...info, evidence }))
       } catch (error) {
         return result(`github repo view failed: ${message(error)}`)
-      }
-    },
-  })
-
-  draft.add({
-    name: "github_issue_view",
-    description: "View a single GitHub issue by number.",
-    input: issueViewInput,
-    options: { namespace: "orchestrator", permission: GH_TOOL_PERMISSION },
-    execute: async (input, tool) => {
-      requireOrchestrator(tool.agent, deps.options)
-      const owner = stringField(input, "owner")
-      const repo = stringField(input, "repo")
-      const number = numberField(input, "number")
-      if (!owner || !repo || number === undefined) return result("owner, repo, and number are required")
-      try {
-        const issue = await viewIssue(gh, { owner, repo, number })
-        const evidence = liveEvidence({ source: "opencode-orchestrator.gh.issue.view", sessionID: tool.sessionID })
-        return result(JSON.stringify({ ...issue, evidence }))
-      } catch (error) {
-        return result(`github issue view failed: ${message(error)}`)
-      }
-    },
-  })
-
-  draft.add({
-    name: "github_issue_list",
-    description: "List GitHub issues (state: open, closed, or all).",
-    input: issueListInput,
-    options: { namespace: "orchestrator", permission: GH_TOOL_PERMISSION },
-    execute: async (input, tool) => {
-      requireOrchestrator(tool.agent, deps.options)
-      const owner = stringField(input, "owner")
-      const repo = stringField(input, "repo")
-      const state = stringField(input, "state")
-      if (!owner || !repo) return result("owner and repo are required")
-      try {
-        const issues = await listIssues(gh, { owner, repo, state: state ? assertIssueState(state) : undefined })
-        const evidence = liveEvidence({ source: "opencode-orchestrator.gh.issue.list", sessionID: tool.sessionID })
-        return result(JSON.stringify(issues.map((issue) => ({ ...issue, evidence }))))
-      } catch (error) {
-        return result(`github issue list failed: ${message(error)}`)
-      }
-    },
-  })
-
-  draft.add({
-    name: "github_issue_create",
-    description: "Create a GitHub issue. Requires confirm: true.",
-    input: issueCreateInput,
-    options: { namespace: "orchestrator", permission: GH_TOOL_PERMISSION },
-    execute: async (input, tool) => {
-      requireOrchestrator(tool.agent, deps.options)
-      requireMutations(deps.options)
-      const mutation = await requireGateEnabled(deps.storage, deps.location, tool.sessionID, deps.options, "github-mutations")
-      if (!mutation.ok) return result(`github issue create refused: ${mutation.message}`)
-      if (inputConfirm(input) !== true) return result("github_issue_create requires confirm: true")
-      const owner = stringField(input, "owner")
-      const repo = stringField(input, "repo")
-      const title = stringField(input, "title")
-      const body = stringField(input, "body")
-      const labels = arrayField(input, "labels")
-      if (!owner || !repo || !title) return result("owner, repo, and title are required")
-      try {
-        const created = await createIssue(gh, { owner, repo, title, body: body || undefined, labels })
-        const evidence = mutationEvidence({
-          source: "opencode-orchestrator.gh.issue.create",
-          sessionID: tool.sessionID,
-          proof: { id: created.id, number: created.number, url: created.html_url },
-        })
-        return result(JSON.stringify({ ...created, verified: true, evidence }))
-      } catch (error) {
-        return result(`github issue create failed: ${message(error)}`)
       }
     },
   })
@@ -1012,42 +936,6 @@ const repoViewInput = {
     repo: { type: "string" },
     cwd: { type: "string" },
   },
-  additionalProperties: false,
-} as const
-
-const issueCreateInput = {
-  type: "object",
-  properties: {
-    owner: { type: "string", minLength: 1 },
-    repo: { type: "string", minLength: 1 },
-    title: { type: "string", minLength: 1 },
-    body: { type: "string" },
-    labels: { type: "array", items: { type: "string" }, maxItems: 20 },
-    confirm: { type: "boolean" },
-  },
-  required: ["owner", "repo", "title", "confirm"],
-  additionalProperties: false,
-} as const
-
-const issueViewInput = {
-  type: "object",
-  properties: {
-    owner: { type: "string", minLength: 1 },
-    repo: { type: "string", minLength: 1 },
-    number: { type: "number", minimum: 1 },
-  },
-  required: ["owner", "repo", "number"],
-  additionalProperties: false,
-} as const
-
-const issueListInput = {
-  type: "object",
-  properties: {
-    owner: { type: "string", minLength: 1 },
-    repo: { type: "string", minLength: 1 },
-    state: { type: "string", enum: ["open", "closed", "all"] },
-  },
-  required: ["owner", "repo"],
   additionalProperties: false,
 } as const
 

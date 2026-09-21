@@ -74,10 +74,10 @@ export const DELEGATION_GRAPH_GUIDANCE = [
  * Coherent vertical-slice decomposition guidance, embedded verbatim in the
  * orchestrator rules, the worker system prompt, and continuation prompts.
  * It prefers the smallest coherent end-to-end slice over the smallest file or
- * layer, and it keeps the fail-closed anti-overlap rule explicit: coupling and
- * unknown coupling are resolved by sequencing or serialization with integrated
- * parent verification, never by concurrent overlapping writes. A slice is a
- * coordination unit, never a permission or filesystem boundary.
+ * layer, and it keeps the fail-closed declared-scope rule explicit. Semantic
+ * coupling remains guidance; board dependencies and declared scope conflicts
+ * are the mechanically knowable runtime boundary. A slice is a coordination
+ * unit, never a permission or filesystem boundary.
  *
  * The two pinned safety sentences stay byte-identical; the rest is split into
  * one instruction per bullet.
@@ -87,7 +87,9 @@ export const VERTICAL_SLICE_GUIDANCE = [
   "Split only at a verified boundary where every resulting slice has its own outcome, acceptance evidence, and no hidden dependency.",
   "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
   "A slice is a coordination unit, never a permission or filesystem boundary.",
-  "Fail closed on uncertainty: unknown coupling fails closed and serializes.",
+  "Treat disjoint declared scopes as concurrency candidates, not proof of independence.",
+  "Explicit board dependencies always serialize known sequencing.",
+  "Fail closed on uncertainty: unknown, broad, or overlapping scopes serialize.",
   "Prompt-level scopes are advisory, not isolation.",
 ].join("\n")
 
@@ -107,7 +109,7 @@ export const STRICT_DECOMPOSITION_GUIDANCE = [
   "A split is justified only when every resulting slice has its own outcome, acceptance evidence, ownership, and no hidden dependency.",
   "When that cannot be shown, keep the work in one slice or serialize it with an explicit edge.",
   "This preference changes emphasis only and never overrides an explicit user decision.",
-  "The exact disjoint-write-scope rule, fail-closed serialization for overlapping or unknown coupling, aggregate review, the worktree lifecycle, and the publication preconditions all remain unchanged.",
+  "The exact disjoint-write-scope rule, fail-closed serialization for overlapping or unknown scopes, aggregate review, worktrees, and publication preconditions remain unchanged.",
   "They must never be bypassed or relaxed.",
 ].join("\n")
 
@@ -119,35 +121,6 @@ export const STRICT_DECOMPOSITION_GUIDANCE = [
 export function verticalSliceGuidance(strategy: DecompositionStrategy = "mvp"): string {
   return strategy === "strict" ? [VERTICAL_SLICE_GUIDANCE, STRICT_DECOMPOSITION_GUIDANCE].join("\n") : VERTICAL_SLICE_GUIDANCE
 }
-
-/**
- * Additive D4 v2 coherence-signal guidance (Phase 3), embedded verbatim after
- * the slice guidance in the orchestrator rules, the worker system prompt, and
- * continuation prompts. It names the explicit coherence question the eight D4
- * v1 dimensions cannot answer, states the deterministic slice-metadata mapping
- * (`cohesive-slice` | `parallel-candidate` | `serialized`), keeps the
- * fail-closed collect-facts rule explicit, and answers the D2 flow-through
- * question upfront: D2 v1 stays frozen, so the signal never adds or changes a
- * D2 handoff field, reviewState value, or handoff-validation behavior.
- *
- * Prompt-preference only: it is advisory coordination guidance, never a
- * runtime gate, and it changes no serialization, review, worktree, or
- * publication behavior.
- */
-export const D4_V2_COHERENCE_GUIDANCE = [
-  "Additive D4 v2 coherence signal (advisory; D4 v1 and D2 v1 are unchanged).",
-  "Before splitting work, answer the explicit coherence question for the candidate slice: coupled-outcome, independent, overlap, or unknown.",
-  "Deterministic slice metadata: a coupled-outcome stays one cohesive-slice.",
-  "An independent slice is only a parallel-candidate after the parent verifies exact disjoint write scopes from repository facts.",
-  "Overlapping or unknown coupling serializes.",
-  "Unknown facts fail closed to collect-facts before any slice metadata is emitted.",
-  "D2 flow-through question (named upfront): does this signal add or change any D2 handoff field, reviewState value, or handoff validation?",
-  "No — D2 v1 stays frozen.",
-  "Slice metadata is never written into a D2 envelope field, never replaces reviewState, and never changes handoff validation.",
-  "Slice metadata is advisory coordination guidance only.",
-  "It is not filesystem isolation and not a permission boundary.",
-  "It never changes how a task is executed or published.",
-].join("\n")
 
 /**
  * Prompting policy for every orchestration participant: autonomous authorized
@@ -268,12 +241,12 @@ export const GITHUB_LIFECYCLE_GUIDANCE = [
 /**
  * Peer-orchestrator discovery guidance, embedded in every orchestrator-facing
  * prompt kind. Discloses the durable metadata-only/incomplete semantics and
- * the same-project redaction boundary of `orchestrator_peer_list` up front so
+ * the same-project redaction boundary of `orchestrator_status` up front so
  * peer findings are never mistaken for live, complete knowledge of other
  * sessions.
  */
 export const PEER_DISCOVERY_GUIDANCE = [
-  "Same-project peer orchestration sessions are discoverable with orchestrator_peer_list (orchestrator-only).",
+  "Same-project orchestration sessions are discoverable with orchestrator_status (orchestrator-only): use mode single with a sessionID for detail, or mode list for bounded discovery.",
   "The result is bounded, deterministically ordered metadata: sessionID, goal status, and a redacted/truncated objective hint.",
   "Results cover the same stable project only.",
   "The query is durable metadata only and is never live-complete.",
@@ -449,9 +422,8 @@ export const BUDGET_GUIDANCE = [
  *
  * Workers are asked to emit the version-1 JSON envelope described below IN
  * ADDITION TO the unchanged five-field prose (HANDOFF_FORMAT); the parent is
- * told to run orchestrator_handoff_validate before any downstream use and to
- * call orchestrator_task_complexity_classify only after all eight structured
- * facts are collected. The tools are callable/advisory primitives, not
+ * told to run orchestrator_handoff_validate before any downstream use. The
+ * validation surface is a callable/advisory primitive, not
  * automatic hooks: nothing intercepts worker output automatically, and no
  * completion gate is enforced by this plugin.
  *
@@ -466,10 +438,11 @@ export const STRUCTURED_HANDOFF_GUIDANCE = [
   "risks (severity, statement); followUp; artifactRefs (kind file or url, reference, description); reviewState (not-requested, pending, approved, changes-requested, or blocked).",
   "Use the same relative repository paths and https-only URL refs as the handoff schema; never include credentials, raw transcripts, or secrets in the envelope.",
   "Parent: call orchestrator_handoff_validate (level worker or orchestrator, with the task contract) before using any worker handoff downstream.",
-  "Parent: call orchestrator_task_complexity_classify only after collecting all eight structured facts (independent_subtasks, dependent_stages, files_modules, independent_review, external_side_effects, shared_mutable_state, security_compliance_risk, expected_parallelism_value).",
   "These validation tools are callable/advisory, not automatic hooks.",
-  "The orchestrator invokes them explicitly.",
-  "Complexity classification is advisory; D2 and admission checks are deterministic fail-closed checks.",
+  "The orchestrator invokes handoff validation explicitly before using a worker result.",
+  "D2 v1 stays frozen.",
+  "This guidance never changes handoff validation.",
+  "D2 checks are deterministic and fail closed; the returned admission state is diagnostic and not a separate model transition.",
   "No automatic completion gate is enforced.",
 ].join("\n")
 
@@ -484,12 +457,11 @@ export function orchestrationRules(
     "Route by the configured semantic role map, never by model name.",
     DELEGATION_GRAPH_GUIDANCE,
     "Explore before planning when repository facts are unknown.",
-    "Track the session goal with the namespaced tools orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update.",
+    "Track the session goal with orchestrator_goal using get, set, pause, resume, complete, or clear actions.",
     CHILD_TASK_CONTRACT,
     "Require an exact disjoint write scope from every child before any parallel write; no two children may claim the same file or area.",
     "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes.",
     verticalSliceGuidance(decompositionStrategy),
-    D4_V2_COHERENCE_GUIDANCE,
     CAPABILITY_BOUNDARY_GUIDANCE,
     "Separate established facts from assumptions.",
     "Label every assumption explicitly and verify it before relying on it.",

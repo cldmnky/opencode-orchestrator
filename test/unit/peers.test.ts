@@ -180,24 +180,22 @@ describe("peer query", () => {
 })
 
 describe("peer tools", () => {
-  test("registers peer_list and session_status with the shared peer permission action", () => {
+  test("registers the unified status tool with the shared peer permission action", () => {
     const { tools } = collectPeerTools()
-    expect([...tools.keys()]).toEqual(["peer_list", "session_status"])
-    for (const name of ["peer_list", "session_status"]) {
-      const tool = tools.get(name)!
-      expect(tool.options?.namespace).toBe("orchestrator")
-      expect(tool.options?.permission).toBe(PEER_TOOL_PERMISSION)
-    }
+    expect([...tools.keys()]).toEqual(["status"])
+    const tool = tools.get("status")!
+    expect(tool.options?.namespace).toBe("orchestrator")
+    expect(tool.options?.permission).toBe(PEER_TOOL_PERMISSION)
   })
 
   test("gates the peer query to the orchestrator agent", async () => {
     const { tools } = collectPeerTools()
-    await expect(tools.get("peer_list")!.execute({}, toolContext("session-1", "explore"))).rejects.toThrow(
+    await expect(tools.get("status")!.execute({ mode: "list" }, toolContext("session-1", "explore"))).rejects.toThrow(
       /only to the orchestrator/,
     )
   })
 
-  test("executes a bounded query through the tool and never mutates storage", async () => {
+  test("executes a bounded list query through the tool and never mutates storage", async () => {
     const storage = memStorage([
       [goalStorageKey(location, "peer-a"), goal("peer-a", "first", 1)],
       [goalStorageKey(location, "self"), goal("self", "mine", 1)],
@@ -205,15 +203,15 @@ describe("peer tools", () => {
     const countBefore = storage.values.size
     const { tools } = collectPeerTools(storage)
 
-    const output = await tools.get("peer_list")!.execute({ limit: 10 }, toolContext("self", "orchestrator"))
-    const parsed = JSON.parse(output.content) as { peers: Array<{ sessionID: string }>; complete: boolean }
-    expect(parsed.peers.map((peer) => peer.sessionID)).toEqual(["peer-a"])
+    const output = await tools.get("status")!.execute({ mode: "list", limit: 10 }, toolContext("self", "orchestrator"))
+    const parsed = JSON.parse(output.content) as { sessions: Array<{ sessionID: string }>; complete: boolean }
+    expect(parsed.sessions.map((session) => session.sessionID)).toEqual(["peer-a"])
     expect(parsed.complete).toBe(true)
     expect(storage.values.size).toBe(countBefore)
 
     // The tool honors the includeSelf flag and the after cursor.
-    const withSelf = await tools.get("peer_list")!.execute({ includeSelf: true }, toolContext("self", "orchestrator"))
-    expect((JSON.parse(withSelf.content) as { peers: Array<{ sessionID: string }> }).peers.map((peer) => peer.sessionID)).toEqual([
+    const withSelf = await tools.get("status")!.execute({ mode: "list", includeSelf: true }, toolContext("self", "orchestrator"))
+    expect((JSON.parse(withSelf.content) as { sessions: Array<{ sessionID: string }> }).sessions.map((session) => session.sessionID)).toEqual([
       "peer-a",
       "self",
     ])

@@ -266,7 +266,7 @@ describe("session status query", () => {
 describe("session status tools", () => {
   test("rejects non-orchestrator agents", async () => {
     const { tools } = collectPeerTools()
-    await expect(tools.get("session_status")!.execute({}, toolContext("session-1", "explore"))).rejects.toThrow(
+    await expect(tools.get("status")!.execute({ mode: "list" }, toolContext("session-1", "explore"))).rejects.toThrow(
       /only to the orchestrator/,
     )
   })
@@ -279,18 +279,18 @@ describe("session status tools", () => {
     const { tools } = collectPeerTools(storage)
     const before = JSON.stringify([...storage.values.entries()].sort())
 
-    const single = await tools.get("session_status")!.execute({ sessionID: "peer-a" }, toolContext("self", "orchestrator"))
+    const single = await tools.get("status")!.execute({ mode: "single", sessionID: "peer-a" }, toolContext("self", "orchestrator"))
     const parsedSingle = JSON.parse(single.content) as { summary: { sessionID: string } | null }
     expect(parsedSingle.summary?.sessionID).toBe("peer-a")
 
-    const list = await tools.get("session_status")!.execute({ limit: 10 }, toolContext("self", "orchestrator"))
+    const list = await tools.get("status")!.execute({ mode: "list", limit: 10 }, toolContext("self", "orchestrator"))
     const parsedList = JSON.parse(list.content) as { sessions: Array<{ sessionID: string }>; complete: boolean }
     expect(parsedList.sessions.map((session) => session.sessionID)).toEqual(["peer-a"])
     expect(parsedList.complete).toBe(true)
 
-    expect([...tools.keys()]).toEqual(["peer_list", "session_status"])
-    expect(tools.get("session_status")!.options?.namespace).toBe("orchestrator")
-    expect(tools.get("session_status")!.options?.permission).toBe(PEER_TOOL_PERMISSION)
+    expect([...tools.keys()]).toEqual(["status"])
+    expect(tools.get("status")!.options?.namespace).toBe("orchestrator")
+    expect(tools.get("status")!.options?.permission).toBe(PEER_TOOL_PERMISSION)
     expect(JSON.stringify([...storage.values.entries()].sort())).toBe(before)
   })
 })

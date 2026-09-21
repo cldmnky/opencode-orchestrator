@@ -620,8 +620,9 @@ export type ScopeNormalization =
  * Canonical scope normalization: `/`-separated relative paths only; rejects
  * absolute paths, `.`/`..` segments, empty segments, NUL/control characters,
  * and duplicates. A `.` path or `broad: true` marks the packet broad
- * (conflicts with every active write). Unknown/unresolvable roots are treated
- * as broad by `scopesConflict`.
+ * (conflicts with every active claim). An omitted or empty declaration is also
+ * broad/unknown and therefore cannot be admitted concurrently with scoped
+ * work. Unknown/unresolvable roots are treated as broad by `scopesConflict`.
  */
 export function normalizeScopePacket(input: {
   root?: "project" | "managed-worktree"
@@ -633,7 +634,7 @@ export function normalizeScopePacket(input: {
   if (root !== "project" && root !== "managed-worktree") return { ok: false, reason: "invalid-root" }
   const normalizedRead: string[] = []
   const normalizedWrite: string[] = []
-  let broad = input.broad === true
+  let broad = input.broad === true || ((input.readPaths?.length ?? 0) === 0 && (input.writePaths?.length ?? 0) === 0)
   for (const [paths, target] of [
     [input.readPaths ?? [], normalizedRead],
     [input.writePaths ?? [], normalizedWrite],
@@ -690,8 +691,8 @@ function pathSetsOverlap(a: readonly string[], b: readonly string[]): boolean {
 
 /**
  * Conservative conflict rule: broad/unknown/malformed on either side
- * conflicts with every active write; write/write and write/read overlaps
- * conflict; read/read may proceed.
+ * conflicts with every active claim; write/write and write/read overlaps
+ * conflict; read/read may proceed when both scopes are explicit.
  */
 export function scopesConflict(a: ScopePacket, b: ScopePacket): boolean {
   if (a.broad || b.broad) return true
@@ -1670,7 +1671,7 @@ export function leadTaskPacketText(task: LeadTask): string {
 /** Operating instructions appended when a board task drives a continuation. */
 export const LEAD_BOARD_PROMPT_GUIDANCE = [
   "The lead board is the durable task ledger for this goal generation.",
-  "Report the task's bounded evidence with orchestrator_lead_board_transition; a delivered prompt, an idle edge, or a step receipt never completes a task.",
+  "Report the task's bounded evidence with orchestrator_board_action transition; a delivered prompt, an idle edge, or a step receipt never completes a task.",
   "A worker handoff is a report until you validate it: call orchestrator_handoff_validate on the unchanged D2 envelope first.",
   "Then rerun the required checks yourself and record bounded results, revision, and redacted refs with the validate action.",
   "Completion additionally requires an approved exact-revision review for the same revision; keep the task lifecycle version and use expectedVersion on every transition.",

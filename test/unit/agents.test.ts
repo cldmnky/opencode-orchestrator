@@ -320,7 +320,7 @@ describe("agent transform feature permissions", () => {
       "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
     )
     expect(implementer).toContain("A slice is a coordination unit, never a permission or filesystem boundary")
-    expect(implementer).toContain("unknown coupling fails closed and serializes")
+    expect(implementer).toContain("unknown, broad, or overlapping scopes serialize")
 
     // Safety wording is unchanged: the disjoint child-scope rule and the
     // parent-accountability contract stay verbatim, and the slice invariant
@@ -332,7 +332,7 @@ describe("agent transform feature permissions", () => {
     expect(implementer).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
 
     // The orchestrator system prompt and worker prompts all restate the same
-    // slice invariant; no slice claims isolation or a scheduler.
+    // slice invariant; no slice claims isolation.
     const orchestrator = draft.get("orchestrator")!.system!
     expect(orchestrator).toContain("prefer coherent end-to-end slices")
     expect(orchestrator).toContain("never by concurrent overlapping writes")
@@ -340,7 +340,6 @@ describe("agent transform feature permissions", () => {
     expect(orchestrator).toContain("Require an exact disjoint write scope from every child before any parallel write")
     expect(orchestrator).toContain("Serialize implementation tasks when file ownership overlaps")
     for (const prompt of [orchestrator, implementer, draft.get("reviewer")!.system!]) {
-      expect(prompt).not.toMatch(/scheduler|semaphore/i)
       expect(prompt).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
     }
   })

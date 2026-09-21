@@ -665,7 +665,7 @@ export async function removeLeadBoardV2(storage: StorageLike, location: Location
   await storage.remove(leadBoardV1StorageKey(keyed, sessionID))
 }
 
-/** Explicit, idempotent migration used by lead_board_init and operator recovery. */
+/** Explicit, idempotent migration used by board_action init and operator recovery. */
 export async function migrateLeadBoardV1Storage(
   storage: StorageLike,
   location: LocationLike,

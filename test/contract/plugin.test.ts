@@ -132,12 +132,9 @@ describe("server plugin contract", () => {
       "orchestrate",
       "worker-models",
       "goal",
-      "restructure",
       "run-plan",
       "halt",
       "handover",
-      "polish",
-      "stress-plan",
       "publish",
       "gates",
     ])
@@ -157,18 +154,13 @@ describe("server plugin contract", () => {
     // per-session gates surface and the orchestrator-only github, worktree,
     // orchestration validation, verification receipt, publish policy, and peer discovery families
     // with their shared permission actions:
-    // 3 goal + 1 gates + 11 github + 7 worktree + 10 validation + 1 publish + 2 peer = 35.
+    // 1 goal + 1 gates + 8 github + 7 worktree + 3 orchestration + 1 verification + 1 publish + 1 status = 23.
     const allToolNames = tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)
     expect(allToolNames).toEqual([
-      "orchestrator_goal_get",
-      "orchestrator_goal_set",
-      "orchestrator_goal_update",
+      "orchestrator_goal",
       "orchestrator_gates_get",
       "orchestrator_github_capabilities",
       "orchestrator_github_repo_view",
-      "orchestrator_github_issue_view",
-      "orchestrator_github_issue_list",
-      "orchestrator_github_issue_create",
       "orchestrator_github_pr_view",
       "orchestrator_github_pr_list",
       "orchestrator_github_pr_create",
@@ -182,31 +174,24 @@ describe("server plugin contract", () => {
       "orchestrator_worktree_push",
       "orchestrator_worktree_cleanup",
       "orchestrator_worktree_enter",
-      "orchestrator_task_complexity_classify",
       "orchestrator_handoff_validate",
-      "orchestrator_admission_transition",
-      "orchestrator_lead_board_get",
-      "orchestrator_lead_board_init",
-      "orchestrator_lead_board_task_create",
-      "orchestrator_lead_board_task_assign",
-      "orchestrator_lead_board_transition",
-      "orchestrator_lead_board_complete",
+      "orchestrator_board_get",
+      "orchestrator_board_action",
       "orchestrator_verification_get",
       "orchestrator_publish_policy_get",
-      "orchestrator_peer_list",
-      "orchestrator_session_status",
+      "orchestrator_status",
     ])
-    expect(allToolNames).toHaveLength(35)
-    expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBe(11)
+    expect(allToolNames).toHaveLength(23)
+    expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBe(8)
     expect(tools.filter((tool) => tool.options?.permission === WORKTREE_TOOL_PERMISSION).length).toBe(7)
     expect(tools.filter((tool) => tool.options?.permission === PUBLISH_TOOL_PERMISSION).length).toBe(1)
-    expect(tools.filter((tool) => tool.options?.permission === PEER_TOOL_PERMISSION).length).toBe(2)
+    expect(tools.filter((tool) => tool.options?.permission === PEER_TOOL_PERMISSION).length).toBe(1)
     // The read-only per-session gates surface shares its own permission action.
     const gatesTools = tools.filter((tool) => tool.options?.permission === GATES_TOOL_PERMISSION)
     expect(gatesTools.map((tool) => `${tool.options?.namespace}_${tool.name}`)).toEqual(["orchestrator_gates_get"])
     expect(gatesTools[0]?.options?.permission).toBe("orchestrator_gates")
     const goalTools = tools.filter((tool) => tool.options?.permission === GOAL_TOOL_PERMISSION)
-    expect(goalTools).toHaveLength(3)
+    expect(goalTools).toHaveLength(1)
     // Every registered goal tool must declare the shared permission action so
     // a single rule grants or revokes the whole family.
     for (const tool of goalTools) {
@@ -216,15 +201,9 @@ describe("server plugin contract", () => {
     // the same permission action (one rule grants or revokes the family).
     const validationTools = tools.filter((tool) => tool.options?.permission === ORCHESTRATION_TOOL_PERMISSION)
     expect(validationTools.map((tool) => tool.name).sort()).toEqual([
-      "admission_transition",
+      "board_action",
+      "board_get",
       "handoff_validate",
-      "lead_board_complete",
-      "lead_board_get",
-      "lead_board_init",
-      "lead_board_task_assign",
-      "lead_board_task_create",
-      "lead_board_transition",
-      "task_complexity_classify",
       "verification_get",
     ])
     for (const tool of validationTools) {
@@ -246,7 +225,7 @@ describe("server plugin contract", () => {
     )
     expect(orchestratorSystem).toContain("A slice is a coordination unit, never a permission or filesystem boundary")
     expect(orchestratorSystem).toContain("prefer coherent end-to-end slices")
-    expect(orchestratorSystem).not.toMatch(/scheduler|semaphore/i)
+    expect(orchestratorSystem).toContain("not a scheduler or cross-process limit")
     expect(orchestratorSystem).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
 
     const contextText: string[] = []
@@ -254,9 +233,7 @@ describe("server plugin contract", () => {
       agent: "orchestrator",
       system: { push: (item: { text: string }) => void contextText.push(item.text) },
     })
-    expect(contextText.join("\n")).toContain("orchestrator_goal_get")
-    expect(contextText.join("\n")).toContain("orchestrator_goal_set")
-    expect(contextText.join("\n")).toContain("orchestrator_goal_update")
+    expect(contextText.join("\n")).toContain("orchestrator_goal")
     expect(contextText.join("\n")).toContain("Nested delegation is bounded to the role graph")
     expect(contextText.join("\n")).toContain("implementation→planning,research")
     expect(contextText.join("\n")).toContain("research→no delegation")
@@ -275,10 +252,8 @@ describe("server plugin contract", () => {
     expect(contextText.join("\n")).toContain("merge are autonomous when the durable publish capability and the per-session gates allow them")
     expect(contextText.join("\n")).toContain("no separate user merge instruction is required")
     expect(contextText.join("\n")).toContain("Definition of Done (terminal drive)")
-    expect(contextText.join("\n")).toContain("orchestrator_task_complexity_classify")
     expect(contextText.join("\n")).toContain("orchestrator_handoff_validate")
     expect(contextText.join("\n")).toContain("orchestrator_verification_get")
-    expect(contextText.join("\n")).toContain("orchestrator_admission_transition")
     expect(contextText.join("\n")).toContain("not an automatic gate")
     expect(contextText.join("\n")).toContain("exact disjoint write scope")
     expect(contextText.join("\n")).not.toMatch(/\bgoal_(get|set|update)\b/)
@@ -301,7 +276,18 @@ describe("server plugin contract", () => {
     expect(prompts[0].delivery).toBe("queue")
 
     await cleanup?.()
-    expect(disposed).toEqual(["execute.after", "session-hook", "rpc", "tool", "command", "agent", "execute.after", "execute.before"])
+    expect(disposed).toEqual([
+      "execute.after",
+      "session-hook",
+      "rpc",
+      "tool",
+      "command",
+      "agent",
+      "execute.after",
+      "execute.before",
+      "execute.after",
+      "execute.before",
+    ])
     // The worktree event sync registered its own real dispose, which closed
     // the subscribed event stream.
     expect(stream.closed).toBe(true)
@@ -394,9 +380,10 @@ describe("server plugin contract", () => {
 
     // The existing families are unchanged and the conditional tools are added.
     for (const name of [
-      "orchestrator_goal_get",
+      "orchestrator_goal",
       "orchestrator_handoff_validate",
-      "orchestrator_admission_transition",
+      "orchestrator_board_get",
+      "orchestrator_board_action",
       "orchestrator_observability_get",
       "orchestrator_review_get",
       "orchestrator_review_start",
@@ -422,13 +409,12 @@ describe("server plugin contract", () => {
       agent: "orchestrator",
       system: { push: (item: { text: string }) => void disabledContext.push(item.text) },
     })
-    expect(disabledContext.join("\n")).toContain("orchestrator_goal_get")
+    expect(disabledContext.join("\n")).toContain("orchestrator_goal")
     expect(disabledContext.join("\n")).not.toContain("orchestrator_worktree_create")
     expect(disabledContext.join("\n")).not.toContain("GitHub lifecycle is enabled")
     expect(disabledContext.join("\n")).not.toContain("orchestrator_github_pr_merge")
     // The terminal-drive Definition of Done is gated on github||publish too.
     expect(disabledContext.join("\n")).not.toContain("Definition of Done (terminal drive)")
-    expect(disabledContext.join("\n")).toContain("orchestrator_task_complexity_classify")
     // The read-only gates surface and its user-mediated narrowing note are
     // universal context regardless of feature flags.
     expect(disabledContext.join("\n")).toContain("orchestrator_gates_get")
@@ -446,6 +432,8 @@ describe("server plugin contract", () => {
       "tool",
       "command",
       "agent",
+      "execute.after",
+      "execute.before",
       "execute.after",
       "execute.before",
       "execute.before",
@@ -548,7 +536,18 @@ describe("server plugin contract", () => {
     expect(defaultHarness.permissionHooks).toEqual([])
     expect(defaultHarness.ruleWrites).toEqual([])
     await defaultCleanup?.()
-    expect(defaultHarness.disposed).toEqual(["execute.after", "session:context", "rpc", "tool", "command", "agent", "execute.after", "execute.before"])
+    expect(defaultHarness.disposed).toEqual([
+      "execute.after",
+      "session:context",
+      "rpc",
+      "tool",
+      "command",
+      "agent",
+      "execute.after",
+      "execute.before",
+      "execute.after",
+      "execute.before",
+    ])
     expect(defaultHarness.stream.closed).toBe(true)
 
     // Enforce: exactly one prompt hook and one evaluate hook (registered before
@@ -566,6 +565,8 @@ describe("server plugin contract", () => {
       "tool",
       "command",
       "agent",
+      "execute.after",
+      "execute.before",
       "execute.after",
       "execute.before",
       "permission:evaluate",
@@ -648,23 +649,14 @@ describe("server plugin contract", () => {
     // feature families stay disabled.
     expect(commands.map((command) => command.name)).toEqual([...COMMAND_NAMES])
     expect(tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)).toEqual([
-      "orchestrator_goal_get",
-      "orchestrator_goal_set",
-      "orchestrator_goal_update",
+      "orchestrator_goal",
       "orchestrator_gates_get",
-      "orchestrator_task_complexity_classify",
       "orchestrator_handoff_validate",
-      "orchestrator_admission_transition",
-      "orchestrator_lead_board_get",
-      "orchestrator_lead_board_init",
-      "orchestrator_lead_board_task_create",
-      "orchestrator_lead_board_task_assign",
-      "orchestrator_lead_board_transition",
-      "orchestrator_lead_board_complete",
+      "orchestrator_board_get",
+      "orchestrator_board_action",
       "orchestrator_verification_get",
       "orchestrator_publish_policy_get",
-      "orchestrator_peer_list",
-      "orchestrator_session_status",
+      "orchestrator_status",
     ])
     expect(rpcRegistrations).toHaveLength(1)
 

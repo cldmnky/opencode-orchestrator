@@ -30,40 +30,40 @@ describe("goal tools", () => {
   test("all goal tools declare the shared permission action", () => {
     const { tools } = collectTools()
     const toolList = [...tools.values()]
-    expect(toolList.map((tool: ToolLike) => tool.name)).toEqual(["goal_get", "goal_set", "goal_update"])
+    expect(toolList.map((tool: ToolLike) => tool.name)).toEqual(["goal"])
     for (const tool of toolList) {
       expect(tool.options?.namespace).toBe("orchestrator")
       expect(tool.options?.permission).toBe(GOAL_TOOL_PERMISSION)
     }
   })
 
-  test("goal_get returns the active goal for the orchestrator", async () => {
+  test("goal get returns the active goal for the orchestrator", async () => {
     const sessionID = "get-session"
     const { tools, values } = collectTools()
     values.set(goalStorageKey(location, sessionID), newGoal(sessionID, "ship the change", 1))
 
-    const output = await tools.get("goal_get")!.execute({}, toolContext(sessionID, "orchestrator"))
+    const output = await tools.get("goal")!.execute({ action: "get" }, toolContext(sessionID, "orchestrator"))
 
     const goal = JSON.parse(output.content) as GoalRecord
     expect(goal.objective).toBe("ship the change")
     expect(goal.status).toBe("active")
   })
 
-  test("goal_get is gated to the orchestrator like set and update", async () => {
+  test("goal get is gated to the orchestrator like set and update", async () => {
     const { tools } = collectTools()
     const worker = toolContext("get-session", "explore")
-    await expect(tools.get("goal_get")!.execute({}, worker)).rejects.toThrow(/only to the orchestrator/)
-    await expect(tools.get("goal_set")!.execute({ objective: "x" }, worker)).rejects.toThrow(/only to the orchestrator/)
-    await expect(tools.get("goal_update")!.execute({ status: "paused" }, worker)).rejects.toThrow(/only to the orchestrator/)
+    await expect(tools.get("goal")!.execute({ action: "get" }, worker)).rejects.toThrow(/only to the orchestrator/)
+    await expect(tools.get("goal")!.execute({ action: "set", objective: "x" }, worker)).rejects.toThrow(/only to the orchestrator/)
+    await expect(tools.get("goal")!.execute({ action: "pause" }, worker)).rejects.toThrow(/only to the orchestrator/)
   })
 
-  test("goal_set creates the goal and clears the halt flag", async () => {
+  test("goal set creates the goal and clears the halt flag", async () => {
     const sessionID = "set-session"
     const { tools, values } = collectTools()
     const stopKey = stopStorageKey(location, sessionID)
     values.set(stopKey, { version: 1, sessionID, stoppedAt: 1 })
 
-    const output = await tools.get("goal_set")!.execute({ objective: "  ship the change  " }, toolContext(sessionID, "orchestrator"))
+    const output = await tools.get("goal")!.execute({ action: "set", objective: "  ship the change  " }, toolContext(sessionID, "orchestrator"))
 
     const goal = JSON.parse(output.content) as GoalRecord
     expect(goal.objective).toBe("ship the change")
@@ -72,30 +72,30 @@ describe("goal tools", () => {
     expect(values.has(stopKey)).toBe(false)
   })
 
-  test("goal_set rejects an empty objective", async () => {
+  test("goal set rejects an empty objective", async () => {
     const { tools } = collectTools()
-    const output = await tools.get("goal_set")!.execute({ objective: "   " }, toolContext("set-session", "orchestrator"))
+    const output = await tools.get("goal")!.execute({ action: "set", objective: "   " }, toolContext("set-session", "orchestrator"))
     expect(output.content).toBe("objective must be a non-empty string")
   })
 
-  test("goal_update pauses, resumes, and completes only with evidence", async () => {
+  test("goal action pauses, resumes, and completes only with evidence", async () => {
     const sessionID = "update-session"
     const { tools, values } = collectTools()
     const key = goalStorageKey(location, sessionID)
     values.set(key, newGoal(sessionID, "ship the change", 1))
 
-    const paused = await tools.get("goal_update")!.execute({ status: "paused" }, toolContext(sessionID, "orchestrator"))
+    const paused = await tools.get("goal")!.execute({ action: "pause" }, toolContext(sessionID, "orchestrator"))
     expect((JSON.parse(paused.content) as GoalRecord).status).toBe("paused")
     expect((JSON.parse(paused.content) as GoalRecord).completionEvidence).toBeUndefined()
 
     const tooShort = await tools
-      .get("goal_update")!
-      .execute({ status: "complete", evidence: "short" }, toolContext(sessionID, "orchestrator"))
+      .get("goal")!
+      .execute({ action: "complete", evidence: "short" }, toolContext(sessionID, "orchestrator"))
     expect(tooShort.content).toBe("completion requires at least eight characters of evidence")
 
     const complete = await tools
-      .get("goal_update")!
-      .execute({ status: "complete", evidence: "verified by tests" }, toolContext(sessionID, "orchestrator"))
+      .get("goal")!
+      .execute({ action: "complete", evidence: "verified by tests" }, toolContext(sessionID, "orchestrator"))
     const completed = JSON.parse(complete.content) as GoalRecord
     expect(completed.status).toBe("complete")
     expect(completed.completionEvidence).toBe("verified by tests")
@@ -104,7 +104,7 @@ describe("goal tools", () => {
     // Resuming clears the completion timestamps and the halt flag.
     const stopKey = stopStorageKey(location, sessionID)
     values.set(stopKey, { version: 1, sessionID, stoppedAt: 1 })
-    const resumed = await tools.get("goal_update")!.execute({ status: "active" }, toolContext(sessionID, "orchestrator"))
+    const resumed = await tools.get("goal")!.execute({ action: "resume" }, toolContext(sessionID, "orchestrator"))
     const active = JSON.parse(resumed.content) as GoalRecord
     expect(active.status).toBe("active")
     expect(active.completedAt).toBeUndefined()
@@ -112,13 +112,13 @@ describe("goal tools", () => {
     expect(values.has(stopKey)).toBe(false)
   })
 
-  test("goal_update reports when no goal exists", async () => {
+  test("goal action reports when no goal exists", async () => {
     const { tools } = collectTools()
-    const output = await tools.get("goal_update")!.execute({ status: "paused" }, toolContext("missing-session", "orchestrator"))
+    const output = await tools.get("goal")!.execute({ action: "pause" }, toolContext("missing-session", "orchestrator"))
     expect(output.content).toBe("No active orchestration goal.")
   })
 
-  test("goal_set and goal_update serialize through the session lock", async () => {
+  test("goal set and goal action serialize through the session lock", async () => {
     const sessionID = "lock-session"
     const values = new Map<string, unknown>()
     let markEntered!: () => void
@@ -140,12 +140,12 @@ describe("goal tools", () => {
       },
     )
 
-    // goal_set blocks inside storage.set while holding the session lock.
-    const setPromise = tools.get("goal_set")!.execute({ objective: "finish the work" }, toolContext(sessionID, "orchestrator"))
+    // goal set blocks inside storage.set while holding the session lock.
+    const setPromise = tools.get("goal")!.execute({ action: "set", objective: "finish the work" }, toolContext(sessionID, "orchestrator"))
     await entered
-    // goal_update must wait on the same lock; without it this would observe
+    // goal action must wait on the same lock; without it this would observe
     // the missing goal and answer "No active orchestration goal."
-    const updatePromise = tools.get("goal_update")!.execute({ status: "paused" }, toolContext(sessionID, "orchestrator"))
+    const updatePromise = tools.get("goal")!.execute({ action: "pause" }, toolContext(sessionID, "orchestrator"))
     await new Promise((resolve) => setTimeout(resolve, 10))
     release()
 
@@ -179,12 +179,12 @@ describe("goal tools", () => {
       ]),
     )
 
-    const read = await tools.get("goal_get")!.execute({}, toolContext(sessionID, "orchestrator"))
+    const read = await tools.get("goal")!.execute({ action: "get" }, toolContext(sessionID, "orchestrator"))
     const goal = JSON.parse(read.content) as GoalRecord
     expect(goal.objective).toBe("ship the change")
 
-    // goal_set writes under the origin project key, not the current one.
-    await tools.get("goal_set")!.execute({ objective: "replaced" }, toolContext(sessionID, "orchestrator"))
+    // goal set writes under the origin project key, not the current one.
+    await tools.get("goal")!.execute({ action: "set", objective: "replaced" }, toolContext(sessionID, "orchestrator"))
     expect(values.has(goalStorageKey({ ...location, project: { id: "origin" } }, sessionID))).toBe(true)
     expect(values.has(goalStorageKey(location, sessionID))).toBe(false)
 
@@ -194,11 +194,11 @@ describe("goal tools", () => {
     const boardKey = leadBoardStorageKey(originLocation, sessionID)
     expect(values.has(boardKey)).toBe(true)
     const refused = await tools
-      .get("goal_update")!
-      .execute({ status: "complete", evidence: "verified by tests" }, toolContext(sessionID, "orchestrator"))
+      .get("goal")!
+      .execute({ action: "complete", evidence: "verified by tests" }, toolContext(sessionID, "orchestrator"))
     expect(refused.content).toContain("complete the lead board")
 
-    // Once the board itself is complete, goal_update operates on the
+    // Once the board itself is complete, goal action operates on the
     // origin-keyed record.
     const board = parseLeadBoard(values.get(boardKey))!
     const revision = "a".repeat(40)
@@ -239,8 +239,8 @@ describe("goal tools", () => {
       }),
     )
     const updated = await tools
-      .get("goal_update")!
-      .execute({ status: "complete", evidence: "verified by tests" }, toolContext(sessionID, "orchestrator"))
+      .get("goal")!
+      .execute({ action: "complete", evidence: "verified by tests" }, toolContext(sessionID, "orchestrator"))
     expect((JSON.parse(updated.content) as GoalRecord).status).toBe("complete")
     expect((JSON.parse(updated.content) as GoalRecord).completionEvidence).toBe("verified by tests")
   })
@@ -256,7 +256,7 @@ describe("publish and peer tools", () => {
     }
 
     const peerTools = collectPeerTools().tools
-    expect([...peerTools.keys()]).toEqual(["peer_list", "session_status"])
+    expect([...peerTools.keys()]).toEqual(["status"])
     for (const tool of peerTools.values()) {
       expect(tool.options?.namespace).toBe("orchestrator")
       expect(tool.options?.permission).toBe(PEER_TOOL_PERMISSION)
@@ -268,10 +268,10 @@ describe("publish and peer tools", () => {
     const peerTools = collectPeerTools().tools
     const worker = toolContext("session-1", "explore")
     await expect(publishTools.get("publish_policy_get")!.execute({}, worker)).rejects.toThrow(/only to the orchestrator/)
-    await expect(peerTools.get("peer_list")!.execute({}, worker)).rejects.toThrow(/only to the orchestrator/)
+    await expect(peerTools.get("status")!.execute({ mode: "list" }, worker)).rejects.toThrow(/only to the orchestrator/)
   })
 
-  test("peer_list returns bounded same-project metadata through the tool", async () => {
+  test("status returns bounded same-project metadata through the tool", async () => {
     const values = new Map<string, unknown>([
       [goalStorageKey(location, "peer-a"), newGoal("peer-a", "first objective", 1)],
       [goalStorageKey(location, "peer-b"), newGoal("peer-b", `secret token=ghp_ABCDEFGHIJKLMNOPQRST1234567890 here`, 2)],
@@ -279,11 +279,14 @@ describe("publish and peer tools", () => {
     ])
     const { tools } = collectPeerTools(values, scanable(values))
 
-    const output = await tools.get("peer_list")!.execute({ limit: 10 }, toolContext("session-1", "orchestrator"))
-    const parsed = JSON.parse(output.content) as { peers: Array<{ sessionID: string; objectiveHint: string }>; complete: boolean }
-    expect(parsed.peers.map((peer) => peer.sessionID)).toEqual(["peer-a", "peer-b"])
+    const output = await tools.get("status")!.execute({ mode: "list", limit: 10 }, toolContext("session-1", "orchestrator"))
+    const parsed = JSON.parse(output.content) as {
+      sessions: Array<{ sessionID: string; goal?: { objectiveHint: string } }>
+      complete: boolean
+    }
+    expect(parsed.sessions.map((session) => session.sessionID)).toEqual(["peer-a", "peer-b"])
     expect(parsed.complete).toBe(true)
-    expect(parsed.peers.find((peer) => peer.sessionID === "peer-b")?.objectiveHint).toContain("[redacted]")
+    expect(parsed.sessions.find((session) => session.sessionID === "peer-b")?.goal?.objectiveHint).toContain("[redacted]")
     expect(output.content).not.toContain("ghp_ABCDEFGHIJKLMNOPQRST1234567890")
   })
 })

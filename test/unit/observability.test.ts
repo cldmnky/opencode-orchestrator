@@ -3,19 +3,13 @@ import { parseOptions } from "../../src/core/config.js"
 import { OBSERVABILITY_TOOL_PERMISSION } from "../../src/core/permissions.js"
 import { configuredBudgetLimits, evaluateBudget, type BudgetEvaluation } from "../../src/opencode-v2/observability/budget.js"
 import {
-  GENERATION_HINT_MAX_HINT_CHARS,
-  GENERATION_HINT_MAX_PROMPT_CHARS,
-  GENERATION_HINT_RECORD_VERSION,
   TRACE_MAX_PENDING_CALLS,
   TRACE_MAX_TOOL_ENTRIES,
   applyToolCallEnd,
   applyToolCallOutcome,
   applyToolCallStart,
-  generationHintSchema,
-  newGenerationHint,
   newRetryTrace,
   newTraceSummary,
-  parseGenerationHint,
   parseRetryTrace,
   parseTraceSummary,
   recordRetry,
@@ -343,84 +337,6 @@ describe("bounded metadata-only trace summaries", () => {
     const valid = newTraceSummary("s1", "snapshot", 1000)
     expect(parseTraceSummary(valid)).toBeDefined()
     expect(parseTraceSummary({ ...valid, extra: true })).toBeUndefined()
-  })
-})
-
-describe("bounded metadata-only generation-hint records", () => {
-  const baseHint = {
-    status: "completed" as const,
-    level: "worker" as const,
-    verdict: "pass" as const,
-    checkCount: 7,
-    model: "probe/deterministic",
-    outputChars: 12,
-    outputRedacted: false,
-    outputTruncated: false,
-    durationMs: 5,
-    capturedAt: 1000,
-  }
-
-  test("builds a versioned record with a fixed bounded key set", () => {
-    const record = newGenerationHint({ ...baseHint, promptChars: 300, hint: "keep the receipt scoped" })
-    expect(record.version).toBe(GENERATION_HINT_RECORD_VERSION)
-    expect(record.kind).toBe("handoff-validate")
-    expect(Object.keys(record).sort()).toEqual(
-      [
-        "capturedAt",
-        "checkCount",
-        "durationMs",
-        "hint",
-        "kind",
-        "level",
-        "model",
-        "outputChars",
-        "outputRedacted",
-        "outputTruncated",
-        "promptChars",
-        "status",
-        "verdict",
-        "version",
-      ].sort(),
-    )
-    expect(parseGenerationHint(record)).toEqual(record)
-    // No prompt, transcript, tool payload, or error field exists at all.
-    const serialized = JSON.stringify(record)
-    expect(serialized).not.toContain("prompt\"")
-    expect(serialized).not.toContain("transcript")
-    expect(serialized).not.toContain("error")
-  })
-
-  test("clamps recorded sizes instead of fabricating unbounded values", () => {
-    const record = newGenerationHint({ ...baseHint, promptChars: GENERATION_HINT_MAX_PROMPT_CHARS * 5, outputChars: Number.NaN })
-    expect(record.promptChars).toBe(GENERATION_HINT_MAX_PROMPT_CHARS)
-    expect(record.outputChars).toBe(0)
-  })
-
-  test("strict schema rejects malformed, unknown-shaped, and over-long records", () => {
-    const valid = newGenerationHint({ ...baseHint, promptChars: 10 })
-    expect(generationHintSchema.safeParse(valid).success).toBe(true)
-    for (const malformed of [
-      undefined,
-      null,
-      "hint",
-      [],
-      { ...valid, extra: true },
-      { ...valid, status: "running" },
-      { ...valid, level: "parent" },
-      { ...valid, verdict: "unknown" },
-      { ...valid, reason: "raw provider error text" },
-      { ...valid, hint: "x".repeat(GENERATION_HINT_MAX_HINT_CHARS + 1) },
-      { ...valid, hint: "" },
-      { ...valid, model: "m".repeat(201) },
-      { ...valid, durationMs: -1 },
-      { ...valid, capturedAt: "now" },
-    ]) {
-      expect(parseGenerationHint(malformed)).toBeUndefined()
-    }
-    // A skip record may omit the hint but must carry a known reason.
-    const skipped = newGenerationHint({ ...baseHint, status: "skipped", reason: "verdict-not-pass", promptChars: 0, outputChars: 0 })
-    expect(parseGenerationHint(skipped)).toEqual(skipped)
-    expect(parseGenerationHint({ ...skipped, reason: undefined })).toBeDefined()
   })
 })
 

@@ -55,7 +55,7 @@ describe("runtime commands", () => {
     })
   })
 
-  test("rejects ambiguous plans and unsafe restructure or polish paths", async () => {
+  test("rejects ambiguous plans without dispatching a prompt", async () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-runtime-"))
     mkdirSync(join(directory, ".orchestrator", "plans"), { recursive: true })
     writeFileSync(join(directory, ".orchestrator", "plans", "one.md"), "# One\n")
@@ -64,14 +64,10 @@ describe("runtime commands", () => {
     const options = parseOptions({})
 
     await runCommand(fixture.context, options, "run-plan", invocation(""), undefined)
-    await runCommand(fixture.context, options, "restructure", invocation("../outside"), undefined)
-    await runCommand(fixture.context, options, "polish", invocation("/outside"), undefined)
 
     expect(fixture.prompts).toHaveLength(0)
-    expect(fixture.statuses).toHaveLength(3)
+    expect(fixture.statuses).toHaveLength(1)
     expect(fixture.statuses[0]).toContain("no sole incomplete plan")
-    expect(fixture.statuses[1]).toContain("relative path")
-    expect(fixture.statuses[2]).toContain("relative paths")
   })
 
   test("builds a factual handover without prompting a model", async () => {

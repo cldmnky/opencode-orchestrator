@@ -361,7 +361,7 @@ describe("goal continuation", () => {
     const prompts: Array<{ text: string }> = []
     const stream = createStream()
     // When the reservation is written (count 0 -> 1), a concurrent
-    // `goal_update` pauses and resumes the goal: status is active again and
+    // `orchestrator_goal` pause/resume actions make the goal active again and
     // the continuation count still matches the reservation, but updatedAt
     // advanced so this is not the exact record we reserved.
     const racyStorage: StorageLike = {
@@ -399,7 +399,8 @@ describe("goal continuation", () => {
     const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
     const prompts: Array<{ text: string }> = []
     const stream = createStream()
-    // When the reservation is written, a concurrent `goal_set` replaces the
+    // When the reservation is written, a concurrent `orchestrator_goal` set
+    // action replaces the
     // goal with a fresh record whose continuation identity (createdAt and
     // objective) differs even though the count and lastContinuationAt happen
     // to match the reservation.

@@ -135,10 +135,9 @@ describe("redaction", () => {
     expect(redact("plain?mode=read&tokenizer=fast")).toBe("plain?mode=read&tokenizer=fast")
   })
 
-  test("hint-path redaction: advisory-output-shaped text keeps its structure with a no-secret control", () => {
-    // The opt-in generation-hint post-step runs model output through this
-    // exact canonical API before bounding it: known patterns plus caller-known
-    // exact secrets (threaded only where wired), structure preserved.
+  test("advisory-output redaction keeps structure with a no-secret control", () => {
+    // Advisory output uses this exact canonical API before bounding it:
+    // known patterns plus caller-known exact secrets, with structure preserved.
     const secret = "FAKE-CALLER-KNOWN-SECRET-01"
     const output = [
       "Keep the receipt scoped.",

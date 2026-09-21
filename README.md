@@ -148,7 +148,7 @@ Check that it worked:
 ```sh
 ./node_modules/.bin/opencode-v2-agent-orchestrator doctor --json
 # plus, once OpenCode is running:
-opencode2 api get /api/plugin | jq -r '.data // . | .[].id' | grep opencode-orchestrator
+opencode api get /api/plugin | jq -r '.data // . | .[].id' | grep opencode-orchestrator
 ```
 
 ## Documentation
@@ -170,7 +170,7 @@ opencode2 api get /api/plugin | jq -r '.data // . | .[].id' | grep opencode-orch
 
 ```sh
 cd your-project
-opencode2
+opencode
 ```
 
 Then in the TUI:
@@ -554,7 +554,7 @@ For teams that want cost/usage limits or a stricter review gate:
 
 **Plugin not appearing in OpenCode?**
 - For an installed project, make sure its `opencode.jsonc` points at `./node_modules/opencode-v2-agent-orchestrator/dist/index.js`; this repository's source checkout is loaded as `./src/index.ts` from global config
-- Restart OpenCode: `opencode2 service restart` then reopen from your project dir
+- Restart OpenCode: `opencode service restart` then reopen from your project dir
 - Check logs: `~/.local/share/opencode/log/opencode.log` should show `loading plugin .../dist/index.js` and `agent.updated` / `command.updated`
 
 **GitHub or worktree not working?**
@@ -616,7 +616,7 @@ not required reading for a quick start.
 bun install
 bun run dev:setup        # writes gitignored dev/project/opencode.jsonc from template
 bun run dev:reset        # removes only generated dev/state/ and dev/project/opencode.jsonc
-bun run dev:v2           # standalone opencode2 with XDG dirs under dev/state
+bun run dev:v2           # standalone opencode with XDG dirs under dev/state
 bun run dev:v2:dist      # loads ../../dist/index.js (run bun run build first)
 bun run typecheck
 bun test

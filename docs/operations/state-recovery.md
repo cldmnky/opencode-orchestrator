@@ -17,7 +17,7 @@ opencode-v2-agent-orchestrator state archive --session ses_123
 opencode-v2-agent-orchestrator state reset --session ses_123 --family review-v1 --yes
 ```
 
-The CLI uses `opencode2 api` and therefore the host's service discovery and
+The CLI uses `opencode api` and therefore the host's service discovery and
 authentication. A location can be supplied with `--directory`; every request
 uses the V2 deep-object `location[directory]` parameter.
 

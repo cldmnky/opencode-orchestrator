@@ -7,7 +7,7 @@
 - The existing default export is a server plugin, not a terminal UI plugin. A V2 CLI plugin imports `@opencode/plugin/tui` directly, is exported as `./tui`, and is auto-loaded from the main plugin only when that plugin sets `tui: true`.
 - Put a CLI-only plugin in global `cli.json`, not project `opencode.json(c)`; this is the form that remains active when the TUI connects to a remote server. Add the OpenTUI/Solid peer dependencies only when rendering JSX.
 - In a CLI plugin, use `context.client` for the connected server and `context.data.on`/`listen` for typed events. Return cleanup functions for subscriptions, slots, routes, renderers, and other owned resources.
-- Treat `https://opencode.ai/v2/openapi.json` as the HTTP contract. For local inspection use `opencode2 api <method> <path>` so service discovery and authentication match the TUI; do not construct a separate unauthenticated localhost client.
+- Treat `https://opencode.ai/v2/openapi.json` as the HTTP contract. For local inspection use `opencode api <method> <path>` so service discovery and authentication match the TUI; do not construct a separate unauthenticated localhost client.
 - The GitHub (via `gh`) and git worktree tool families are orchestrator-only and disabled by default (`github.enabled`, `worktree.enabled`). `src/cli/doctor.ts` adds advisory local runtime checks (git/gh presence, `gh auth status` exit-code-only, read-only `gh repo view`, `git worktree list --porcelain`); they never fail the report, never print `gh` output, and the server-side `orchestrator_github_capabilities` probe is authoritative for live session PATH/auth/permissions. A per-session gate family (`push`, `pr-draft-create`, `pr-ready-transition`, `approve-after-review`, `merge`, `github-mutations`, `worktree-mutations`) can only narrow the project/config ceiling; users set it via `/gates` or the TUI gate picker, while the model only has the read-only `orchestrator_gates_get`. Merge is autonomous under the durable publish capability (no separate user request) once every fail-closed precondition passes.
 
 ## Layout
@@ -29,12 +29,12 @@ bun run build
 
 - Run one test file with `bun test test/unit/core.test.ts` or `bun test test/unit/installer.test.ts`; focus a test by name with `bun test -t 'is idempotent'`. `test/unit/installer.test.ts` also covers `doctor`'s runtime checks with an injected fake runner — tests never invoke live git/gh.
 - There is no configured lint or formatter command. Do not claim lint verification.
-- Use `bun run dev:setup && bun run dev:v2` for an isolated `opencode2 --standalone` harness. It redirects XDG config/data/cache under `dev/state` and does not exercise global config or the shared service.
+- Use `bun run dev:setup && bun run dev:v2` for an isolated `opencode --standalone` harness. It redirects XDG config/data/cache under `dev/state` and does not exercise global config or the shared service.
 
 ## Live Reload (repo root)
 
 - There is no repo-level `opencode.jsonc`; the global config (`~/.config/opencode/opencode.json`, nix-managed from `~/.config/nix/dotfiles/opencode/opencode.json`) is the single source of truth and loads the plugin from this repo's `src` directory. Saving `src/**` still triggers the server's file watcher — no restart for most changes. Watch `~/.local/share/opencode/log/opencode.log` for `loading plugin .../src/index.ts` and `agent.updated`/`command.updated`. Plugin option changes go through the nix dotfiles plus `darwin-rebuild switch` and need a service restart.
-- If `/orchestrate`/`/worker-models`/`/goal` disappear in the TUI, restart the shared service and reopen from the repo: `opencode2 service restart` then `cd repo && opencode2`. Verify the repo-scoped plugin with `opencode2 api get '/api/plugin?location[directory]=/path/to/repo' | jq -r '.data // . | .[].id'` and `bun run src/cli/index.ts doctor`.
+- If `/orchestrate`/`/worker-models`/`/goal` disappear in the TUI, restart the shared service and reopen from the repo: `opencode service restart` then `cd repo && opencode`. Verify the repo-scoped plugin with `opencode api get '/api/plugin?location[directory]=/path/to/repo' | jq -r '.data // . | .[].id'` and `bun run src/cli/index.ts doctor`.
 - Do not set `OPENCODE_CONFIG` in normal dev; it overrides discovery.
 
 ## Ship
@@ -48,4 +48,4 @@ bun run build
 - `bun run dev:v2:dist` rewrites the generated config to `../../dist/index.js`; inspect `dev/project/opencode.jsonc` when verifying which entrypoint is loaded.
 - `bun run build` emits the package's published bundle entrypoints under `dist/`; a successful build does not replace the packed-package smoke test.
 - The plugin defaults to `strict_agents: true`; config-backed agents are materialized after external plugins during beta startup, so the complete dev template or installer is required for strict validation.
-- `opencode2 api` requests default to the service location rather than the client `cwd`; scope location-aware requests explicitly with the OpenAPI deep-object parameter, for example `opencode2 api get '/api/plugin?location[directory]=/path/to/repo'`. The legacy `?directory=` parameter is ignored on beta-19507.
+- `opencode api` requests default to the service location rather than the client `cwd`; scope location-aware requests explicitly with the OpenAPI deep-object parameter, for example `opencode api get '/api/plugin?location[directory]=/path/to/repo'`. The legacy `?directory=` parameter is ignored on beta-19507.

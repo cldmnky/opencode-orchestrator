@@ -5,6 +5,9 @@ import {
   formatRow,
   liveStatus,
   MAX_ROW_TITLE_LENGTH,
+  sidebarMetaParts,
+  statusLabel,
+  statusMarker,
   type CachedSessionSummary,
   type SessionLike,
 } from "../../src/tui/sidebar.js"
@@ -117,5 +120,59 @@ describe("cleanRowTitle", () => {
     expect(cleaned).toBe(`${long.slice(0, MAX_ROW_TITLE_LENGTH - 1)}…`)
     expect(cleaned).not.toContain("\n")
     expect(cleanRowTitle("a".repeat(MAX_ROW_TITLE_LENGTH))).toBe("a".repeat(MAX_ROW_TITLE_LENGTH))
+  })
+})
+
+describe("sidebarMetaParts", () => {
+  test("turns progress into short primary and secondary display lines", () => {
+    const summary: CachedSessionSummary = {
+      sessionID: "session",
+      goal: { status: "active", objectiveHint: "hint" },
+      worktree: { status: "ready", branch: "feat/x" },
+      review: { state: "approved" },
+      board: {
+        status: "active",
+        total: 4,
+        completed: 2,
+        counts: {} as NonNullable<CachedSessionSummary["board"]>["counts"],
+        tasks: [],
+      },
+      complete: false,
+    }
+
+    expect(sidebarMetaParts({ cost: 12.5, summary })).toEqual({
+      primary: "tasks 2/4 · goal active · $12.50",
+      secondary: "review approved · tree ready · incomplete",
+    })
+  })
+
+  test("makes missing progress explicit instead of presenting zeroes as state", () => {
+    const summary: CachedSessionSummary = {
+      sessionID: "session",
+      goal: null,
+      worktree: null,
+      review: null,
+      board: {
+        status: "unavailable",
+        total: 0,
+        completed: 0,
+        counts: {} as NonNullable<CachedSessionSummary["board"]>["counts"],
+        tasks: [],
+      },
+    }
+
+    expect(sidebarMetaParts({ cost: Number.NaN, summary })).toEqual({ primary: "progress unavailable · $0.00" })
+    expect(sidebarMetaParts({ cost: 0 })).toEqual({ primary: "progress unknown · $0.00" })
+  })
+})
+
+describe("status presentation", () => {
+  test("uses distinct compact markers and readable labels", () => {
+    expect(statusMarker("busy")).toBe("●")
+    expect(statusMarker("running")).toBe("●")
+    expect(statusMarker("idle")).toBe("○")
+    expect(statusMarker("unknown")).toBe("?")
+    expect(statusLabel("running")).toBe("RUNNING")
+    expect(statusLabel("unknown")).toBe("UNKNOWN")
   })
 })

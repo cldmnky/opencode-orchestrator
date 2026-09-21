@@ -83,7 +83,7 @@ export function liveStatus(
   return status === "running" || status === "idle" ? status : "unknown"
 }
 
-/** Sidebar rows are single-line: titles are collapsed and truncated to this length. */
+/** Sidebar titles are collapsed and truncated to keep the card header stable. */
 export const MAX_ROW_TITLE_LENGTH = 40
 export const MAX_ROW_BRANCH_LENGTH = 20
 
@@ -108,6 +108,12 @@ export type RowParts = {
   readonly meta: string
 }
 
+/** Human-readable metadata lines used by the visual sidebar card. */
+export type SidebarMetaParts = {
+  readonly primary: string
+  readonly secondary?: string
+}
+
 /** Splits a row into styled parts; `formatRow` joins them for plain-text use. */
 export function rowParts(input: {
   status: LiveStatus
@@ -128,6 +134,62 @@ function compactRowLabel(value: string, maxLength: number): string {
   const collapsed = value.replace(/\s+/g, " ").trim()
   if (collapsed.length <= maxLength) return collapsed
   return `${collapsed.slice(0, maxLength - 1)}…`
+}
+
+/** Formats the bounded summary as two short, scannable metadata lines. */
+export function sidebarMetaParts(input: {
+  cost: number
+  summary?: CachedSessionSummary
+}): SidebarMetaParts {
+  const primary: string[] = []
+  const secondary: string[] = []
+
+  const board = input.summary?.board
+  if (!board) {
+    primary.push("progress unknown")
+  } else if (board.status === "unavailable") {
+    primary.push("progress unavailable")
+  } else if (board.status === "missing") {
+    primary.push("not started")
+  } else if (board.total > 0) {
+    primary.push(`tasks ${board.completed}/${board.total}`)
+  } else {
+    primary.push(`board ${board.status}`)
+  }
+
+  if (input.summary?.goal) primary.push(`goal ${input.summary.goal.status}`)
+  primary.push(formatCost(input.cost))
+
+  if (input.summary?.review) secondary.push(`review ${input.summary.review.state}`)
+  if (input.summary?.worktree) secondary.push(`tree ${input.summary.worktree.status}`)
+  if (input.summary?.budget?.verdict === "exceeded") secondary.push("budget exceeded")
+  if (input.summary?.complete === false && board?.status !== "unavailable" && board?.status !== "missing") secondary.push("incomplete")
+
+  return {
+    primary: primary.join(" · "),
+    ...(secondary.length > 0 ? { secondary: secondary.join(" · ") } : {}),
+  }
+}
+
+function formatCost(cost: number): string {
+  return `$${Number.isFinite(cost) ? cost.toFixed(2) : "0.00"}`
+}
+
+/** Returns a compact status marker that remains readable in monochrome terminals. */
+export function statusMarker(status: LiveStatus): string {
+  switch (status) {
+    case "busy":
+    case "running":
+      return "●"
+    case "idle":
+      return "○"
+    case "unknown":
+      return "?"
+  }
+}
+
+export function statusLabel(status: LiveStatus): string {
+  return status.toUpperCase()
 }
 
 /** Formats one deterministic, human-readable sidebar row (always single-line). */
@@ -165,24 +227,39 @@ export function renderSidebar(props: SidebarSessionsProps): JSX.Element {
 export function SidebarSessions(props: SidebarSessionsProps): JSX.Element {
   const busySessionIDs = new Set(props.tabs.filter((tab) => tab.busy).map((tab) => tab.sessionID))
   return (
-    <box flexDirection="column">
-      <text fg={props.theme?.subdued}>Orchestrator sessions ({props.sessions.length})</text>
+    <box flexDirection="column" paddingTop={1}>
+      <text wrapMode="none" truncate>
+        <span style={{ fg: props.theme?.text }}>Orchestrator</span>
+        <span style={{ fg: props.theme?.subdued }}> · {props.sessions.length} {props.sessions.length === 1 ? "session" : "sessions"}</span>
+      </text>
       <For each={props.sessions}>
         {(session) => {
           const summary = props.summaries?.find((candidate) => candidate.sessionID === session.id)
+          const status = liveStatus(session.id, props.statuses, busySessionIDs)
+          const cost = props.costs.get(session.id) ?? 0
           const parts = rowParts({
             title: session.title,
-            status: liveStatus(session.id, props.statuses, busySessionIDs),
-            cost: props.costs.get(session.id) ?? 0,
+            status,
+            cost,
             summary,
           })
-          const active = parts.status === "running" || parts.status === "busy"
+          const meta = sidebarMetaParts({ cost, summary })
+          const active = status === "running" || status === "busy"
           return (
-            <text wrapMode="none" truncate>
-              <span style={{ fg: active ? props.theme?.running : props.theme?.subdued }}>[{parts.status}]</span>
-              <span style={{ fg: props.theme?.text }}> {parts.title} </span>
-              <span style={{ fg: props.theme?.subdued }}>{parts.meta}</span>
-            </text>
+            <box flexDirection="column" paddingLeft={1} paddingTop={1}>
+              <text wrapMode="none" truncate>
+                <span style={{ fg: active ? props.theme?.running : props.theme?.subdued }}>{statusMarker(status)} {statusLabel(status)}</span>
+                <span style={{ fg: props.theme?.text }}>  {parts.title}</span>
+              </text>
+              <text wrapMode="none" truncate>
+                <span style={{ fg: props.theme?.subdued }}>  {meta.primary}</span>
+              </text>
+              {meta.secondary ? (
+                <text wrapMode="none" truncate>
+                  <span style={{ fg: props.theme?.subdued }}>  {meta.secondary}</span>
+                </text>
+              ) : null}
+            </box>
           )
         }}
       </For>

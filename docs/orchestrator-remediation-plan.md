@@ -927,7 +927,7 @@ Make upgrades safe for existing installations and provide recovery from fail-clo
 
 **Status: complete.** Installer, doctor, recovery, migration, and pinned
 contract/unit coverage are implemented. Real live-service and standalone
-harness checks remain environment-dependent when `opencode2` is unavailable.
+harness checks remain environment-dependent when `opencode` is unavailable.
 
 ### Installer migration
 
@@ -958,7 +958,7 @@ Static doctor should detect:
 - Broken plugin references.
 - Missing declarations/entrypoints in a packed install.
 
-Add `doctor --live` that uses `opencode2 api`, not a separately constructed localhost client. It should scope every location-aware request with the OpenAPI deep-object location parameter and verify:
+Add `doctor --live` that uses `opencode api`, not a separately constructed localhost client. It should scope every location-aware request with the OpenAPI deep-object location parameter and verify:
 
 - Plugin activation for the requested directory.
 - Registered commands.
@@ -989,7 +989,7 @@ After migration/inspection behavior is defined, remove the unused worktree model
 - Existing user-authored permissions survive migration.
 - Fresh and migrated configs converge to the same plugin-owned fields.
 - `--check` is byte-for-byte non-mutating.
-- Live doctor uses service discovery/authentication through `opencode2 api`.
+- Live doctor uses service discovery/authentication through `opencode api`.
 - State reset cannot operate without an explicit session and family.
 
 ---
@@ -1154,7 +1154,7 @@ Remove the deleted placeholder demo references unless real assets are restored. 
 5. Run all contract tests.
 6. Run `bun run build`.
 7. Run packed-package smoke tests.
-8. Run the isolated `opencode2 --standalone` development harness.
+8. Run the isolated `opencode --standalone` development harness.
 9. Verify source and packed entrypoints separately.
 10. Verify `/orchestrate`, `/goal`, `/run-plan`, `/halt`, `/handover`, `/worker-models`, `/publish`, and `/gates` in the TUI.
 11. Verify reviewer submission from a real reviewer child.

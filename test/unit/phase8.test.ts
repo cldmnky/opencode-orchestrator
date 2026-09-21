@@ -90,7 +90,7 @@ describe("Phase 8 installer modes", () => {
 })
 
 describe("Phase 8 live doctor", () => {
-  test("uses opencode2 api with deep-object location scope and parses bounded fields", async () => {
+  test("uses opencode api with deep-object location scope and parses bounded fields", async () => {
     const calls: string[][] = []
     const runner: DoctorApiRunner = async (args) => {
       calls.push([...args])
@@ -132,7 +132,7 @@ describe("Phase 8 live doctor", () => {
         throw new Error("secret response body")
       },
     })
-    expect(checks).toEqual([{ name: "live-plugin", status: "fail", message: "opencode2 api plugin request exited -1" }])
+    expect(checks).toEqual([{ name: "live-plugin", status: "fail", message: "opencode api plugin request exited -1" }])
     expect(JSON.stringify(checks)).not.toContain("secret")
   })
 
@@ -141,6 +141,6 @@ describe("Phase 8 live doctor", () => {
       directory: "/workspace/project",
       runner: async () => ({ exitCode: 0, stdout: "x".repeat(512 * 1024 + 1), stderr: "" }),
     })
-    expect(checks).toEqual([{ name: "live-plugin", status: "fail", message: "opencode2 api plugin request exited -1" }])
+    expect(checks).toEqual([{ name: "live-plugin", status: "fail", message: "opencode api plugin request exited -1" }])
   })
 })

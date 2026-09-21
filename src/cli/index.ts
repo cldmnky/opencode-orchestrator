@@ -137,7 +137,7 @@ async function state(args: string[]): Promise<void> {
     ],
     resolve(directory),
   )
-  if (result.exitCode !== 0) throw new Error(`state ${operation} request failed: opencode2 api exited ${result.exitCode}`)
+  if (result.exitCode !== 0) throw new Error(`state ${operation} request failed: opencode api exited ${result.exitCode}`)
   let parsed: unknown
   try {
     parsed = JSON.parse(result.stdout)
@@ -196,7 +196,7 @@ function devRun(args: string[]): void {
   const source = readFileSync(configPath, "utf8")
   const config = replacePluginEntry(source, pluginEntry)
   if (config !== source) writeFileSync(configPath, config, "utf8")
-  const child = spawn("opencode2", ["--standalone"], { cwd: devProject, env, stdio: "inherit" })
+  const child = spawn("opencode", ["--standalone"], { cwd: devProject, env, stdio: "inherit" })
   child.on("exit", (code) => {
     process.exitCode = code ?? 1
   })
@@ -212,7 +212,7 @@ function printHelp(): void {
   console.log(`Usage: ${DISTRIBUTION_NAME} install [--global] [--check|--migrate] [--model agent=provider/model[#variant]]`)
   console.log(`       ${DISTRIBUTION_NAME} doctor [--live] [--directory <dir>] [--global]`)
   console.log(`       ${DISTRIBUTION_NAME} state <export|validate|archive|reset> --session <id> [--family <family>] [--yes]`)
-  console.log("doctor checks the local config and advisory local git/gh status; --live uses opencode2 api service discovery/authentication. Plugin commands (/orchestrate, /goal, ...) exist only at runtime inside OpenCode — they are not CLI subcommands.")
+  console.log("doctor checks the local config and advisory local git/gh status; --live uses opencode api service discovery/authentication. Plugin commands (/orchestrate, /goal, ...) exist only at runtime inside OpenCode — they are not CLI subcommands.")
 }
 
 await main()

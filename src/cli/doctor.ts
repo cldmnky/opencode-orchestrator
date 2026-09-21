@@ -63,7 +63,7 @@ export type RuntimeCheckOptions = {
 
 export type DoctorApiResult = { exitCode: number; stdout: string; stderr: string }
 
-/** Injectable `opencode2 api` runner. The default uses service discovery/auth. */
+/** Injectable `opencode api` runner. The default uses service discovery/auth. */
 export type DoctorApiRunner = (args: readonly string[], cwd: string) => Promise<DoctorApiResult>
 
 export type LiveCheckOptions = {
@@ -184,7 +184,7 @@ export function inspectConfig(path: string): DoctorReport {
   checks.push({
     name: "catalog",
     status: "warn",
-    message: "model catalog availability is not queried by doctor; inspect it with opencode2 api GET /api/model",
+    message: "model catalog availability is not queried by doctor; inspect it with opencode api GET /api/model",
   })
   checks.push({
     name: "workflow-boundary",
@@ -203,7 +203,7 @@ export function inspectConfig(path: string): DoctorReport {
 }
 
 /**
- * Live checks use the installed `opencode2 api` command rather than creating a
+ * Live checks use the installed `opencode api` command rather than creating a
  * second HTTP client. That preserves the host's service discovery and auth
  * behavior, including remote TUI connections. Every request carries the V2
  * deep-object location query.
@@ -218,7 +218,7 @@ export async function liveChecks(options: LiveCheckOptions): Promise<DoctorCheck
 
   const plugin = await apiJson(runner, ["api", "get", `/api/plugin?${location}`], directory)
   if (!plugin.ok) {
-    checks.push({ name: "live-plugin", status: "fail", message: `opencode2 api plugin request exited ${plugin.exitCode}` })
+    checks.push({ name: "live-plugin", status: "fail", message: `opencode api plugin request exited ${plugin.exitCode}` })
     return checks
   }
   const plugins = arrayData(plugin.value)
@@ -238,7 +238,7 @@ export async function liveChecks(options: LiveCheckOptions): Promise<DoctorCheck
 
   const commands = await apiJson(runner, ["api", "get", `/api/command?${location}`], directory)
   if (!commands.ok) {
-    checks.push({ name: "live-commands", status: "fail", message: `opencode2 api command request exited ${commands.exitCode}` })
+    checks.push({ name: "live-commands", status: "fail", message: `opencode api command request exited ${commands.exitCode}` })
   } else {
     const registered = new Set(arrayData(commands.value).flatMap((item) => (isRecord(item) && typeof item.name === "string" ? [item.name] : [])))
     const missing = expectedCommands.filter((name) => !registered.has(name))
@@ -251,7 +251,7 @@ export async function liveChecks(options: LiveCheckOptions): Promise<DoctorCheck
 
   const agents = await apiJson(runner, ["api", "get", `/api/agent?${location}`], directory)
   if (!agents.ok) {
-    checks.push({ name: "live-agents", status: "fail", message: `opencode2 api agent request exited ${agents.exitCode}` })
+    checks.push({ name: "live-agents", status: "fail", message: `opencode api agent request exited ${agents.exitCode}` })
   } else {
     const registered = new Set(arrayData(agents.value).flatMap((item) => (isRecord(item) && typeof item.id === "string" ? [item.id] : [])))
     const missing = expectedAgents.filter((id) => !registered.has(id))
@@ -274,7 +274,7 @@ export async function liveChecks(options: LiveCheckOptions): Promise<DoctorCheck
     directory,
   )
   if (!diagnostics.ok) {
-    checks.push({ name: "live-capabilities", status: "warn", message: `server diagnostics RPC is unavailable (opencode2 api exited ${diagnostics.exitCode})` })
+    checks.push({ name: "live-capabilities", status: "warn", message: `server diagnostics RPC is unavailable (opencode api exited ${diagnostics.exitCode})` })
   } else {
     const view = unwrapRpcOutput(diagnostics.value)
     const github = isRecord(view) && isRecord(view.githubCapabilityProbe) ? view.githubCapabilityProbe.available === true : undefined
@@ -566,7 +566,7 @@ async function apiJson(runner: DoctorApiRunner, args: readonly string[], cwd: st
 }
 
 function spawnApiSoft(args: readonly string[], cwd: string): Promise<DoctorApiResult> {
-  return spawnSoft("opencode2", args, cwd, API_OUTPUT_CAP)
+  return spawnSoft("opencode", args, cwd, API_OUTPUT_CAP)
 }
 
 /** Execute an OpenCode API command through the host CLI's service client. */

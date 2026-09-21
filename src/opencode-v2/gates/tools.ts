@@ -16,11 +16,7 @@
 import type { OrchestratorOptions } from "../../core/config.js"
 import { GATES_TOOL_PERMISSION } from "../../core/permissions.js"
 import { gateStatuses, type LocationLike, type StorageLike } from "./state.js"
-import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
-
-type ToolDraftLike = {
-  add(tool: ToolInfo<any, undefined>): void
-}
+import type { ToolDraftLike } from "../compat.js"
 
 type ToolResult = { content: string }
 

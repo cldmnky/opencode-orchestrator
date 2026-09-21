@@ -1,7 +1,7 @@
 import type { OrchestratorOptions } from "../../core/config.js"
 import { OBSERVABILITY_TOOL_PERMISSION } from "../../core/permissions.js"
-import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 import type { LocationLike, StorageLike } from "../goal/state.js"
+import type { ToolDraftLike } from "../compat.js"
 import { readAuthoritySnapshot } from "./state.js"
 
 /**
@@ -26,10 +26,6 @@ import { readAuthoritySnapshot } from "./state.js"
  * output discloses the limits plainly and never claims filesystem, process,
  * worktree, or atomic isolation.
  */
-
-type ToolDraftLike = {
-  add(tool: ToolInfo<any, undefined>): void
-}
 
 type ToolResult = { content: string }
 

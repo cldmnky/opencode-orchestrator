@@ -1,5 +1,5 @@
-import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
+import { defineTuiAwarePlugin, type ToolDefinition, type ToolDraftLike } from "./compat.js"
 import { parseOptions } from "../core/config.js"
 import { delegationGraphSummary } from "../core/roles.js"
 import { PEER_DISCOVERY_GUIDANCE, PUBLICATION_POLICY_GUIDANCE, terminalDriveGuidance } from "../core/policy.js"
@@ -36,7 +36,7 @@ import { startDispatchAdmission } from "./dispatch/runtime.js"
 import { redact } from "./process/redact.js"
 import { DISTRIBUTION_NAME, RUNTIME_PLUGIN_ID } from "../core/package-identity.js"
 
-export const orchestratorPlugin = (Plugin.define as any)({
+export const orchestratorPlugin = defineTuiAwarePlugin({
   id: RUNTIME_PLUGIN_ID,
   tui: true,
   async setup(ctx: Context) {
@@ -166,10 +166,10 @@ export const orchestratorPlugin = (Plugin.define as any)({
 
       registrations.push(
         await ctx.tool.transform((draft) => {
-          const trackedDraft = {
-            add: (tool: { name?: unknown }) => {
+          const trackedDraft: ToolDraftLike = {
+            add: (tool: ToolDefinition) => {
               if (typeof tool.name === "string") registeredToolNames.add(tool.name)
-              ;(draft as unknown as { add(tool: unknown): void }).add(tool)
+              draft.add(tool)
             },
           }
           addGoalTools(trackedDraft, ctx.storage, ctx.location, options)

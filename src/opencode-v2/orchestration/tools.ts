@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises"
 import type { OrchestratorOptions } from "../../core/config.js"
 import { ORCHESTRATION_TOOL_PERMISSION } from "../../core/permissions.js"
 import { D2_LIMITS, RELATIVE_REPO_PATH_PATTERN } from "../../core/contracts.js"
-import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
+import type { ToolDraftLike } from "../compat.js"
 import { resolveRealpath } from "../worktree/git.js"
 import { HANDOFF_CONTRACT_SCHEMA, validateHandoff, type HandoffContract, type SessionLocation, type ValidationDeps } from "./validation.js"
 import {
@@ -58,10 +58,6 @@ import { listVerificationReceipts } from "../verification/state.js"
  * exposed or logged). Its returned admission state is diagnostic; board and
  * review operations compute legal transitions internally.
  */
-
-type ToolDraftLike = {
-  add(tool: ToolInfo<any, undefined>): void
-}
 
 type ToolResult = { content: string }
 

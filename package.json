@@ -4,11 +4,28 @@
   "version": "0.1.11",
   "description": "A V2-only multi-agent orchestration plugin for OpenCode.",
   "type": "module",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js",
-    "./tui": "./dist/tui.js",
-    "./commands": "./dist/commands.js",
-    "./installer": "./dist/installer.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js",
+      "default": "./dist/tui.js"
+    },
+    "./commands": {
+      "types": "./dist/commands.d.ts",
+      "import": "./dist/commands.js",
+      "default": "./dist/commands.js"
+    },
+    "./installer": {
+      "types": "./dist/installer.d.ts",
+      "import": "./dist/installer.js",
+      "default": "./dist/installer.js"
+    }
   },
   "bin": {
     "opencode-v2-agent-orchestrator": "./dist/cli/index.js"
@@ -20,12 +37,13 @@
     "dev/project/opencode.example.jsonc"
   ],
   "scripts": {
-    "build": "bun run build:plugin && bun run build:tui && bun run build:commands && bun run build:installer && bun run build:cli",
-    "build:plugin": "bun build src/index.ts --outdir dist --target bun --format esm",
-    "build:tui": "bun build src/tui.ts --outfile dist/tui.js --target bun --format esm --external solid-js --external @opentui/solid --external @opentui/core",
-    "build:commands": "bun build src/opencode-v2/commands/index.ts --outfile dist/commands.js --target bun --format esm",
-    "build:installer": "bun build src/cli/install.ts --outfile dist/installer.js --target bun --format esm",
-    "build:cli": "bun build src/cli/index.ts --outfile dist/cli/index.js --target bun --format esm",
+    "build": "bun run build:plugin && bun run build:tui && bun run build:commands && bun run build:installer && bun run build:cli && bun run build:types",
+    "build:plugin": "bun build src/index.ts --outdir dist --target bun --format esm --external @opencode/plugin --external zod --external jsonc-parser",
+    "build:tui": "bun build src/tui.ts --outfile dist/tui.js --target bun --format esm --external zod --external solid-js --external @opentui/solid --external @opentui/core",
+    "build:commands": "bun build src/commands.ts --outfile dist/commands.js --target bun --format esm --external zod",
+    "build:installer": "bun build src/installer.ts --outfile dist/installer.js --target bun --format esm --external jsonc-parser --external zod",
+    "build:cli": "bun build src/cli/index.ts --outfile dist/cli/index.js --target bun --format esm --external jsonc-parser --external zod",
+    "build:types": "tsc -p tsconfig.declarations.json",
     "dev:setup": "bun run src/cli/index.ts dev-setup",
     "dev:v2": "bun run src/cli/index.ts dev-run",
     "dev:v2:dist": "bun run build && bun run src/cli/index.ts dev-run --dist",

@@ -43,6 +43,11 @@ describe("server plugin contract", () => {
     )
   }
 
+  test("keeps the V2 plugin metadata at the compatibility boundary", () => {
+    expect(orchestratorPlugin.id).toBe("opencode-orchestrator")
+    expect((orchestratorPlugin as unknown as { tui?: boolean }).tui).toBe(true)
+  })
+
   test("registers runtime surfaces, dispatches a command, and cleans up", async () => {
     const agents = seedAgents()
     const commands: Array<{ name: string; execute(input: any): Promise<void> }> = []

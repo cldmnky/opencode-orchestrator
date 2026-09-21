@@ -12,11 +12,7 @@ import {
   type GoalRecord,
 } from "./state.js"
 import { createLeadBoardV2, hydrateLeadBoardV2, removeLeadBoardV2, writeLeadBoardV2 } from "../orchestration/lead-board-v2.js"
-import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
-
-type ToolDraftLike = {
-  add(tool: ToolInfo<any, undefined>): void
-}
+import type { ToolDraftLike } from "../compat.js"
 
 type ToolResult = { content: string }
 

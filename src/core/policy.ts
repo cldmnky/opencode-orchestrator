@@ -1,6 +1,7 @@
 import { delegationGraphSummary } from "./roles.js"
 import type { RoleName } from "./roles.js"
 import type { DecompositionStrategy } from "./config.js"
+import { renderCapabilityGuidance } from "./capabilities.js"
 
 export type DelegationMode = "foreground" | "background"
 
@@ -200,6 +201,9 @@ export const WORKTREE_BOUNDARY_GUIDANCE = [
   "These prompt-level disjoint write scopes do not equal filesystem isolation.",
   "Retain native role delegation: safe delegation is allowed whenever isolation is not required.",
 ].join("\n")
+
+/** Shared guidance/recorded/observed/enforced vocabulary for every prompt. */
+export const CAPABILITY_BOUNDARY_GUIDANCE = renderCapabilityGuidance()
 
 export const MANAGED_WORKTREE_GUIDANCE = [
   "Managed worktree tools create and track one git worktree owned by the current session.",
@@ -421,6 +425,7 @@ export const BOUNDED_REVIEW_GUIDANCE = [
   "Reach admission state review-pending through orchestrator_admission_transition (orchestrator-pass with reviewRequired=true) before starting a review record.",
   "Start the review record with orchestrator_review_transition using a start signal (taskId, runId, maker, checker, and the review-pending admission signal are required).",
   "Delegate the reviewer (the configured review role), then record its fixed decision through orchestrator_review_transition: fixed boolean checks for approve, or request-changes / block.",
+  "V1 bounded review records caller-supplied maker/checker identities; they do not prove the reviewer child session.",
   "Map the review decision through orchestrator_admission_transition (review-approve, review-reject, or review-block).",
   "Stop when the review record is blocked or tripped; do not keep dispatching the same run past a terminal breaker.",
   "These tools are callable/advisory, not an automatic completion gate: nothing is gated automatically and a self-declared D2 reviewState is never reviewer proof.",
@@ -463,7 +468,7 @@ export const STRUCTURED_HANDOFF_GUIDANCE = [
   "Parent: call orchestrator_task_complexity_classify only after collecting all eight structured facts (independent_subtasks, dependent_stages, files_modules, independent_review, external_side_effects, shared_mutable_state, security_compliance_risk, expected_parallelism_value).",
   "These validation tools are callable/advisory, not automatic hooks.",
   "The orchestrator invokes them explicitly.",
-  "Results are advisory (D4) or deterministic fail-closed checks (D2/admission).",
+  "Complexity classification is advisory; D2 and admission checks are deterministic fail-closed checks.",
   "No automatic completion gate is enforced.",
 ].join("\n")
 
@@ -474,7 +479,7 @@ export function orchestrationRules(
   decompositionStrategy: DecompositionStrategy = "mvp",
 ): string {
   return [
-    `At most ${maxParallel} independent child tasks may run at once.`,
+    `Treat max_parallel=${maxParallel} as an instructed dispatch ceiling; it is not a native dispatch coordinator or guaranteed runtime cap yet.`,
     "Route by the configured semantic role map, never by model name.",
     DELEGATION_GRAPH_GUIDANCE,
     "Explore before planning when repository facts are unknown.",
@@ -484,6 +489,7 @@ export function orchestrationRules(
     "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes.",
     verticalSliceGuidance(decompositionStrategy),
     D4_V2_COHERENCE_GUIDANCE,
+    CAPABILITY_BOUNDARY_GUIDANCE,
     "Separate established facts from assumptions.",
     "Label every assumption explicitly and verify it before relying on it.",
     PROMPTING_POLICY_GUIDANCE,
@@ -505,7 +511,7 @@ export function orchestrationRules(
       : []),
     "Start independent read-only work in parallel/background mode.",
     "Record the original branch, HEAD, changed files, commits, and verification in the task ledger when those facts are available.",
-    "Do not claim automated GitHub issue or pull request coordination unless the user explicitly performs and verifies those steps.",
+    "Do not claim automated GitHub issue creation unless the connected host exposes the required tools and direct evidence is returned.",
     "Do not poll background tasks; consume native completion delivery.",
     "Keep a concise task ledger in the parent session.",
     requireReview ? "Implementation is incomplete until the review role audits the aggregate change." : "Review changed work before reporting completion.",

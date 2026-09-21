@@ -196,7 +196,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
             type: "text",
             text: [
               `Runtime role map: planning=${options.roles.planning}; research=${options.roles.research}; implementation=${options.roles.implementation}; review=${options.roles.review}.`,
-              `Runtime parallelism ceiling: ${options.max_parallel}.`,
+              `Configured dispatch preference: max_parallel=${options.max_parallel} (guidance until runtime admission is available).`,
               "Delegate with the child-task contract: Task, Expected outcome, Scope/file ownership, Must do, Must not do, Verification, and handoff.",
               `Nested delegation is bounded to the role graph: ${delegationGraphSummary()}.`,
               "A delegating worker stays accountable for its children, and research never delegates.",
@@ -243,14 +243,15 @@ export const orchestratorPlugin = (Plugin.define as any)({
                 : []),
               ...(options.publish.enabled ? [PUBLICATION_POLICY_GUIDANCE] : []),
               ...(options.github.enabled || options.publish.enabled ? [terminalDriveGuidance(options)] : []),
-              "Use orchestrator_task_complexity_classify (advisory, user-overridable) to classify complexity.",
+              "Use orchestrator_task_complexity_classify as advisory, user-overridable guidance only.",
               "Use orchestrator_handoff_validate (callable, not an automatic gate) before using a worker handoff downstream.",
               "Use orchestrator_admission_transition (stateless) to track admission state.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
               ...(options.review.mode === "bounded"
                 ? [
                     "Bounded review is enabled.",
-                    "Use orchestrator_review_get and orchestrator_review_transition: start, delegate the reviewer, record fixed checks/decision, then map through orchestrator_admission_transition.",
+                     "Use orchestrator_review_get and orchestrator_review_transition: start, delegate the reviewer, record fixed checks/decision, then map through orchestrator_admission_transition.",
+                     "V1 review records store supplied maker/checker identities; they do not prove which child session reviewed the work.",
                     "Stop when the record is blocked or tripped.",
                   ]
                 : []),

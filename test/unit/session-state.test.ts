@@ -15,15 +15,11 @@ import {
   inferOriginProjectID,
   moveSessionAnchor,
   newSessionAnchor,
-  newWorktree,
   readSessionAnchor,
-  readWorktree,
   sessionAnchorStorageKey,
   type SessionAnchor,
   type StorageLike,
-  worktreeStorageKey,
   writeSessionAnchor,
-  writeWorktree,
 } from "../../src/opencode-v2/session/state.js"
 
 function memStorage(initial?: Record<string, unknown>): StorageLike & { values: Map<string, unknown> } {
@@ -140,9 +136,8 @@ describe("permission constants", () => {
 })
 
 describe("session anchors", () => {
-  test("uses stable project-anchored keys for anchors and origin-anchored keys for worktrees", () => {
+  test("uses a stable project-anchored key for session anchors", () => {
     expect(sessionAnchorStorageKey("proj/one", "sess/1")).toBe(`session/v1/proj%2Fone/sess%2F1`)
-    expect(worktreeStorageKey("proj/one", "sess/1")).toBe(`worktree/v1/proj%2Fone/sess%2F1`)
   })
 
   test("writes and reads back a strict anchor under the current project key", async () => {
@@ -237,63 +232,5 @@ describe("session anchors", () => {
     expect(inferOriginProjectID("p", ["p", "q"])).toBeUndefined()
     expect(inferOriginProjectID("p", [])).toBeUndefined()
     expect(inferOriginProjectID("p", ["q"])).toBeUndefined()
-  })
-})
-
-describe("worktree records", () => {
-  test("writes and reads a strict worktree record under the origin-anchored key", async () => {
-    const storage = memStorage()
-    const record = newWorktree(
-      {
-        owner: "session-1",
-        sessionID: "session-1",
-        originProjectID: "origin",
-        repositoryRoot: "/repo",
-        directory: "/repo/.worktrees/feature",
-        branch: "feature/x",
-        base: "main",
-      },
-      1000,
-    )
-    expect(record.status).toBe("pending")
-
-    const written = await writeWorktree(storage, record, 2000)
-    expect(written.updatedAt).toBe(2000)
-    expect(storage.values.has(`worktree/v1/origin/session-1`)).toBe(true)
-
-    const read = await readWorktree(storage, "origin", "session-1")
-    expect(read?.owner).toBe("session-1")
-    expect(read?.branch).toBe("feature/x")
-    expect(read?.base).toBe("main")
-    expect(read?.originProjectID).toBe("origin")
-  })
-
-  test("worktree stays locatable from the origin project after a session move", async () => {
-    const storage = memStorage()
-    const record = newWorktree(
-      {
-        owner: "session-1",
-        sessionID: "session-1",
-        originProjectID: "origin",
-        repositoryRoot: "/repo",
-        directory: "/repo/.worktrees/feature",
-        branch: "feature/x",
-        base: "main",
-      },
-      1000,
-    )
-    await writeWorktree(storage, record, 1000)
-    await writeSessionAnchor(storage, anchor(), 1000)
-    await moveSessionAnchor(storage, "origin", "session-1", { projectID: "next", directory: "/next" })
-
-    // The tree is still found under the origin project key despite the move.
-    const read = await readWorktree(storage, "origin", "session-1")
-    expect(read?.sessionID).toBe("session-1")
-    expect(read?.originProjectID).toBe("origin")
-  })
-
-  test("ignores malformed worktree records", async () => {
-    const storage = memStorage({ [`worktree/v1/origin/session-1`]: { version: 1, owner: "x" } })
-    expect(await readWorktree(storage, "origin", "session-1")).toBeUndefined()
   })
 })

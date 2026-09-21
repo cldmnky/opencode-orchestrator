@@ -7,13 +7,10 @@ import { z } from "zod"
  * `pending -> ready -> moved/dirty/orphaned -> (cleanup) removed`, with
  * `cleanup-failed` persisting a failed removal for operator review.
  *
- * Key namespace: this module deliberately uses `worktree/v2/...`, NOT the
- * `worktree/v1/...` namespace already claimed by
- * `src/opencode-v2/session/state.ts`. Stage 1 defined a WorktreeRecord there
- * with an incompatible lifecycle enum (`created/attached/closed/removed`) and
- * strict parsing; sharing keys would make each module reject the other's
- * records as malformed and clobber them. The v2 namespace keeps the two
- * generations separate; a later migration stage can alias or fold v1 records.
+ * Key namespace: this module deliberately uses `worktree/v2/...`. Historical
+ * `worktree/v1/...` records are no longer part of the runtime model; the
+ * operator recovery path can inspect or archive them without reinterpreting
+ * them as V2 records.
  *
  * This module is free of filesystem/process/git calls: it only reads and
  * writes durable storage through a storage-like interface.
@@ -112,7 +109,7 @@ export type NewWorktreeInput = {
 /** Exactly one full lowercase hex git object ID (SHA-1 or SHA-256). */
 export const FULL_SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 
-const worktreeSyncSchema = z
+export const worktreeSyncSchema = z
   .object({
     remote: z.string().min(1),
     baseBranch: z.string().min(1),
@@ -124,7 +121,7 @@ const worktreeSyncSchema = z
   })
   .strict()
 
-const worktreeSchema = z
+export const worktreeSchema = z
   .object({
     version: z.literal(1),
     owner: z.string().min(1),
@@ -141,7 +138,7 @@ const worktreeSchema = z
   })
   .strict()
 
-const sessionIndexSchema = z
+export const sessionIndexSchema = z
   .object({
     version: z.literal(1),
     sessionID: z.string().min(1),

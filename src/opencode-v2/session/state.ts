@@ -1,14 +1,12 @@
 import { z } from "zod"
 
 /**
- * Durable session anchor and worktree record state (stage 1).
+ * Durable session anchor state.
  *
  * Anchors track where a session started (`originProjectID`/`originDirectory`)
  * vs. where it currently lives (`currentProjectID`/`currentDirectory`). The
  * record is keyed by the *current* project so reads always match the live
- * location, while `originProjectID` is preserved across moves. Worktree
- * records are keyed by the origin project so a tree can always be located no
- * matter where the coordinating session moved afterwards.
+ * location, while `originProjectID` is preserved across moves.
  *
  * This module is intentionally free of filesystem/process/gh/git calls: it
  * only reads and writes durable storage through a storage-like interface.
@@ -26,24 +24,6 @@ export type SessionAnchor = {
   workspaceID?: string
   subpath?: string
   status?: SessionStatus
-  updatedAt: number
-}
-
-export type WorktreeStatus = "pending" | "created" | "attached" | "closed" | "removed"
-
-export type WorktreeRecord = {
-  version: 1
-  /** The session that created the worktree. */
-  owner: string
-  /** The session currently owning (or last attaching to) the worktree. */
-  sessionID: string
-  originProjectID: string
-  repositoryRoot: string
-  directory: string
-  branch: string
-  base: string
-  status: WorktreeStatus
-  createdAt: number
   updatedAt: number
 }
 
@@ -70,17 +50,7 @@ export type MoveSessionAnchorInput = {
   subpath?: string
 }
 
-export type NewWorktreeInput = {
-  owner: string
-  sessionID: string
-  originProjectID: string
-  repositoryRoot: string
-  directory: string
-  branch: string
-  base: string
-}
-
-const sessionAnchorSchema = z
+export const sessionAnchorSchema = z
   .object({
     version: z.literal(1),
     sessionID: z.string().min(1),
@@ -114,30 +84,9 @@ const sessionAnchorUpgradeSchema = z
   })
   .strict()
 
-const worktreeSchema = z
-  .object({
-    version: z.literal(1),
-    owner: z.string().min(1),
-    sessionID: z.string().min(1),
-    originProjectID: z.string().min(1),
-    repositoryRoot: z.string().min(1),
-    directory: z.string().min(1),
-    branch: z.string().min(1),
-    base: z.string().min(1),
-    status: z.enum(["pending", "created", "attached", "closed", "removed"]),
-    createdAt: z.number().finite(),
-    updatedAt: z.number().finite(),
-  })
-  .strict()
-
 /** Stable project-anchored key for a session anchor, keyed by the current project. */
 export function sessionAnchorStorageKey(projectID: string, sessionID: string): string {
   return `session/v1/${segment(projectID)}/${segment(sessionID)}`
-}
-
-/** Stable origin-anchored key for a worktree record. */
-export function worktreeStorageKey(originProjectID: string, sessionID: string): string {
-  return `worktree/v1/${segment(originProjectID)}/${segment(sessionID)}`
 }
 
 export function newSessionAnchor(input: NewSessionAnchorInput, now = Date.now()): SessionAnchor {
@@ -151,22 +100,6 @@ export function newSessionAnchor(input: NewSessionAnchorInput, now = Date.now())
     workspaceID: input.workspaceID,
     subpath: input.subpath,
     status: "active",
-    updatedAt: now,
-  }
-}
-
-export function newWorktree(input: NewWorktreeInput, now = Date.now()): WorktreeRecord {
-  return {
-    version: 1,
-    owner: input.owner,
-    sessionID: input.sessionID,
-    originProjectID: input.originProjectID,
-    repositoryRoot: input.repositoryRoot,
-    directory: input.directory,
-    branch: input.branch,
-    base: input.base,
-    status: "pending",
-    createdAt: now,
     updatedAt: now,
   }
 }
@@ -275,40 +208,6 @@ export async function moveSessionAnchor(
   return moved
 }
 
-export async function readWorktree(
-  storage: StorageLike,
-  originProjectID: string,
-  sessionID: string,
-): Promise<WorktreeRecord | undefined> {
-  return readVersioned(storage, worktreeStorageKey(originProjectID, sessionID), worktreeSchema, "worktree")
-}
-
-export async function writeWorktree(
-  storage: StorageLike,
-  record: WorktreeRecord,
-  now = Date.now(),
-): Promise<WorktreeRecord> {
-  const next: WorktreeRecord = { ...record, updatedAt: now }
-  await storage.set(worktreeStorageKey(next.originProjectID, next.sessionID), next)
-  return next
-}
-
 function segment(value: string): string {
   return encodeURIComponent(value)
-}
-
-async function readVersioned<T>(
-  storage: StorageLike,
-  key: string,
-  schema: z.ZodType<T>,
-  label: string,
-): Promise<T | undefined> {
-  const value = await storage.get(key)
-  if (value === undefined) return undefined
-  const parsed = schema.safeParse(value)
-  if (!parsed.success) {
-    console.warn(`Ignoring malformed ${label} state at ${key}`)
-    return undefined
-  }
-  return parsed.data
 }

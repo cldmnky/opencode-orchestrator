@@ -51,7 +51,7 @@ export type LocationLike = {
   }
 }
 
-const goalSchema = z
+export const goalSchema = z
   .object({
     version: z.literal(1),
     sessionID: z.string().min(1),
@@ -66,7 +66,7 @@ const goalSchema = z
   })
   .strict()
 
-const planRunSchema = z
+export const planRunSchema = z
   .object({
     version: z.literal(1),
     sessionID: z.string().min(1),
@@ -77,7 +77,7 @@ const planRunSchema = z
   })
   .strict()
 
-const automationStopSchema = z
+export const automationStopSchema = z
   .object({
     version: z.literal(1),
     sessionID: z.string().min(1),

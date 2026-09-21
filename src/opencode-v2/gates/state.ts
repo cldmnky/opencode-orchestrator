@@ -60,7 +60,7 @@ export type GateStatus = {
   projectID?: string
 }
 
-const gatesSchema = z
+export const gatesSchema = z
   .object({
     version: z.literal(1),
     sessionID: z.string().min(1),

@@ -36,3 +36,12 @@ from an unknown version.
    session and one family; broad recursive deletion is not supported.
 5. Do not copy prompts, transcripts, command output, credentials, or arbitrary
    evidence text into a migration record.
+
+## Operator recovery namespace
+
+The operator-only `state archive` and confirmed family `state reset` commands
+copy records to `orchestrator-state-archive/v1/<timestamp>/` before removing
+the selected live keys. Export and validation return bounded metadata only.
+They require one explicit session ID and never perform recursive deletion or
+touch repository/Git/GitHub state. If storage scanning is unavailable or
+incomplete, destructive recovery refuses to run.

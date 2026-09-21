@@ -87,7 +87,27 @@ npm install --save-dev opencode-v2-agent-orchestrator
 
 # Verify
 ./node_modules/.bin/opencode-v2-agent-orchestrator doctor
+# Once the V2 service is running, also verify effective server activation:
+./node_modules/.bin/opencode-v2-agent-orchestrator doctor --live --directory "$PWD"
 ```
+
+For an existing installation, preview changes without writing anything:
+
+```sh
+./node_modules/.bin/opencode-v2-agent-orchestrator install --check
+```
+
+Apply plugin-owned agent migration (including generated permission families,
+the bounded delegation graph, reviewer-submit permission, and stale prompt
+sections) only after a sibling `.bak` backup is created:
+
+```sh
+./node_modules/.bin/opencode-v2-agent-orchestrator install --migrate
+```
+
+The migration preserves exact user-authored permission rules and custom agent
+fields. See [operator state recovery](docs/operations/state-recovery.md) for
+bounded inspection, archive, and explicitly confirmed family reset.
 
 What the installer does:
 - Adds the plugin to `opencode.jsonc` (as a local file reference like `./node_modules/.../dist/index.js`)

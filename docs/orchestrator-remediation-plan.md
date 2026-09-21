@@ -14,12 +14,12 @@ items are checked only after their production behavior and tests are merged.
 - [x] Phase 5 lead-board V2 and completion-chain migration.
 - [x] Phase 6 runtime parallel dispatch admission (with documented beta-19507 completion limitation).
 - [x] Phase 7 model-visible surface reduction and D4 v2 removal.
-- [ ] Phase 8 installer migration, live doctor, and state recovery.
+- [x] Phase 8 installer migration, live doctor, and state recovery.
 - [ ] Phase 9 read-only orchestration progress RPC/TUI.
 - [ ] Phase 10 declarations, package API, and bundle cleanup.
 - [ ] Phase 11 final documentation and release verification.
 
-The current branch implements the first seven foundational slices. Phase 3
+The current branch implements the first eight foundational slices. Phase 3
 measured the pinned beta-19507 shell hook, added bounded plugin-observed
 receipts, and replaced lead command-proof claims with exact-revision receipt
 matching. Phase 4 binds new review approvals to the configured reviewer agent
@@ -918,6 +918,10 @@ Record before/after counts. Aim for:
 ### Objective
 
 Make upgrades safe for existing installations and provide recovery from fail-closed state.
+
+**Status: complete.** Installer, doctor, recovery, migration, and pinned
+contract/unit coverage are implemented. Real live-service and standalone
+harness checks remain environment-dependent when `opencode2` is unavailable.
 
 ### Installer migration
 

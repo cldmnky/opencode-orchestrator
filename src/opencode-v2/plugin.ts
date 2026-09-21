@@ -11,6 +11,9 @@ import { addGoalTools } from "./goal/tools.js"
 import { addGatesTools } from "./gates/tools.js"
 import { gatesRpcDefinition, parseGatesGetInput, parseGatesSetInput } from "./gates/rpc.js"
 import { gateChangeMessage, gateStatuses, setGateDisabled } from "./gates/state.js"
+import { diagnosticsRpcDefinition } from "./diagnostics-rpc.js"
+import { createStateRpcHandlers, stateRpcDefinition } from "./state-rpc.js"
+import { countLegacyState } from "./state-recovery.js"
 import { addGhTools } from "./gh/tools.js"
 import { addWorktreeTools } from "./worktree/tools.js"
 import { addOrchestrationTools } from "./orchestration/tools.js"
@@ -74,6 +77,7 @@ export const orchestratorPlugin = (Plugin.define as any)({
       ? new Set(["orchestrator", ...Object.keys(options.roles)])
       : availableRoles(agents, options)
     const registrations: Array<{ dispose(): Promise<void> }> = []
+    const registeredToolNames = new Set<string>()
     const lateAgentSetup = pendingAgents ? startLateAgentSetup(ctx, options, workerModels) : undefined
 
     // S3/V1 observability runtime: started only when trace, stop-between-steps
@@ -160,10 +164,16 @@ export const orchestratorPlugin = (Plugin.define as any)({
 
       registrations.push(
         await ctx.tool.transform((draft) => {
-          addGoalTools(draft, ctx.storage, ctx.location, options)
-          addGatesTools(draft, { storage: ctx.storage, location: ctx.location, options })
-          addGhTools(draft, { storage: ctx.storage, runner, location: ctx.location, options })
-          addWorktreeTools(draft, {
+          const trackedDraft = {
+            add: (tool: { name?: unknown }) => {
+              if (typeof tool.name === "string") registeredToolNames.add(tool.name)
+              ;(draft as unknown as { add(tool: unknown): void }).add(tool)
+            },
+          }
+          addGoalTools(trackedDraft, ctx.storage, ctx.location, options)
+          addGatesTools(trackedDraft, { storage: ctx.storage, location: ctx.location, options })
+          addGhTools(trackedDraft, { storage: ctx.storage, runner, location: ctx.location, options })
+          addWorktreeTools(trackedDraft, {
             storage: ctx.storage,
             runner,
             location: ctx.location,
@@ -171,24 +181,24 @@ export const orchestratorPlugin = (Plugin.define as any)({
             session: ctx.session,
             moveCoordinator,
           })
-          addOrchestrationTools(draft, {
+          addOrchestrationTools(trackedDraft, {
             options,
             location: ctx.location,
             storage: ctx.storage,
             session: ctx.session,
             vcs: ctx.vcs,
           })
-          addVerificationTools(draft, { options, storage: ctx.storage, location: ctx.location, session: ctx.session })
-          addAuthorityTools(draft, { options, storage: ctx.storage, location: ctx.location })
-          addObservabilityTools(draft, {
+          addVerificationTools(trackedDraft, { options, storage: ctx.storage, location: ctx.location, session: ctx.session })
+          addAuthorityTools(trackedDraft, { options, storage: ctx.storage, location: ctx.location })
+          addObservabilityTools(trackedDraft, {
             options,
             storage: ctx.storage,
             location: ctx.location,
             session: ctx.session,
             runtime: observability,
           })
-          addPublishTools(draft, { storage: ctx.storage, location: ctx.location, options })
-          addPeerTools(draft, { storage: ctx.storage, location: ctx.location, options })
+          addPublishTools(trackedDraft, { storage: ctx.storage, location: ctx.location, options })
+          addPeerTools(trackedDraft, { storage: ctx.storage, location: ctx.location, options })
         }),
       )
 
@@ -213,6 +223,34 @@ export const orchestratorPlugin = (Plugin.define as any)({
           },
         }),
       )
+
+      registrations.push(
+        await ctx.rpc.register(diagnosticsRpcDefinition, {
+          get: async () => {
+            return {
+              pluginID: RUNTIME_PLUGIN_ID,
+              githubCapabilityProbe: {
+                available: registeredToolNames.has("github_capabilities"),
+                configured: options.github.enabled,
+              },
+              worktreeTools: {
+                available: registeredToolNames.has("worktree_list"),
+                configured: options.worktree.enabled,
+              },
+              tuiExport: { observable: true, available: true },
+              legacyStateCount: await countLegacyState(ctx.storage),
+            }
+          },
+        }),
+      )
+
+      // State recovery is operator-owned and deliberately not a model tool.
+      // Older/embedded hosts may not expose storage.scan; in that case do not
+      // register a misleading destructive surface and let the CLI report the
+      // unavailable backend explicitly.
+      if (typeof (ctx.storage as unknown as { scan?: unknown }).scan === "function") {
+        registrations.push(await ctx.rpc.register(stateRpcDefinition, createStateRpcHandlers(ctx.storage)))
+      }
 
       registrations.push(
         await ctx.session.hook("context", (event) => {

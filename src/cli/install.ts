@@ -1,10 +1,15 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { commandDefinitions } from "../opencode-v2/commands/index.js"
 import { buildOrchestratorSystem, buildWorkerSystem } from "../core/prompts.js"
-import { GOAL_TOOL_PERMISSION, REVIEW_SUBMIT_TOOL_PERMISSION, orchestratorOnlyPermissionRules } from "../core/permissions.js"
+import {
+  GOAL_TOOL_PERMISSION,
+  REVIEW_SUBMIT_TOOL_PERMISSION,
+  orchestratorOnlyPermissionRules,
+  type PermissionRuleLike,
+} from "../core/permissions.js"
 import { DEFAULT_ROLES, ROLE_DELEGATION, type RoleName } from "../core/roles.js"
 import { parseOptions, type OrchestratorOptions } from "../core/config.js"
 import { parseModelReference } from "../core/model-reference.js"
@@ -12,6 +17,20 @@ import { DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME, SCOPED_DISTRIBUTION_NAME }
 
 export type InstallTarget = "project" | "global"
 export type AgentModelReferences = Record<string, string>
+
+export type InstallSummary = {
+  addedAgents: string[]
+  preservedAgents: string[]
+  addedCommands: string[]
+  preservedCommands: string[]
+  path: string
+}
+
+export type InstallPlan = InstallSummary & {
+  source: string
+  content: string
+  changed: boolean
+}
 
 /**
  * Maps a runtime file (the installer CLI or the exported installer bundle) to
@@ -34,7 +53,7 @@ const RUNTIME_LAYOUTS = [
 ] as const
 
 export function pluginEntryForRuntimeFile(runtimeFile: string): string {
-  const normalized = runtimeFile.split(sep).join("/")
+  const normalized = runtimeFile.replaceAll("\\", "/").split(sep).join("/")
   for (const { suffix, entry } of RUNTIME_LAYOUTS) {
     if (normalized.endsWith(suffix)) {
       return join(normalized.slice(0, -suffix.length), entry)
@@ -95,6 +114,9 @@ export function defaultConfigPath(target: InstallTarget, cwd = process.cwd()): s
  */
 const REQUIRED_SUBAGENT_DEPTH = 3
 
+/** Permission actions emitted by pre-V2 surface consolidation installers. */
+export const REMOVED_PERMISSION_FAMILIES = ["orchestrator_cd", "orchestrator_session_move"] as const
+
 /**
  * Recommended host-config keys written by the installer, each only when absent
  * and never overwriting an explicit user value:
@@ -108,20 +130,13 @@ const REQUIRED_SUBAGENT_DEPTH = 3
  */
 const RECOMMENDED_EXPERIMENTAL = { continue_loop_on_deny: true, batch_tool: true } as const
 
-export function installConfig(
+export function planInstallConfig(
   path: string,
   options: unknown = {},
   packageReference?: string,
   modelReferences: AgentModelReferences = {},
-): {
-  addedAgents: string[]
-  preservedAgents: string[]
-  addedCommands: string[]
-  preservedCommands: string[]
-  path: string
-} {
+): InstallPlan {
   const resolved = resolve(path)
-  mkdirSync(dirname(resolved), { recursive: true })
   // Without an explicit reference, derive the local plugin entry from this
   // file's own location: `src/cli/install.ts` -> `<root>/src/index.ts` in a
   // source checkout, `dist/installer.js` -> `<root>/dist/index.js` in the
@@ -144,6 +159,9 @@ export function installConfig(
   }
   if (document.agents !== undefined && !isRecord(document.agents)) {
     throw new Error(`Invalid agents entry at ${resolved}: expected an object`)
+  }
+  if (document.commands !== undefined && !isRecord(document.commands)) {
+    throw new Error(`Invalid commands entry at ${resolved}: expected an object`)
   }
   if (document.experimental !== undefined && !isRecord(document.experimental)) {
     throw new Error(`Invalid experimental entry at ${resolved}: expected an object`)
@@ -245,8 +263,83 @@ export function installConfig(
       result = applyEdits(result, modify(result, ["experimental", key], value, { formattingOptions }))
     }
   }
-  atomicWrite(resolved, result)
-  return { addedAgents, preservedAgents, addedCommands: [], preservedCommands, path: resolved }
+  validatePlannedConfig(result, resolved)
+  return {
+    addedAgents,
+    preservedAgents,
+    addedCommands: [],
+    preservedCommands,
+    path: resolved,
+    source,
+    content: result,
+    changed: source !== result,
+  }
+}
+
+/**
+ * Apply the normal installer plan. Planning is deliberately separate so the
+ * CLI's `install --check` mode can use exactly the same JSONC edits without
+ * creating a directory, temporary config, or backup.
+ */
+export function installConfig(
+  path: string,
+  options: unknown = {},
+  packageReference?: string,
+  modelReferences: AgentModelReferences = {},
+): InstallSummary {
+  const plan = planInstallConfig(path, options, packageReference, modelReferences)
+  mkdirSync(dirname(plan.path), { recursive: true })
+  if (plan.changed) atomicWrite(plan.path, plan.content)
+  return summary(plan)
+}
+
+/**
+ * Migrate an existing installation's plugin-owned agent fields. User-authored
+ * permission rules remain in place; generated rules and stale delegation
+ * edges are refreshed. A backup is created before the first write.
+ */
+export function migrateConfig(
+  path: string,
+  options: unknown = {},
+  packageReference?: string,
+  modelReferences: AgentModelReferences = {},
+): InstallSummary & { backupPath?: string; changed: boolean } {
+  const resolved = resolve(path)
+  if (!existsSync(resolved)) throw new Error(`Cannot migrate missing configuration: ${resolved}`)
+
+  const source = readFileSync(resolved, "utf8")
+  const migrationOptions = migrationOptionsFromSource(source, options)
+  const plan = planInstallConfig(resolved, migrationOptions, packageReference, modelReferences)
+  const content = migratePluginOwnedAgents(plan.content, parseOptions(migrationOptions), modelReferences)
+  validatePlannedConfig(content, resolved)
+  const changed = content !== source
+  if (!changed) return { ...summary(plan), changed }
+
+  const backupPath = createBackup(resolved)
+  atomicWrite(resolved, content)
+  return { ...summary(plan), path: resolved, backupPath, changed }
+}
+
+/** Create a collision-safe sibling backup without overwriting an older backup. */
+export function createBackup(path: string): string {
+  const resolved = resolve(path)
+  if (!existsSync(resolved)) throw new Error(`Cannot back up missing configuration: ${resolved}`)
+  let candidate = `${resolved}.bak`
+  let suffix = 1
+  while (existsSync(candidate)) candidate = `${resolved}.bak.${suffix++}`
+  copyFileSync(resolved, candidate)
+  chmodSync(candidate, statSync(resolved).mode & 0o7777)
+  return candidate
+}
+
+function summary(plan: InstallPlan): InstallSummary {
+  return {
+    addedAgents: plan.addedAgents,
+    preservedAgents: plan.preservedAgents,
+    addedCommands: plan.addedCommands,
+    preservedCommands: plan.preservedCommands,
+    path: plan.path,
+  }
 }
 
 function agentDefinitions(options: OrchestratorOptions, modelReferences: AgentModelReferences): Record<string, unknown> {
@@ -274,6 +367,229 @@ function agentDefinitions(options: OrchestratorOptions, modelReferences: AgentMo
     }
   }
   return entries
+}
+
+function migrationOptionsFromSource(source: string, explicit: unknown): unknown {
+  if (isNonEmptyRecord(explicit)) return explicit
+  const errors: ParseError[] = []
+  const document = parse(source, errors, { allowTrailingComma: true })
+  if (errors.length > 0 || !isRecord(document) || !Array.isArray(document.plugins)) return explicit
+  const entry = document.plugins.find((candidate) => {
+    if (!isRecord(candidate) || !isRecord(candidate.options)) return false
+    const packageName = typeof candidate.package === "string" ? candidate.package : ""
+    return (
+      packageName === DISTRIBUTION_NAME ||
+      packageName === SCOPED_DISTRIBUTION_NAME ||
+      packageName === LEGACY_DISTRIBUTION_NAME ||
+      isLocalPluginReference(packageName)
+    )
+  })
+  return isRecord(entry) && isRecord(entry.options) ? entry.options : explicit
+}
+
+/**
+ * Refresh only fields generated by this plugin. The JSONC object itself is
+ * edited field-by-field so unrelated agent properties and comments stay in the
+ * document. Permission arrays are the one bounded replacement because their
+ * generated graph must be reconciled as a unit.
+ */
+function migratePluginOwnedAgents(
+  source: string,
+  options: OrchestratorOptions,
+  modelReferences: AgentModelReferences,
+): string {
+  const errors: ParseError[] = []
+  const document = parse(source, errors, { allowTrailingComma: true })
+  if (errors.length > 0 || !isRecord(document)) {
+    throw new Error("Invalid JSONC generated during agent migration")
+  }
+  if (!isRecord(document.agents)) return source
+
+  const desiredAgents = agentDefinitions(options, modelReferences)
+  let result = source
+  for (const [id, rawDesired] of Object.entries(desiredAgents)) {
+    const current = document.agents[id]
+    if (!isRecord(current) || !isRecord(rawDesired)) continue
+
+    const desiredSystem = typeof rawDesired.system === "string" ? rawDesired.system : undefined
+    const currentSystem = typeof current.system === "string" ? current.system : undefined
+    if (desiredSystem && shouldRefreshPrompt(currentSystem, desiredSystem)) {
+      result = applyEdits(result, modify(result, ["agents", id, "system"], migratePrompt(currentSystem, desiredSystem), { formattingOptions }))
+    }
+
+    const desiredPermissions = Array.isArray(rawDesired.permissions) ? rawDesired.permissions : undefined
+    if (desiredPermissions) {
+      const currentPermissions = current.permissions
+      const migration = planPermissionMigration(currentPermissions, desiredPermissions, id, options)
+      if (!sameJson(currentPermissions, migration.final)) {
+        if (Array.isArray(currentPermissions)) {
+          result = applyPermissionMigrationEdits(result, ["agents", id, "permissions"], currentPermissions, migration)
+        } else {
+          result = applyEdits(result, modify(result, ["agents", id, "permissions"], migration.final, { formattingOptions }))
+        }
+      }
+    }
+
+    // Descriptions are generated metadata. Only the known installer defaults
+    // are replaced; a custom description remains user-authored.
+    if (typeof rawDesired.description === "string") {
+      const oldDefault = id === options.orchestrator ? "Coordinates specialized agents and verifies their work." : undefined
+      if (current.description === undefined || current.description === oldDefault) {
+        result = applyEdits(result, modify(result, ["agents", id, "description"], rawDesired.description, { formattingOptions }))
+      }
+    }
+  }
+  return result
+}
+
+function shouldRefreshPrompt(current: string | undefined, desired: string): boolean {
+  if (!current || current === desired) return !current
+  if (
+    current.includes("task_complexity_classify") ||
+    current.includes("admission_transition") ||
+    current.includes("orchestrator_lead_board") ||
+    current.includes("orchestrator_github_issue")
+  ) return true
+  return (
+    current.includes("Worker handoff format:") ||
+    current.includes("You are the conductor, not a worker of last resort.") ||
+    current.includes("Bounded nested delegation graph")
+  )
+}
+
+function migratePrompt(current: string | undefined, desired: string): string {
+  if (!current || current === desired) return desired
+  const removed = ["task_complexity_classify", "admission_transition", "orchestrator_lead_board", "orchestrator_github_issue"]
+  const retained = current
+    .split(/\r?\n/)
+    .filter((line) => !isOwnedRemovedPromptLine(line, removed))
+    .join("\n")
+    .trim()
+  // Prompt ownership cannot be proven for arbitrary prose: a user may have
+  // copied a removed tool name into a custom instruction. Remove only legacy
+  // lines with the generated wording we recognize, retain all other text, and
+  // append the current generated prompt once. This is intentionally
+  // conservative; migration must not erase user-authored guidance.
+  if (retained.includes(desired)) return retained
+  return retained.length > 0 ? `${retained}\n\n${desired}` : desired
+}
+
+function isOwnedRemovedPromptLine(line: string, removed: readonly string[]): boolean {
+  const trimmed = line.trim()
+  if (!removed.some((name) => trimmed.includes(name))) return false
+  return (
+    trimmed.startsWith("Parent:") ||
+    trimmed.startsWith("Reach ") ||
+    trimmed.startsWith("Map ") ||
+    trimmed.startsWith("Work the task ") ||
+    trimmed.startsWith("Use orchestrator_") ||
+    trimmed.startsWith("Call orchestrator_")
+  )
+}
+
+type PermissionMigration = {
+  final: unknown[]
+  removeIndices: number[]
+  additions: PermissionRuleLike[]
+}
+
+function planPermissionMigration(
+  current: unknown,
+  desired: readonly unknown[],
+  agentID: string,
+  options: OrchestratorOptions,
+): PermissionMigration {
+  if (!Array.isArray(current)) {
+    const additions = desired.filter(isPermissionRule)
+    return { final: [...additions], removeIndices: [], additions }
+  }
+  const knownRoleIDs = new Set([...Object.values(DEFAULT_ROLES), ...Object.values(options.roles)])
+  const desiredRules = desired.filter(isPermissionRule)
+  const expectedTargets = expectedDelegationTargets(agentID, options)
+  const removeIndices: number[] = []
+  const preserved = current.filter((candidate, index) => {
+    const action = isRecord(candidate) && typeof candidate.action === "string" ? candidate.action : undefined
+    const partial = action ? (candidate as PermissionRuleLike) : undefined
+    if (partial && (isRemovedPermissionRule(partial) || isOldPipedPermissionRule(partial))) {
+      removeIndices.push(index)
+      return false
+    }
+    if (!isPermissionRule(candidate)) return true
+    if (isStaleDelegationRule(candidate, expectedTargets, knownRoleIDs)) {
+      removeIndices.push(index)
+      return false
+    }
+    // An exact rule already present in the user's config remains authoritative,
+    // including an explicit `ask` or `deny` override. Missing generated rules
+    // are appended below instead of replacing that exact scope.
+    return true
+  })
+
+  const additions = desiredRules.filter(
+    (rule) => !preserved.some((candidate) => isPermissionRule(candidate) && samePermissionScope(candidate, rule)),
+  )
+  return { final: [...preserved, ...additions], removeIndices, additions }
+}
+
+function applyPermissionMigrationEdits(
+  source: string,
+  path: (string | number)[],
+  current: readonly unknown[],
+  migration: PermissionMigration,
+): string {
+  let result = source
+  for (const index of [...migration.removeIndices].sort((left, right) => right - left)) {
+    result = applyEdits(result, modify(result, [...path, index], undefined, { formattingOptions }))
+  }
+  let length = current.length - migration.removeIndices.length
+  for (const rule of migration.additions) {
+    result = applyEdits(result, modify(result, [...path, length], rule, { formattingOptions }))
+    length += 1
+  }
+  return result
+}
+
+function expectedDelegationTargets(agentID: string, options: OrchestratorOptions): ReadonlySet<string> {
+  if (agentID === options.orchestrator) return new Set(Object.values(options.roles))
+  const role = (Object.entries(options.roles) as Array<[RoleName, string]>).find(([, id]) => id === agentID)?.[0]
+  return new Set(role ? ROLE_DELEGATION[role].map((target) => options.roles[target]) : [])
+}
+
+function isPermissionRule(value: unknown): value is PermissionRuleLike & Record<string, unknown> {
+  return isRecord(value) && typeof value.action === "string" && typeof value.resource === "string" && typeof value.effect === "string"
+}
+
+function samePermissionScope(left: PermissionRuleLike, right: PermissionRuleLike): boolean {
+  return left.action === right.action && left.resource === right.resource
+}
+
+function isStaleDelegationRule(
+  rule: PermissionRuleLike,
+  expectedTargets: ReadonlySet<string>,
+  knownRoleIDs: ReadonlySet<string>,
+): boolean {
+  return (
+    rule.action === "subagent" &&
+    rule.effect === "allow" &&
+    rule.resource !== "*" &&
+    typeof rule.resource === "string" &&
+    knownRoleIDs.has(rule.resource) &&
+    !expectedTargets.has(rule.resource)
+  )
+}
+
+function isRemovedPermissionRule(rule: PermissionRuleLike): boolean {
+  return typeof rule.action === "string" && REMOVED_PERMISSION_FAMILIES.includes(rule.action as (typeof REMOVED_PERMISSION_FAMILIES)[number]) && (rule.resource === "*" || rule.resource === undefined)
+}
+
+function isOldPipedPermissionRule(rule: PermissionRuleLike): boolean {
+  const action = rule.action
+  if (typeof action !== "string" || !action.includes("|")) return false
+  return REMOVED_PERMISSION_FAMILIES.some((family) => action.split("|").includes(family)) && rule.resource === "*" && (rule.effect === "allow" || rule.effect === "deny")
+}
+
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
 }
 
 function orchestratorPermissions(options: OrchestratorOptions): Array<Record<string, string>> {
@@ -462,4 +778,72 @@ function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && Object.keys(value).length > 0
+}
+
+function validatePlannedConfig(source: string, path: string): void {
+  const errors: ParseError[] = []
+  const document = parse(source, errors, { allowTrailingComma: true })
+  if (errors.length > 0 || !isRecord(document)) throw new Error(`Invalid JSONC generated for ${path}`)
+  if (document.plugins !== undefined && !Array.isArray(document.plugins)) {
+    throw new Error(`Invalid generated plugins entry at ${path}`)
+  }
+  if (document.agents !== undefined && !isRecord(document.agents)) {
+    throw new Error(`Invalid generated agents entry at ${path}`)
+  }
+  if (document.commands !== undefined && !isRecord(document.commands)) {
+    throw new Error(`Invalid generated commands entry at ${path}`)
+  }
+  if (document.experimental !== undefined && !isRecord(document.experimental)) {
+    throw new Error(`Invalid generated experimental entry at ${path}`)
+  }
+}
+
+/**
+ * Stable, bounded line diff for `install --check`. It intentionally avoids a
+ * wall-clock or temporary-file based diff so identical inputs always produce
+ * identical output. The full proposed document is shown only when it fits the
+ * output cap; the installer itself never truncates the content it would write.
+ */
+export function formatInstallDiff(path: string, source: string, content: string): string {
+  if (source === content) return `No changes required for ${path}`
+  const before = source.split(/\r?\n/)
+  const after = content.split(/\r?\n/)
+  const first = commonPrefix(before, after)
+  const last = commonSuffix(before, after, first)
+  const removed = before.slice(first, before.length - last)
+  const added = after.slice(first, after.length - last)
+  const lines = [
+    `--- ${path}`,
+    `+++ ${path} (planned)`,
+    `@@ ${first + 1},${removed.length} -> ${first + 1},${added.length} @@`,
+    ...removed.map((line) => `-${line}`),
+    ...added.map((line) => `+${line}`),
+  ]
+  const output = lines.join("\n")
+  if (output.length <= INSTALL_DIFF_OUTPUT_CAP) return output
+  const note = `\n... install diff truncated at ${INSTALL_DIFF_OUTPUT_CAP} bytes; --check does not write the planned content`
+  return `${output.slice(0, Math.max(0, INSTALL_DIFF_OUTPUT_CAP - note.length))}${note}`
+}
+
+function commonPrefix(before: readonly string[], after: readonly string[]): number {
+  let index = 0
+  while (index < before.length && index < after.length && before[index] === after[index]) index += 1
+  return index
+}
+
+function commonSuffix(before: readonly string[], after: readonly string[], prefix: number): number {
+  let count = 0
+  while (
+    count < before.length - prefix &&
+    count < after.length - prefix &&
+    before[before.length - 1 - count] === after[after.length - 1 - count]
+  ) {
+    count += 1
+  }
+  return count
+}
+
 const formattingOptions = { insertSpaces: true, tabSize: 2, eol: "\n" as const }
+const INSTALL_DIFF_OUTPUT_CAP = 32 * 1024

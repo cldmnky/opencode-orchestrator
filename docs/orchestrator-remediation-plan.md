@@ -77,7 +77,7 @@ At the time this plan was written:
 
 - `bun run typecheck` passes.
 - The restored D2/D4 fixtures make the source unit suite green.
-- The latest full suite reports 1,075 passing tests, one skipped test, and no failures after a fresh build.
+- The latest full suite reports 1,087 passing tests, one skipped test, and no failures after a fresh build.
 - Contract tests for Phase A and Phase D build a private temporary bundle per test process; they no longer consume ignored `dist/` output.
 - A checked-in GitHub Actions workflow runs typecheck, unit tests, contract tests, build, and package smoke verification.
 - The plugin can register up to 38 model-visible tools and 11 slash commands.

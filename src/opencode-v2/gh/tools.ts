@@ -1,6 +1,6 @@
 import type { OrchestratorOptions } from "../../core/config.js"
 import { GH_TOOL_PERMISSION } from "../../core/permissions.js"
-import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
+import type { ToolDraftLike } from "../compat.js"
 import type { LocationLike, StorageLike } from "../goal/state.js"
 import { liveEvidence, mutationEvidence } from "../orchestration/evidence.js"
 import { createRedactor } from "../process/redact.js"
@@ -94,10 +94,6 @@ import {
  * `storage` and `location` resolve the durable publish capability and the
  * exact-revision internal review receipt; `secrets` feed the redactor.
  */
-
-type ToolDraftLike = {
-  add(tool: ToolInfo<any, undefined>): void
-}
 
 type ToolResult = { content: string }
 

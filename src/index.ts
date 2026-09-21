@@ -1,11 +1,23 @@
+/**
+ * Supported package entrypoint.
+ *
+ * Runtime implementation details stay behind the server plugin. The pure
+ * D2/D4/admission contracts remain public because they are versioned fixtures
+ * and documented contracts; durable state machines and storage helpers are
+ * intentionally not re-exported from the package root.
+ */
 export { orchestratorPlugin as default, orchestratorPlugin } from "./opencode-v2/plugin.js"
-export { commandDefinitions, COMMAND_NAMES } from "./opencode-v2/commands/index.js"
+
 export {
   OrchestratorOptionsSchema,
   parseOptions,
   TRACE_MODES,
   BUDGET_MODES,
   REVIEW_MODES,
+  CLARIFY_MODES,
+  AUTHORITY_MODES,
+  RETRY_MODES,
+  DECOMPOSITION_STRATEGIES,
 } from "./core/config.js"
 export type {
   OrchestratorOptions,
@@ -13,19 +25,22 @@ export type {
   TraceMode,
   BudgetMode,
   ReviewMode,
+  ClarifyMode,
+  AuthorityMode,
+  RetryMode,
+  DecompositionStrategy,
   TraceOptions,
   BudgetOptions,
   BudgetLimits,
   ReviewOptions,
+  ClarifyOptions,
+  AuthorityOptions,
+  RetryOptions,
+  DecompositionOptions,
+  PublishOptions,
 } from "./core/config.js"
 
-// Serialized runtime public pure APIs. No package subpath: these are exported
-// from the main entrypoint only. The orchestration tools
-// (orchestrator_handoff_validate and the canonical board operations) are wired
-// behind the plugin, and these modules are callable/stateless primitives — none
-// of them enforces an automatic gate.
-
-// D4 complexity classifier (advisory).
+// D4 v1 is an advisory, versioned pure contract. It is not a runtime gate.
 export {
   classifyTaskComplexity,
   D4InputSchema,
@@ -44,7 +59,7 @@ export type {
   D4NormalizedFeatures,
 } from "./core/d4.js"
 
-// D2 versioned structured handoff.
+// D2 is the versioned structured handoff contract used by worker boundaries.
 export {
   D2_HANDOFF_SCHEMA,
   D2_REQUIRED_KEYS,
@@ -95,7 +110,8 @@ export type {
   D2SemanticCheck,
 } from "./core/contracts.js"
 
-// V2 admission state machine (stateless).
+// V2 admission is a stateless, versioned transition contract. It is not an
+// automatic plugin gate and does not read durable state.
 export {
   ADMISSION_STATES,
   ADMISSION_ACTIONS,
@@ -112,165 +128,3 @@ export type {
   AdmissionInput,
   AdmissionTransitionResult,
 } from "./core/admission.js"
-
-// V3 typed evidence vocabulary/assessment/factories.
-export {
-  evidenceSchema,
-  mutationProofSchema,
-  assessEvidence,
-  liveEvidence,
-  mutationEvidence,
-  EVIDENCE_MARKERS,
-  FRESHNESS_VALUES,
-  AUTHORITY_VALUES,
-} from "./opencode-v2/orchestration/evidence.js"
-export type {
-  EvidenceRecord,
-  EvidenceMarker,
-  Freshness,
-  Authority,
-  MutationProof,
-  LiveEvidence,
-  MutationEvidence,
-  LiveEvidenceInput,
-  MutationProofInput,
-  MutationEvidenceInput,
-  Assessment,
-  EvidenceRequirement,
-} from "./opencode-v2/orchestration/evidence.js"
-
-// S3 state & observability — deterministic budget evaluation and bounded
-// metadata-only trace summaries. All pure/stateless; nothing here enforces an
-// automatic gate by itself (stop-between-steps checks run only inside the
-// plugin-owned dispatch surfaces below).
-export { evaluateBudget, configuredBudgetLimits, BUDGET_LIMIT_NAMES } from "./opencode-v2/observability/budget.js"
-export type {
-  BudgetObservation,
-  BudgetLimitName,
-  BudgetLimitStatus,
-  BudgetDetail,
-  BudgetVerdict,
-  BudgetEvaluation,
-} from "./opencode-v2/observability/budget.js"
-export {
-  TRACE_RECORD_VERSION,
-  TRACE_MAX_TOOL_ENTRIES,
-  TRACE_MAX_PENDING_CALLS,
-  TRACE_OTHER_TOOL,
-  traceSummarySchema,
-  traceToolUsageSchema,
-  usageSnapshotSchema,
-  newTraceSummary,
-  applyToolCallStart,
-  applyToolCallEnd,
-  applyToolCallOutcome,
-  recordStep,
-  recordRetry,
-  recordUsageSnapshot,
-  usageTokensTotal,
-  parseTraceSummary,
-  traceStorageKey,
-} from "./opencode-v2/observability/trace.js"
-export type { TraceSummary, TraceToolUsage, UsageSnapshot, UsageSnapshotInput } from "./opencode-v2/observability/trace.js"
-
-// V1 maker-checker review schema and deterministic transitions. This is a
-// separate version-1 review schema: D2 reviewState semantics and the core
-// admission state semantics are unchanged.
-export {
-  REVIEW_V1_VERSION,
-  REVIEW_V1_STATES,
-  REVIEW_V1_ACTIONS,
-  REVIEW_V1_REASONS,
-  reviewV1RecordSchema,
-  REVIEW_V1_START_SIGNAL_SCHEMA,
-  REVIEW_V1_APPROVE_SIGNAL_SCHEMA,
-  REVIEW_V1_SIGNAL_SCHEMA,
-  transitionReviewV1,
-  parseReviewRecord,
-  reviewStorageKey,
-} from "./opencode-v2/observability/review.js"
-export type {
-  ReviewV1State,
-  ReviewV1Action,
-  ReviewV1Reason,
-  ReviewV1Record,
-  ReviewV1Signal,
-  ReviewV1TransitionInput,
-  ReviewV1Transition,
-} from "./opencode-v2/observability/review.js"
-export type { DispatchGate, DispatchDecision, DispatchCheck } from "./opencode-v2/observability/runtime.js"
-
-// V2 provenance-bound review records. V1 helpers above remain readable for
-// migration/status reporting but are never accepted as publication proof.
-export {
-  REVIEW_V2_VERSION,
-  REVIEW_V2_STATES,
-  REVIEW_V2_DECISIONS,
-  REVIEW_V2_REASONS,
-  REVIEW_V2_CHECK_KEYS,
-  reviewV2RecordSchema,
-  reviewV2StartInputSchema,
-  reviewV2SubmitInputSchema,
-  startReviewV2,
-  submitReviewV2,
-  parseReviewV2Record,
-  reviewV2StorageKey,
-  validateApprovedReviewV2Revision,
-} from "./opencode-v2/observability/review-v2.js"
-export type {
-  ReviewV2State,
-  ReviewV2Decision,
-  ReviewV2Reason,
-  ReviewV2Checks,
-  ReviewV2Record,
-  ReviewV2Transition,
-  ReviewV2RevisionCheck,
-  ReviewV2RevisionVerdict,
-} from "./opencode-v2/observability/review-v2.js"
-
-// Durable project-scoped publication authorization policy. State helpers are
-// storage-only (never git/process) and the status view is what `/publish`
-// and orchestrator_publish_policy_get expose; the tools themselves stay wired
-// behind the plugin. The capability is policy, not caller authentication:
-// enabling it never weakens the static github/worktree gates, and issue
-// creation and PR merge are never part of the authorized capability set.
-export {
-  PUBLISH_CAPABILITIES,
-  PUBLISH_NEVER_AUTHORIZED,
-  publishStorageKey,
-  readPublishRecord,
-  setPublicationEnabled,
-  isPublishCapabilityAuthorized,
-  publicationStatus,
-} from "./opencode-v2/publish/state.js"
-export type {
-  PublishCapability,
-  PublishRecord,
-  PublishToggleResult,
-  PublicationStatusView,
-  LocationLike,
-  StorageLike,
-} from "./opencode-v2/publish/state.js"
-
-// Same-project peer-orchestrator discovery. The query is orchestrator-only
-// durable metadata: bounded, redacted, deterministically ordered goal
-// summaries of the same stable project, explicitly never live-complete.
-export {
-  PEER_RESULT_LIMIT_DEFAULT,
-  PEER_RESULT_LIMIT_MAX,
-  PEER_QUERY_LIMITATIONS,
-  SESSION_STATUS_LIMITATIONS,
-  queryPeerGoals,
-  querySessionStatus,
-  querySessionStatuses,
-} from "./opencode-v2/peers/tools.js"
-export type {
-  PeerSummary,
-  PeerQueryInput,
-  PeerQueryResult,
-  SessionStatusSummary,
-  SessionStatusSingleInput,
-  SessionStatusSingleResult,
-  SessionStatusListInput,
-  SessionStatusListResult,
-} from "./opencode-v2/peers/tools.js"

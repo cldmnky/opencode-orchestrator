@@ -6,8 +6,8 @@
  * configured reviewer child can submit the decision through its dedicated
  * permission action.
  */
-import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 import type { OrchestratorOptions } from "../../core/config.js"
+import type { ToolDraftLike } from "../compat.js"
 import { OBSERVABILITY_TOOL_PERMISSION, REVIEW_SUBMIT_TOOL_PERMISSION } from "../../core/permissions.js"
 import { stableProjectID, withSessionLock, type LocationLike, type StorageLike } from "../goal/state.js"
 import { readReviewRecord, readReviewRecordV2, setReviewRecordV2 } from "./runtime.js"
@@ -24,10 +24,6 @@ import {
   transitionLeadTaskV2,
   writeLeadBoardV2,
 } from "../orchestration/lead-board-v2.js"
-
-type ToolDraftLike = {
-  add(tool: ToolInfo<any, undefined>): void
-}
 
 type ToolResult = { content: string }
 

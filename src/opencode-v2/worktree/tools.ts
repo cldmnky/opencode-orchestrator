@@ -1,6 +1,6 @@
 import type { OrchestratorOptions } from "../../core/config.js"
 import { WORKTREE_TOOL_PERMISSION } from "../../core/permissions.js"
-import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
+import type { ToolDraftLike } from "../compat.js"
 import { liveEvidence } from "../orchestration/evidence.js"
 import { createRedactor } from "../process/redact.js"
 import type { ProcessRunner } from "../process/runner.js"
@@ -73,10 +73,6 @@ import type { SessionMoveCoordinator } from "../session/move-coordinator.js"
  * stay redacted strings and carry no evidence; a conflicted sync is a
  * truthful structured non-success result (no evidence, never a push).
  */
-
-type ToolDraftLike = {
-  add(tool: ToolInfo<any, undefined>): void
-}
 
 type ToolResult = { content: string }
 

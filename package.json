@@ -33,7 +33,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:unit": "bun test test/unit",
-    "test:contract": "bun test test/contract",
+    "test:contract": "bun test --max-concurrency=1 test/contract",
     "test:package": "bun run build && bun run scripts/package-smoke.ts",
     "verify": "bun run typecheck && bun run test:unit && bun run test:contract && bun run test:package"
   },

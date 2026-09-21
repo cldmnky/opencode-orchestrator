@@ -154,9 +154,9 @@ describe("server plugin contract", () => {
 
     // The tool transform registers the goal family plus the read-only
     // per-session gates surface and the orchestrator-only github, worktree,
-    // orchestration validation, publish policy, and peer discovery families
+    // orchestration validation, verification receipt, publish policy, and peer discovery families
     // with their shared permission actions:
-    // 3 goal + 1 gates + 11 github + 7 worktree + 3 validation + 1 publish + 2 peer = 28.
+    // 3 goal + 1 gates + 11 github + 7 worktree + 10 validation + 1 publish + 2 peer = 35.
     const allToolNames = tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)
     expect(allToolNames).toEqual([
       "orchestrator_goal_get",
@@ -190,11 +190,12 @@ describe("server plugin contract", () => {
       "orchestrator_lead_board_task_assign",
       "orchestrator_lead_board_transition",
       "orchestrator_lead_board_complete",
+      "orchestrator_verification_get",
       "orchestrator_publish_policy_get",
       "orchestrator_peer_list",
       "orchestrator_session_status",
     ])
-    expect(allToolNames).toHaveLength(34)
+    expect(allToolNames).toHaveLength(35)
     expect(tools.filter((tool) => tool.options?.permission === GH_TOOL_PERMISSION).length).toBe(11)
     expect(tools.filter((tool) => tool.options?.permission === WORKTREE_TOOL_PERMISSION).length).toBe(7)
     expect(tools.filter((tool) => tool.options?.permission === PUBLISH_TOOL_PERMISSION).length).toBe(1)
@@ -223,6 +224,7 @@ describe("server plugin contract", () => {
       "lead_board_task_create",
       "lead_board_transition",
       "task_complexity_classify",
+      "verification_get",
     ])
     for (const tool of validationTools) {
       expect(tool.options?.namespace).toBe("orchestrator")
@@ -274,6 +276,7 @@ describe("server plugin contract", () => {
     expect(contextText.join("\n")).toContain("Definition of Done (terminal drive)")
     expect(contextText.join("\n")).toContain("orchestrator_task_complexity_classify")
     expect(contextText.join("\n")).toContain("orchestrator_handoff_validate")
+    expect(contextText.join("\n")).toContain("orchestrator_verification_get")
     expect(contextText.join("\n")).toContain("orchestrator_admission_transition")
     expect(contextText.join("\n")).toContain("not an automatic gate")
     expect(contextText.join("\n")).toContain("exact disjoint write scope")
@@ -297,7 +300,7 @@ describe("server plugin contract", () => {
     expect(prompts[0].delivery).toBe("queue")
 
     await cleanup?.()
-    expect(disposed).toEqual(["execute.after", "session-hook", "rpc", "tool", "command", "agent"])
+    expect(disposed).toEqual(["execute.after", "session-hook", "rpc", "tool", "command", "agent", "execute.after", "execute.before"])
     // The worktree event sync registered its own real dispose, which closed
     // the subscribed event stream.
     expect(stream.closed).toBe(true)
@@ -433,7 +436,18 @@ describe("server plugin contract", () => {
     // dispose, no named registration), the plugin's execute.after warn hook,
     // the session hook, the gates rpc, the tool/command/agent transforms, and
     // the observability runtime last (which disposes its before/after hooks).
-    expect(disposed).toEqual(["execute.after", "session-hook", "rpc", "tool", "command", "agent", "execute.before", "execute.after"])
+    expect(disposed).toEqual([
+      "execute.after",
+      "session-hook",
+      "rpc",
+      "tool",
+      "command",
+      "agent",
+      "execute.after",
+      "execute.before",
+      "execute.before",
+      "execute.after",
+    ])
     expect(stream.closed).toBe(true)
   })
 
@@ -531,7 +545,7 @@ describe("server plugin contract", () => {
     expect(defaultHarness.permissionHooks).toEqual([])
     expect(defaultHarness.ruleWrites).toEqual([])
     await defaultCleanup?.()
-    expect(defaultHarness.disposed).toEqual(["execute.after", "session:context", "rpc", "tool", "command", "agent"])
+    expect(defaultHarness.disposed).toEqual(["execute.after", "session:context", "rpc", "tool", "command", "agent", "execute.after", "execute.before"])
     expect(defaultHarness.stream.closed).toBe(true)
 
     // Enforce: exactly one prompt hook and one evaluate hook (registered before
@@ -549,6 +563,8 @@ describe("server plugin contract", () => {
       "tool",
       "command",
       "agent",
+      "execute.after",
+      "execute.before",
       "permission:evaluate",
       "session:prompt",
     ])
@@ -624,9 +640,9 @@ describe("server plugin contract", () => {
 
     const cleanup = await orchestratorPlugin.setup(context)
 
-    // No new command, tool, permission action, or rpc surface is registered:
-    // with every feature gate at its default, the registered tool family is
-    // exactly the pre-Phase-2 set.
+    // Strict decomposition changes prompt emphasis only. The unconditional
+    // Phase-3 read-only verification surface remains present, while optional
+    // feature families stay disabled.
     expect(commands.map((command) => command.name)).toEqual([...COMMAND_NAMES])
     expect(tools.map((tool) => `${tool.options?.namespace}_${tool.name}`)).toEqual([
       "orchestrator_goal_get",
@@ -642,6 +658,7 @@ describe("server plugin contract", () => {
       "orchestrator_lead_board_task_assign",
       "orchestrator_lead_board_transition",
       "orchestrator_lead_board_complete",
+      "orchestrator_verification_get",
       "orchestrator_publish_policy_get",
       "orchestrator_peer_list",
       "orchestrator_session_status",

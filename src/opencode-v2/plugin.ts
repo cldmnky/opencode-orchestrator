@@ -25,6 +25,9 @@ import { startWorktreeEventSync } from "./worktree/events.js"
 import { SpawnRunner } from "./process/runner.js"
 import { createSessionMoveCoordinator } from "./session/move-coordinator.js"
 import { createWorkerModelRuntime, type WorkerModelRuntime } from "./worker-models/runtime.js"
+import { startVerificationRuntime } from "./verification/runtime.js"
+import { addVerificationTools } from "./verification/tools.js"
+import { redact } from "./process/redact.js"
 import { DISTRIBUTION_NAME, RUNTIME_PLUGIN_ID } from "../core/package-identity.js"
 
 export const orchestratorPlugin = (Plugin.define as any)({
@@ -110,6 +113,18 @@ export const orchestratorPlugin = (Plugin.define as any)({
 
     try {
       registrations.push(
+        await startVerificationRuntime({
+          options,
+          storage: ctx.storage,
+          location: ctx.location,
+          session: ctx.session,
+          tool: ctx.tool,
+          runner,
+          redact,
+        }),
+      )
+
+      registrations.push(
         await ctx.agent.transform((draft) => {
           applyAgentTransform(draft, options, workerModels.overrides)
         }),
@@ -147,15 +162,16 @@ export const orchestratorPlugin = (Plugin.define as any)({
             session: ctx.session,
             moveCoordinator,
           })
-          addOrchestrationTools(draft, {
+           addOrchestrationTools(draft, {
             options,
             location: ctx.location,
             storage: ctx.storage,
             session: ctx.session,
             vcs: ctx.vcs,
-            generate: (input) => ctx.generate.text(input),
-          })
-          addAuthorityTools(draft, { options, storage: ctx.storage, location: ctx.location })
+             generate: (input) => ctx.generate.text(input),
+           })
+           addVerificationTools(draft, { options, storage: ctx.storage, location: ctx.location, session: ctx.session })
+           addAuthorityTools(draft, { options, storage: ctx.storage, location: ctx.location })
           addObservabilityTools(draft, {
             options,
             storage: ctx.storage,
@@ -243,8 +259,9 @@ export const orchestratorPlugin = (Plugin.define as any)({
                 : []),
               ...(options.publish.enabled ? [PUBLICATION_POLICY_GUIDANCE] : []),
               ...(options.github.enabled || options.publish.enabled ? [terminalDriveGuidance(options)] : []),
-              "Use orchestrator_task_complexity_classify as advisory, user-overridable guidance only.",
-              "Use orchestrator_handoff_validate (callable, not an automatic gate) before using a worker handoff downstream.",
+               "Use orchestrator_task_complexity_classify as advisory, user-overridable guidance only.",
+               "Use orchestrator_verification_get after lead shell checks to discover bounded receipt IDs; pass those IDs, never caller-supplied pass labels, to lead validation.",
+               "Use orchestrator_handoff_validate (callable, not an automatic gate) before using a worker handoff downstream.",
               "Use orchestrator_admission_transition (stateless) to track admission state.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
               ...(options.review.mode === "bounded"

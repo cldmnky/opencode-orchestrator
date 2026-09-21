@@ -28,6 +28,8 @@ import {
 } from "../../src/opencode-v2/orchestration/lead-board.js"
 import { reviewStorageKey } from "../../src/opencode-v2/observability/review.js"
 import { goalStorageKey } from "../../src/opencode-v2/goal/state.js"
+import { verificationCommandDigest } from "../../src/core/verification.js"
+import { verificationStorageKey } from "../../src/opencode-v2/verification/state.js"
 
 const options = parseOptions({})
 
@@ -114,12 +116,21 @@ function memStorage(values = new Map<string, unknown>()): {
   get(key: string): Promise<unknown>
   set(key: string, value: unknown): Promise<void>
   remove(key: string): Promise<void>
+  scan(input: { prefix: string; after?: string; limit?: number }): Promise<{ entries: Array<{ key: string; value: unknown }>; next?: string }>
 } {
   return {
     values,
     get: async (key) => values.get(key),
     set: async (key, value) => void values.set(key, value),
     remove: async (key) => void values.delete(key),
+    scan: async ({ prefix, after, limit = 100 }) => {
+      const entries = [...values.entries()]
+        .filter(([key]) => key.startsWith(prefix) && (!after || key > after))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .slice(0, limit)
+        .map(([key, value]) => ({ key, value }))
+      return { entries }
+    },
   }
 }
 
@@ -984,7 +995,7 @@ describe("handoff_validate orchestrator level", () => {
     expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o5Foreign)?.detail).toContain("cross-task")
   })
 
-  test("blocks when required commands exist because the pinned API cannot re-run them", async () => {
+  test("blocks when required commands have no plugin-observed receipt", async () => {
     const tools = collect({ vcs: vcsReturning([{ file: "src/a.ts" }]) })
     const output = await tools
       .get("handoff_validate")!
@@ -1000,12 +1011,53 @@ describe("handoff_validate orchestrator level", () => {
         toolContext("session-1", "orchestrator"),
       )
     const result = parseResult(output.content)
-    // Worker-level C4 passes, but the orchestrator cannot re-run the command.
-    expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.c4Commands)?.verdict).toBe("pass")
+    // Caller-supplied D2 verification remains diagnostic; only an observed
+    // receipt can satisfy the orchestrator command check.
+    expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.c4Commands)?.verdict).toBe("blocked-unknown")
     expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o3Rerun)?.verdict).toBe("blocked-unknown")
     expect(result.verdict).toBe("blocked-unknown")
     expect(result.admissionState).toBe("blocked-unknown")
-    expect(result.limitations.some((limit) => limit.includes("independently re-run the required commands"))).toBe(true)
+    expect(result.limitations.some((limit) => limit.includes("plugin-observed shell receipts"))).toBe(true)
+  })
+
+  test("accepts a matching plugin-observed receipt and exact revision", async () => {
+    const values = new Map<string, unknown>()
+    const now = Date.now()
+    values.set(verificationStorageKey("project", "session-1", "receipt-1"), {
+      version: 1,
+      receiptID: "receipt-1",
+      rootSessionID: "session-1",
+      sessionID: "session-1",
+      agentID: "orchestrator",
+      messageID: "message-1",
+      commandDigest: verificationCommandDigest("bun test"),
+      commandLabel: "bun test",
+      status: "pass",
+      exitCode: 0,
+      startedAt: now - 100,
+      completedAt: now,
+      repository: { rootDigest: "c".repeat(64), headSha: "a".repeat(40) },
+    })
+    const tools = collect({ storage: memStorage(values), vcs: vcsReturning([{ file: "src/a.ts" }]) })
+    const output = await tools
+      .get("handoff_validate")!
+      .execute(
+        {
+          level: "orchestrator",
+          handoff: handoff({
+            filesChanged: [{ path: "src/a.ts", scope: "edited" }],
+            verification: [{ command: "bun test", status: "pass", result: "all good", evidence: ["src/a.ts"] }],
+          }),
+          contract: contract({ requiredCommands: ["bun test"] }),
+          receiptIDs: ["receipt-1"],
+          revision: "a".repeat(40),
+        },
+        toolContext("session-1", "orchestrator"),
+      )
+    const result = parseResult(output.content)
+    expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.c4Commands)?.verdict).toBe("pass")
+    expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o3Rerun)?.verdict).toBe("pass")
+    expect(result.verdict).toBe("pass")
   })
 
   test("blocks URL evidence claims for unauthenticatable authority and never claims proof from marker text", async () => {
@@ -1662,7 +1714,7 @@ describe("lead board tools", () => {
         boardTask({
           status: "awaiting-review",
           lifecycleVersion: 6,
-          validation: { leadSessionID: "session-1", validatedAt: 3, revision: HEAD_SHA, checkIDs: ["c1-structure:pass"] },
+          validation: { leadSessionID: "session-1", validatedAt: 3, revision: HEAD_SHA, checkIDs: ["c1-structure:pass"], receiptIDs: [] },
         }),
       ] as never,
     })

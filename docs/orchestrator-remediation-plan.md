@@ -9,7 +9,7 @@ items are checked only after their production behavior and tests are merged.
 - [x] Phase 0 contract-fixture documentation, state inventory, and fixture-presence tests.
 - [x] Phase 1 fresh temporary bundle for Phase A/D contract tests, verification scripts, CI workflow, and publish-tag ordering.
 - [x] Phase 2 capability vocabulary and initial claim/prompt alignment.
-- [ ] Phase 3 plugin-observed verification receipts (or documented host limitation).
+- [x] Phase 3 plugin-observed verification receipts and read-only receipt discovery.
 - [ ] Phase 4 reviewer-child provenance and review V2.
 - [ ] Phase 5 lead-board V2 and completion-chain migration.
 - [ ] Phase 6 runtime parallel dispatch admission (or documented host limitation).
@@ -19,9 +19,12 @@ items are checked only after their production behavior and tests are merged.
 - [ ] Phase 10 declarations, package API, and bundle cleanup.
 - [ ] Phase 11 final documentation and release verification.
 
-The current branch implements the first two foundational slices. Later status
-updates will record exact host-contract findings and any item that remains
-advisory because beta-19507 cannot provide the required provenance.
+The current branch implements the first three foundational slices. Phase 3
+measured the pinned beta-19507 shell hook, added bounded plugin-observed
+receipts, and replaced lead command-proof claims with exact-revision receipt
+matching. Later status updates will record exact host-contract findings and any
+item that remains advisory because beta-19507 cannot provide the required
+provenance.
 
 ## Purpose
 
@@ -333,12 +336,13 @@ Add tests that assert prohibited phrases do not appear when the backing capabili
 
 ### Progress
 
-Phase 2 introduces `src/core/capabilities.ts` and embeds one shared vocabulary
-in orchestration, worker, continuation, and command prompts. Current wording
-calls `max_parallel` guidance, V1 review identity recorded, and publication
-revision checks enforced. The GitHub guidance no longer contradicts the
-autonomous publication lifecycle. The complete claim cleanup remains coupled
-to the Phase 3–6 provenance work and will be updated as those phases land.
+Phase 2 introduced `src/core/capabilities.ts` and embedded one shared
+vocabulary in orchestration, worker, continuation, and command prompts. Current
+wording calls `max_parallel` guidance, plugin-observed lead command validation
+enforced, V1 review identity recorded, and publication revision checks
+enforced. The GitHub guidance no longer contradicts the autonomous publication
+lifecycle. The remaining claim cleanup is coupled to the Phase 4–6 provenance
+work and will be updated as those phases land.
 
 ---
 
@@ -375,7 +379,7 @@ If the contract probe succeeds, add:
 
 - `src/opencode-v2/verification/state.ts`
 - `src/opencode-v2/verification/runtime.ts`
-- `src/opencode-v2/verification/tools.ts` only if a read-only inspection tool is necessary
+- `src/opencode-v2/verification/tools.ts` for bounded read-only receipt-ID discovery
 
 Define a strict `VerificationReceiptV1` containing only bounded metadata:
 
@@ -442,6 +446,21 @@ Lead-board validation inputs must change from caller-supplied checks to receipt 
 - A successful receipt can be traced to one actual completed shell tool call without storing raw output.
 - Existing host shell permission remains the authority for allowing execution.
 - Unknown hook shapes fail closed and cannot fabricate a receipt.
+
+### Progress
+
+Phase 3 measured the native `shell` tool contract in
+`test/contract/phase-e-verification-hooks.test.ts` and documented it in
+`docs/contracts/verification-hook.md`. The runtime now observes paired
+`execute.before`/`execute.after` events, stores only redacted bounded metadata,
+reads Git `HEAD` after completion, rejects stale/moved/mismatched observations,
+and protects active-board receipt references during bounded eviction. Lead
+validation requires receipt IDs from `orchestrator_verification_get`, the
+configured orchestrator agent, the root lead session, the exact revision, the
+task lifecycle timestamp, and the 24-hour freshness bound. Caller-supplied
+`checks` remain diagnostic and cannot satisfy required commands. The pinned
+host exposed all required identity and exit-code fields, so no host limitation
+was recorded for this phase.
 
 ---
 

@@ -920,7 +920,7 @@ describe("remote orchestration policy", () => {
     expect(rules).toContain(VERTICAL_SLICE_GUIDANCE)
     expect(rules).toContain("Route by the configured semantic role map")
     expect(rules).toContain("safe delegation is allowed whenever isolation is not required")
-    expect(rules).toContain("Do not claim automated GitHub issue or pull request coordination")
+    expect(rules).toContain("Do not claim automated GitHub issue creation unless the connected host exposes the required tools")
     expect(Object.keys(DELEGATION_RULES)).toEqual(["planning", "research", "implementation", "review"])
     expect(DELEGATION_RULES.implementation.writes).toBe(true)
     expect(DELEGATION_RULES.review.writes).toBe(false)

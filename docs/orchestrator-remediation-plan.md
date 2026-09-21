@@ -8,7 +8,7 @@ items are checked only after their production behavior and tests are merged.
 - [x] Baseline fixtures restored and committed.
 - [x] Phase 0 contract-fixture documentation, state inventory, and fixture-presence tests.
 - [x] Phase 1 fresh temporary bundle for Phase A/D contract tests, verification scripts, CI workflow, and publish-tag ordering.
-- [ ] Phase 2 capability vocabulary and claim/prompt alignment.
+- [x] Phase 2 capability vocabulary and initial claim/prompt alignment.
 - [ ] Phase 3 plugin-observed verification receipts (or documented host limitation).
 - [ ] Phase 4 reviewer-child provenance and review V2.
 - [ ] Phase 5 lead-board V2 and completion-chain migration.
@@ -58,7 +58,7 @@ At the time this plan was written:
 - `max_parallel` is prompt guidance, not a runtime limit.
 - Lead-board command checks are supplied by the orchestrator as `{ id, verdict }` values. The plugin does not prove that the lead actually ran those commands.
 - Bounded review stores caller-supplied maker/checker identities. The plugin does not prove which child session produced the review.
-- `src/core/d4v2.ts` is tested but is not wired into a runtime tool or exported from the package entrypoint.
+- `src/core/d4v2.ts` is currently tested but is not wired into a runtime tool or exported from the package entrypoint; Phase 7 removes it.
 - `src/opencode-v2/session/state.ts` still contains a separate, unused `worktree/v1` model while runtime worktrees use `src/opencode-v2/worktree/state.ts` and `worktree/v2`.
 - The README refers to deleted assets and deleted narrative documentation.
 
@@ -330,6 +330,15 @@ Add tests that assert prohibited phrases do not appear when the backing capabili
 - Prompt variants no longer contradict one another.
 - Default configuration documentation clearly separates prompt policy from enforcement.
 - Policy text remains concise enough that existing readability tests pass.
+
+### Progress
+
+Phase 2 introduces `src/core/capabilities.ts` and embeds one shared vocabulary
+in orchestration, worker, continuation, and command prompts. Current wording
+calls `max_parallel` guidance, V1 review identity recorded, and publication
+revision checks enforced. The GitHub guidance no longer contradicts the
+autonomous publication lifecycle. The complete claim cleanup remains coupled
+to the Phase 3–6 provenance work and will be updated as those phases land.
 
 ---
 

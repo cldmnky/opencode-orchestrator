@@ -253,7 +253,14 @@ describe("phase B native worktree contract (pinned beta-19507)", () => {
         expect(updatedIds(probe, fixture)).toHaveLength(0)
 
         // A different project's inventory is disjoint, in both directions.
-        const otherInventory = await domain.list({ location: { directory: other.repo } })
+        // Location routing is asynchronous on the pinned embedded host. Give
+        // the first non-current location a bounded opportunity to settle before
+        // asserting its exact one-row inventory.
+        let otherInventory = await domain.list({ location: { directory: other.repo } })
+        for (let attempt = 0; attempt < 8 && otherInventory.length !== 1; attempt += 1) {
+          await settle(100)
+          otherInventory = await domain.list({ location: { directory: other.repo } })
+        }
         expect(otherInventory).toHaveLength(1)
         expect(otherInventory[0]?.directory).toBe(other.canonicalRepo)
         const fixtureInventory = await domain.list(at)

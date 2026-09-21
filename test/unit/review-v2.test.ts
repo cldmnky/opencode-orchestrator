@@ -3,6 +3,7 @@ import { parseOptions } from "../../src/core/config.js"
 import { REVIEW_SUBMIT_TOOL_PERMISSION } from "../../src/core/permissions.js"
 import { addObservabilityTools } from "../../src/opencode-v2/observability/tools.js"
 import { readReviewRecordV2 } from "../../src/opencode-v2/observability/runtime.js"
+import { createLeadBoardV2, leadBoardV2StorageKey, parseLeadBoardV2 } from "../../src/opencode-v2/orchestration/lead-board-v2.js"
 import {
   reviewV2RecordSchema,
   reviewV2StorageKey,
@@ -218,6 +219,107 @@ describe("review V2 model tools", () => {
     expect(output.record).not.toHaveProperty("maker")
     expect(output.record).not.toHaveProperty("checker")
     expect((await readReviewRecordV2(deps.storage, location, "lead"))?.state).toBe("approved")
+  })
+
+  test("review submission applies the host-derived decision to an awaiting V2 board task", async () => {
+    const values = new Map<string, unknown>()
+    const current = createLeadBoardV2({
+      projectID: "project",
+      leadSessionID: "lead",
+      goalGeneration: 1,
+      objective: "ship",
+      now: 1,
+    })
+    values.set(
+      leadBoardV2StorageKey(location, "lead"),
+      {
+        ...current,
+        tasks: [
+          {
+            ...current.tasks[0]!,
+            status: "awaiting-review",
+            lifecycleVersion: 2,
+            validation: {
+              actorSessionID: "lead",
+              validatedAt: 2,
+              revision: HEAD,
+              checkIDs: ["observed:pass"],
+              receiptIDs: ["receipt-1"],
+            },
+          },
+        ],
+      },
+    )
+    const { entries, deps } = collect(undefined, values)
+    const start = await entries.get("review_start").execute(
+      { taskId: "root", runId: "run-1", headSha: HEAD, baseSha: BASE },
+      { sessionID: "lead", agent: "orchestrator" },
+    )
+    expect(JSON.parse(start.content)).toMatchObject({ accepted: true, record: { state: "pending" } })
+
+    const submit = await entries.get("review_submit").execute(
+      { leadSessionID: "lead", round: 1, decision: { action: "approve", checks: { diff: true, scope: true, verification: true } } },
+      { sessionID: "review-child", agent: "reviewer" },
+    )
+    expect(JSON.parse(submit.content)).toMatchObject({ accepted: true, reason: "approval-complete" })
+    const updated = parseLeadBoardV2(values.get(leadBoardV2StorageKey(location, "lead")))
+    expect(updated?.tasks[0]?.status).toBe("completed")
+    expect(updated?.tasks[0]?.review).toMatchObject({
+      reference: "review/v2/root/run-1",
+      revision: HEAD,
+      baseRevision: BASE,
+      reviewVersion: 2,
+    })
+    expect((await readReviewRecordV2(deps.storage, location, "lead"))?.state).toBe("approved")
+  })
+
+  test("review persistence failure rolls back the board decision", async () => {
+    const values = new Map<string, unknown>()
+    const current = createLeadBoardV2({
+      projectID: "project",
+      leadSessionID: "lead",
+      goalGeneration: 1,
+      objective: "ship",
+      now: 1,
+    })
+    const boardKey = leadBoardV2StorageKey(location, "lead")
+    values.set(boardKey, {
+      ...current,
+      tasks: [{
+        ...current.tasks[0]!,
+        status: "awaiting-review",
+        lifecycleVersion: 2,
+        validation: {
+          actorSessionID: "lead",
+          validatedAt: 2,
+          revision: HEAD,
+          checkIDs: ["observed:pass"],
+          receiptIDs: ["receipt-1"],
+        },
+      }],
+    })
+    const { entries, deps } = collect(undefined, values)
+    await entries.get("review_start").execute(
+      { taskId: "root", runId: "run-1", headSha: HEAD, baseSha: BASE },
+      { sessionID: "lead", agent: "orchestrator" },
+    )
+    const originalSet = deps.storage.set
+    let failOnce = true
+    deps.storage.set = async (key, value) => {
+      if (failOnce && key === reviewV2StorageKey(location, "lead")) {
+        failOnce = false
+        throw new Error("simulated review storage failure")
+      }
+      await originalSet(key, value)
+    }
+
+    const submit = await entries.get("review_submit").execute(
+      { leadSessionID: "lead", round: 1, decision: { action: "approve", checks: { diff: true, scope: true, verification: true } } },
+      { sessionID: "review-child", agent: "reviewer" },
+    )
+    expect(JSON.parse(submit.content)).toMatchObject({ accepted: false, message: expect.stringContaining("rolled back") })
+    expect(parseLeadBoardV2(values.get(boardKey))?.tasks[0]?.status).toBe("awaiting-review")
+    expect((await readReviewRecordV2(deps.storage, location, "lead"))?.state).toBe("pending")
   })
 
   test("orchestrator self-approval and unrelated sessions are refused", async () => {

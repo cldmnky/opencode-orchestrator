@@ -14,20 +14,20 @@ import {
   writeStepRecord,
 } from "../orchestration/step-state.js"
 import {
-  hydrateLeadBoard,
-  leadBoardStorageKey,
-  leadTaskPacketText,
+  hydrateLeadBoardV2,
+  leadBoardV2StorageKey,
+  leadTaskPacketTextV2,
   leadTaskStepIdempotencyKey,
-  parseLeadBoard,
-  reconcileLeadBoard,
-  releaseLeadReservation,
-  removeLeadBoard,
-  reserveNextLeadTask,
-  transitionLeadTask,
-  writeLeadBoard,
-  type LeadBoard,
+  parseLeadBoardV2,
+  reconcileLeadBoardV2,
+  releaseLeadReservationV2,
+  removeLeadBoardV2,
+  reserveNextLeadTaskV2,
+  transitionLeadTaskV2,
+  writeLeadBoardV2,
+  type LeadBoardV2 as LeadBoard,
   type LeadStepObservation,
-} from "../orchestration/lead-board.js"
+} from "../orchestration/lead-board-v2.js"
 import {
   goalStorageKey,
   readAutomationStop,
@@ -114,7 +114,7 @@ export function startGoalContinuation(
           context.storage.remove(goalStorageKey(keyedLocation, sessionID)),
           context.storage.remove(runStorageKey(keyedLocation, sessionID)),
           context.storage.remove(stopStorageKey(keyedLocation, sessionID)),
-          removeLeadBoard(context.storage, keyedLocation, sessionID),
+          removeLeadBoardV2(context.storage, keyedLocation, sessionID),
           removeSessionSteps(context.storage, keyedLocation, sessionID),
         ])
       })
@@ -212,8 +212,8 @@ export function startGoalContinuation(
         return undefined
       }
 
-      const hydration = await hydrateLeadBoard(context.storage, context.location, sessionID, { goalGeneration: goal.createdAt })
-      if (hydration.status === "unavailable") {
+      const hydration = await hydrateLeadBoardV2(context.storage, context.location, sessionID, { goalGeneration: goal.createdAt })
+      if (hydration.status === "unavailable" || hydration.status === "legacy") {
         // Malformed or identity-mismatched board: never overwrite, never
         // dispatch. Recovery requires explicit lead/goal action.
         console.warn(`opencode-orchestrator lead board unavailable for ${sessionID}: ${hydration.warning ?? "unknown"}`)
@@ -258,18 +258,18 @@ export function startGoalContinuation(
       let working = reconciled.board
       if (reconciled.changed) {
         try {
-          working = await writeLeadBoard(context.storage, keyedLocation, working)
+          working = await writeLeadBoardV2(context.storage, keyedLocation, working)
         } catch (error) {
           console.warn(`opencode-orchestrator lead board recovery write failed for ${sessionID}`, error)
           return undefined
         }
       }
 
-      const selection = reserveNextLeadTask(working, { stepIndex: goal.continuationCount + 1, now })
+      const selection = reserveNextLeadTaskV2(working, { stepIndex: goal.continuationCount + 1, now })
       if (!selection.reservation) {
         if (selection.board !== working) {
           try {
-            await writeLeadBoard(context.storage, keyedLocation, selection.board)
+            await writeLeadBoardV2(context.storage, keyedLocation, selection.board)
           } catch (error) {
             console.warn(`opencode-orchestrator lead board promotion write failed for ${sessionID}`, error)
           }
@@ -298,7 +298,7 @@ export function startGoalContinuation(
         return undefined
       }
       try {
-        await writeLeadBoard(context.storage, keyedLocation, selection.board)
+        await writeLeadBoardV2(context.storage, keyedLocation, selection.board)
       } catch (error) {
         console.warn(`opencode-orchestrator lead board reservation write failed for ${sessionID}`, error)
         await removeStepRecord(context.storage, keyedLocation, sessionID, selection.reservation.stepIndex).catch(() => undefined)
@@ -314,7 +314,7 @@ export function startGoalContinuation(
         await context.storage.set(key, nextGoal)
       } catch (error) {
         console.warn(`opencode-orchestrator goal reservation write failed for ${sessionID}`, error)
-        await writeLeadBoard(context.storage, keyedLocation, working).catch(() => undefined)
+        await writeLeadBoardV2(context.storage, keyedLocation, working).catch(() => undefined)
         await removeStepRecord(context.storage, keyedLocation, sessionID, selection.reservation.stepIndex).catch(() => undefined)
         return undefined
       }
@@ -326,7 +326,7 @@ export function startGoalContinuation(
         stepIndex: selection.reservation.stepIndex,
         lifecycleVersion: selectionTask.lifecycleVersion,
         boardRevision: selection.board.boardRevision,
-        packet: leadTaskPacketText(selectionTask),
+        packet: leadTaskPacketTextV2(selectionTask),
       }
     })
     if (!reserved || controller.signal.aborted) return
@@ -394,17 +394,17 @@ export function startGoalContinuation(
       await withSessionLock(context.location, sessionID, async () => {
         await markStepDispatched(context.storage, keyedLocation, sessionID, reserved.stepIndex)
         if (reserved.kind === "board") {
-          const latest = parseLeadBoard(await context.storage.get(leadBoardStorageKey(keyedLocation, sessionID)))
+          const latest = parseLeadBoardV2(await context.storage.get(leadBoardV2StorageKey(keyedLocation, sessionID)))
           const task = latest?.tasks.find((candidate) => candidate.taskID === reserved.taskID)
           if (!latest || !task || task.status !== "reserved" || task.lifecycleVersion !== reserved.lifecycleVersion) return
-          const delivered = transitionLeadTask({
+          const delivered = transitionLeadTaskV2({
             board: latest,
             taskID: reserved.taskID,
             expectedVersion: task.lifecycleVersion,
             actorSessionID: sessionID,
             action: "deliver",
           })
-          if (delivered.ok) await writeLeadBoard(context.storage, keyedLocation, delivered.board)
+          if (delivered.ok) await writeLeadBoardV2(context.storage, keyedLocation, delivered.board)
         }
       })
     } catch (error) {
@@ -431,7 +431,7 @@ export function startGoalContinuation(
       observations.set(task.taskID, await observeTaskStep(board, task.taskID, task.attempt, task.stepIndex, sessionID, keyedLocation))
     }
     const liveStepIndex = lastDispatched.get(sessionID)
-    const result = reconcileLeadBoard(board, {
+    const result = reconcileLeadBoardV2(board, {
       observations,
       ...(liveStepIndex !== undefined ? { liveStepIndex } : {}),
     })
@@ -474,7 +474,7 @@ export function startGoalContinuation(
     keyedLocation: LocationLike,
     sessionID: string,
   ): Promise<boolean> {
-    const latest = parseLeadBoard(await context.storage.get(leadBoardStorageKey(keyedLocation, sessionID)))
+    const latest = parseLeadBoardV2(await context.storage.get(leadBoardV2StorageKey(keyedLocation, sessionID)))
     if (!latest || latest.status !== "active") return false
     const task = latest.tasks.find((candidate) => candidate.taskID === reserved.taskID)
     if (
@@ -498,9 +498,9 @@ export function startGoalContinuation(
   ): Promise<void> {
     try {
       await withSessionLock(context.location, sessionID, async () => {
-        const latest = parseLeadBoard(await context.storage.get(leadBoardStorageKey(keyedLocation, sessionID)))
+        const latest = parseLeadBoardV2(await context.storage.get(leadBoardV2StorageKey(keyedLocation, sessionID)))
         if (!latest) return
-        const released = releaseLeadReservation({
+        const released = releaseLeadReservationV2({
           board: latest,
           taskID: reserved.taskID,
           expectedLifecycleVersion: reserved.lifecycleVersion,
@@ -508,7 +508,7 @@ export function startGoalContinuation(
           reason,
         })
         if (!released.ok) return
-        await writeLeadBoard(context.storage, keyedLocation, released.board)
+        await writeLeadBoardV2(context.storage, keyedLocation, released.board)
         // The reservation never delivered, so its pending receipt is an
         // orphan: remove it best-effort. A failure leaves a bounded receipt
         // that no task links to (it is never read for resume).
@@ -524,10 +524,10 @@ export function startGoalContinuation(
   async function markBoardDeliveryUnknown(reserved: BoardReservation, keyedLocation: LocationLike, sessionID: string): Promise<void> {
     try {
       await withSessionLock(context.location, sessionID, async () => {
-        const latest = parseLeadBoard(await context.storage.get(leadBoardStorageKey(keyedLocation, sessionID)))
+        const latest = parseLeadBoardV2(await context.storage.get(leadBoardV2StorageKey(keyedLocation, sessionID)))
         const task = latest?.tasks.find((candidate) => candidate.taskID === reserved.taskID)
         if (!latest || !task || task.status !== "reserved" || task.lifecycleVersion !== reserved.lifecycleVersion) return
-        const ambiguous = transitionLeadTask({
+        const ambiguous = transitionLeadTaskV2({
           board: latest,
           taskID: reserved.taskID,
           expectedVersion: task.lifecycleVersion,
@@ -535,7 +535,7 @@ export function startGoalContinuation(
           action: "ambiguous",
           note: "prompt delivery outcome unknown",
         })
-        if (ambiguous.ok) await writeLeadBoard(context.storage, keyedLocation, ambiguous.board)
+        if (ambiguous.ok) await writeLeadBoardV2(context.storage, keyedLocation, ambiguous.board)
       })
     } catch (error) {
       console.warn(`opencode-orchestrator lead board ambiguity write failed for ${sessionID}`, error)

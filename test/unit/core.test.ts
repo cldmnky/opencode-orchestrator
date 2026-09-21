@@ -517,10 +517,10 @@ describe("prompts", () => {
     expect(system).toContain("Bounded review mode is configured")
     expect(system).toContain("orchestrator_review_start")
     expect(system).toContain("orchestrator_review_submit")
-    expect(system).toContain("Reach admission state review-pending")
+    expect(system).toContain("no separate admission transition call is required")
     expect(system).toContain("stop-between-steps budget mode is configured")
     expect(system).toContain("in-flight provider and tool calls are never interrupted")
-    expect(system).toContain("not an automatic completion gate")
+    expect(system).toContain("The review tools are callable")
 
     const command = buildCommandPrompt("orchestrate", "scope", bounded)
     expect(command).toContain("orchestrator_review_start")
@@ -531,7 +531,7 @@ describe("prompts", () => {
     expect(continuation).toContain("orchestrator_review_submit")
     expect(continuation).toContain("Bounded review mode is configured")
     expect(continuation).toContain("stop-between-steps budget mode is configured")
-    expect(continuation).not.toContain("automatic gate is enforced")
+    expect(continuation).toContain("board completion and publication still fail closed")
 
     // Default continuation and command prompts carry none of the guidance.
     const plainContinuation = buildContinuationPrompt("objective", 1)

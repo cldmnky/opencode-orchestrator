@@ -219,9 +219,10 @@ export function buildCommandPrompt(name: string, argumentsText: string, options?
  */
 const LEAD_BOARD_OPERATING_GUIDANCE = [
   "The lead board is the durable task ledger for this goal generation.",
-  "Work the task in the packet above, then report bounded evidence with orchestrator_lead_board_transition; a delivered prompt, an idle edge, or a step receipt never completes a task.",
+  "Work the task in the packet above, then use report-task with bounded evidence; a delivered prompt, an idle edge, or a step receipt never completes a task.",
   "A worker handoff is a report until you validate it: call orchestrator_handoff_validate on the unchanged D2 envelope first.",
-  "Then rerun the required checks yourself and record bounded results, revision, and redacted refs with the validate action.",
+  "Then rerun the required checks yourself and use validate-task with receipt IDs, revision, and bounded redacted refs.",
+  "Start review directly with orchestrator_review_start after validation; the plugin applies the legal review-pending transition without a separate admission call.",
   "Completion additionally requires an approved exact-revision review for the same revision; pass expectedVersion (the task lifecycle version) on every transition.",
   "If an external outcome is unknowable, mark the task ambiguous instead of retrying; resume only from a lead-validated cursor.",
   "Scope packets are advisory: they are not filesystem isolation, permissions, or a worktree binding.",

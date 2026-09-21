@@ -25,14 +25,17 @@ import {
 } from "../goal/state.js"
 import { publicationStatus, setPublicationEnabled, type PublicationStatusView } from "../publish/state.js"
 import {
-  createLeadBoard,
-  leadBoardKeyedLocation,
-  leadBoardStorageKey,
-  parseLeadBoard,
-  pauseLeadBoard,
-  resumeLeadBoard,
-  writeLeadBoard,
-} from "../orchestration/lead-board.js"
+  createLeadBoardV2,
+  hydrateLeadBoardV2,
+  leadBoardV2KeyedLocation,
+  leadBoardV2StorageKey,
+  migrateLeadBoardV1Storage,
+  parseLeadBoardV2,
+  pauseLeadBoardV2,
+  removeLeadBoardV2,
+  resumeLeadBoardV2,
+  writeLeadBoardV2,
+} from "../orchestration/lead-board-v2.js"
 import {
   clearGates,
   gateChangeMessage,
@@ -633,28 +636,35 @@ async function ensureBoardForGoal(
   sessionID: string,
   goal: GoalRecord,
 ): Promise<{ boardID: string } | undefined> {
-  const keyedLocation = await leadBoardKeyedLocation(context.storage, context.location, sessionID)
-  const key = leadBoardStorageKey(keyedLocation, sessionID)
-  const existing = parseLeadBoard(await context.storage.get(key))
-  if (existing && existing.goalGeneration === goal.createdAt) return undefined
-  const board = createLeadBoard({
+  const keyedLocation = await leadBoardV2KeyedLocation(context.storage, context.location, sessionID)
+  const hydration = await hydrateLeadBoardV2(context.storage, context.location, sessionID)
+  if (hydration.status === "unavailable") {
+    throw new Error(hydration.warning ?? "the lead board is unavailable")
+  }
+  if (hydration.status === "ok" && hydration.board?.goalGeneration === goal.createdAt) return undefined
+  if (hydration.status === "legacy" && hydration.board?.goalGeneration === goal.createdAt) {
+    const migrated = await migrateLeadBoardV1Storage(context.storage, context.location, sessionID, { goalGeneration: goal.createdAt })
+    if (migrated.status !== "migrated" || !migrated.board) throw new Error(migrated.message)
+    return { boardID: migrated.board.boardID }
+  }
+  const board = createLeadBoardV2({
     projectID: keyedLocation.project.id,
     leadSessionID: sessionID,
     goalGeneration: goal.createdAt,
     objective: goal.objective,
   })
-  await writeLeadBoard(context.storage, keyedLocation, board)
+  await writeLeadBoardV2(context.storage, keyedLocation, board)
   return { boardID: board.boardID }
 }
 
 async function setBoardPaused(context: Context, sessionID: string, paused: boolean): Promise<void> {
   try {
-    const keyedLocation = await leadBoardKeyedLocation(context.storage, context.location, sessionID)
-    const key = leadBoardStorageKey(keyedLocation, sessionID)
-    const board = parseLeadBoard(await context.storage.get(key))
+    const keyedLocation = await leadBoardV2KeyedLocation(context.storage, context.location, sessionID)
+    const key = leadBoardV2StorageKey(keyedLocation, sessionID)
+    const board = parseLeadBoardV2(await context.storage.get(key))
     if (!board || board.status === "complete") return
-    const next = paused ? pauseLeadBoard(board) : resumeLeadBoard(board)
-    if (next !== board) await writeLeadBoard(context.storage, keyedLocation, next)
+    const next = paused ? pauseLeadBoardV2(board) : resumeLeadBoardV2(board)
+    if (next !== board) await writeLeadBoardV2(context.storage, keyedLocation, next)
   } catch (error) {
     console.warn(`opencode-orchestrator could not update the lead board pause state for ${sessionID}`, error)
   }
@@ -662,8 +672,7 @@ async function setBoardPaused(context: Context, sessionID: string, paused: boole
 
 async function removeBoardForSession(context: Context, sessionID: string): Promise<void> {
   try {
-    const keyedLocation = await leadBoardKeyedLocation(context.storage, context.location, sessionID)
-    await context.storage.remove(leadBoardStorageKey(keyedLocation, sessionID))
+    await removeLeadBoardV2(context.storage, context.location, sessionID)
   } catch (error) {
     console.warn(`opencode-orchestrator could not remove the lead board for ${sessionID}`, error)
   }

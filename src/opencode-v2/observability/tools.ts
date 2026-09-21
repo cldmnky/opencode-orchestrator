@@ -9,7 +9,7 @@
 import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 import type { OrchestratorOptions } from "../../core/config.js"
 import { OBSERVABILITY_TOOL_PERMISSION, REVIEW_SUBMIT_TOOL_PERMISSION } from "../../core/permissions.js"
-import { withSessionLock, type LocationLike, type StorageLike } from "../goal/state.js"
+import { stableProjectID, withSessionLock, type LocationLike, type StorageLike } from "../goal/state.js"
 import { readReviewRecord, readReviewRecordV2, setReviewRecordV2 } from "./runtime.js"
 import {
   REVIEW_V2_CHECK_KEYS,
@@ -17,7 +17,13 @@ import {
   reviewV2SubmitInputSchema,
   startReviewV2,
   submitReviewV2,
+  reviewV2StorageKey,
 } from "./review-v2.js"
+import {
+  hydrateLeadBoardV2,
+  transitionLeadTaskV2,
+  writeLeadBoardV2,
+} from "../orchestration/lead-board-v2.js"
 
 type ToolDraftLike = {
   add(tool: ToolInfo<any, undefined>): void
@@ -115,6 +121,8 @@ export function addObservabilityTools(draft: ToolDraftLike, deps: ObservabilityT
       if (!parsed.success) return transitionResult({ accepted: false, reason: "invalid-signal", message: "review_start requires taskId, runId, and a full exact head/base SHA pair", requiresHuman: false, terminal: false })
       const leadSessionID = tool.sessionID
       const transition = await withSessionLock(deps.location, leadSessionID, async () => {
+        const boardCheck = await validateReviewStartBoard(deps, leadSessionID, parsed.data)
+        if (boardCheck) return { accepted: false, reason: "invalid-signal" as const, message: boardCheck, requiresHuman: false, terminal: false }
         const current = await readReviewRecordV2(deps.storage, deps.location, leadSessionID)
         const result = startReviewV2({
           ...parsed.data,
@@ -148,6 +156,9 @@ export function addObservabilityTools(draft: ToolDraftLike, deps: ObservabilityT
       }
       const transition = await withSessionLock(deps.location, parsed.data.leadSessionID, async () => {
         const current = await readReviewRecordV2(deps.storage, deps.location, parsed.data.leadSessionID)
+        const projectID = await stableProjectID(deps.storage, deps.location, parsed.data.leadSessionID)
+        const reviewKey = reviewV2StorageKey({ project: { id: projectID } }, parsed.data.leadSessionID)
+        const previousReviewValue = await deps.storage.get(reviewKey)
         const result = submitReviewV2({
           record: current,
           leadSessionID: parsed.data.leadSessionID,
@@ -159,12 +170,146 @@ export function addObservabilityTools(draft: ToolDraftLike, deps: ObservabilityT
           isChildSession: child,
           decision: parsed.data.decision,
         })
-        if (result.accepted && result.record) await setReviewRecordV2(deps.storage, deps.location, parsed.data.leadSessionID, result.record)
+        if (result.accepted && result.record) {
+          if (result.record.state === "pending") {
+            return { accepted: false, reason: "invalid-signal" as const, message: "review submission did not produce a bounded decision", requiresHuman: false, terminal: false }
+          }
+          const decisionRecord = result.record as unknown as {
+            taskId: string
+            runId: string
+            state: "approved" | "changes-requested" | "blocked" | "tripped"
+            headSha: string
+            baseSha: string
+            updatedAt: number
+          }
+          const boardResult = await applyReviewDecisionToBoard(deps, parsed.data.leadSessionID, decisionRecord)
+          if (!boardResult.ok) {
+            return { accepted: false, reason: "invalid-signal" as const, message: boardResult.message, requiresHuman: false, terminal: false }
+          }
+          try {
+            await setReviewRecordV2(deps.storage, deps.location, parsed.data.leadSessionID, result.record)
+          } catch {
+            const boardRestored = boardResult.boardKey === undefined
+              ? true
+              : await restoreStorageValue(deps.storage, boardResult.boardKey, boardResult.previousBoardValue)
+            const reviewRestored = await restoreStorageValue(deps.storage, reviewKey, previousReviewValue)
+            return {
+              accepted: false,
+              reason: "invalid-signal" as const,
+              message: boardRestored && reviewRestored
+                ? "review submission could not be persisted; the board decision was rolled back"
+                : "review submission persistence failed and rollback was incomplete; repair the review and lead-board records before retrying",
+              requiresHuman: false,
+              terminal: false,
+            }
+          }
+          if (boardResult.message) result.message = `${result.message} ${boardResult.message}`
+        }
         return result
       })
       return transitionResult(transition)
     },
   })
+}
+
+/**
+ * When a V2 board is present, review start is also the board's intent-level
+ * review admission. The old standalone review surface remains usable for
+ * migration/status tests and for sessions that have not enrolled a board.
+ */
+async function validateReviewStartBoard(
+  deps: ObservabilityToolsDeps,
+  leadSessionID: string,
+  input: { taskId: string; headSha: string },
+): Promise<string | undefined> {
+  const hydration = await hydrateLeadBoardV2(deps.storage, deps.location, leadSessionID)
+  if (hydration.status === "missing") return undefined
+  if (hydration.status === "legacy") return "review start requires an explicitly migrated V2 lead board"
+  if (hydration.status !== "ok" || !hydration.board) return hydration.warning ?? "review start requires a readable V2 lead board"
+  const task = hydration.board.tasks.find((candidate) => candidate.taskID === input.taskId)
+  if (!task) return `review start refused: no board task ${input.taskId} exists`
+  if (task.status !== "awaiting-review") return `review start refused: task ${input.taskId} is ${task.status}, not awaiting-review`
+  if (!task.validation || task.validation.revision !== input.headSha) {
+    return "review start refused: the task has no observed validation at the exact requested head revision"
+  }
+  return undefined
+}
+
+type BoardDecisionResult =
+  | { ok: true; message?: string; boardKey?: string; previousBoardValue?: unknown }
+  | { ok: false; message: string }
+
+/** Apply the reviewer intent to the V2 task ledger without exposing a generic transition edge. */
+async function applyReviewDecisionToBoard(
+  deps: ObservabilityToolsDeps,
+  leadSessionID: string,
+  record: {
+    taskId: string
+    runId: string
+    state: "approved" | "changes-requested" | "blocked" | "tripped"
+    headSha: string
+    baseSha: string
+    updatedAt: number
+  },
+): Promise<BoardDecisionResult> {
+  const hydration = await hydrateLeadBoardV2(deps.storage, deps.location, leadSessionID)
+  if (hydration.status === "missing") return { ok: true }
+  if (hydration.status === "legacy") return { ok: false, message: "review decision refused: migrate the V1 lead board before submitting V2 review" }
+  if (hydration.status !== "ok" || !hydration.board) return { ok: false, message: hydration.warning ?? "review decision refused: V2 lead board is unavailable" }
+  const task = hydration.board.tasks.find((candidate) => candidate.taskID === record.taskId)
+  if (!task) return { ok: false, message: `review decision refused: no board task ${record.taskId} exists` }
+  if (task.status !== "awaiting-review") return { ok: false, message: `review decision refused: task ${record.taskId} is ${task.status}, not awaiting-review` }
+  if (!task.validation || task.validation.revision !== record.headSha) {
+    return { ok: false, message: "review decision refused: task validation and reviewer head revision differ" }
+  }
+  const action = record.state === "approved" ? "complete" : record.state === "changes-requested" ? "request-changes" : "block"
+  const applied = transitionLeadTaskV2({
+    board: hydration.board,
+    taskID: task.taskID,
+    expectedVersion: task.lifecycleVersion,
+    actorSessionID: leadSessionID,
+    action,
+    ...(record.state === "approved"
+      ? {
+          review: {
+            reference: `review/v2/${record.taskId}/${record.runId}`,
+            revision: record.headSha,
+            baseRevision: record.baseSha,
+            approvedAt: record.updatedAt,
+            reviewVersion: 2 as const,
+          },
+        }
+      : { note: `reviewer submitted ${record.state}; lead intent transition applied` }),
+  })
+  if (!applied.ok) return { ok: false, message: `review decision refused: ${applied.message}` }
+  const previousBoardValue = await deps.storage.get(hydration.key)
+  try {
+    await writeLeadBoardV2(deps.storage, { ...deps.location, project: { id: hydration.board.projectID } }, applied.board)
+  } catch {
+    const restored = await restoreStorageValue(deps.storage, hydration.key, previousBoardValue)
+    return {
+      ok: false,
+      message: restored
+        ? "review decision refused: the V2 lead-board update could not be persisted"
+        : "review decision refused: the V2 lead-board update failed and rollback was incomplete",
+    }
+  }
+  return {
+    ok: true,
+    message: `lead board task ${record.taskId} is now ${applied.task.status}`,
+    boardKey: hydration.key,
+    previousBoardValue,
+  }
+}
+
+async function restoreStorageValue(storage: StorageLike, key: string, value: unknown): Promise<boolean> {
+  try {
+    if (value === undefined) await storage.remove(key)
+    else await storage.set(key, value)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function requireOrchestrator(agent: string, options: OrchestratorOptions): void {

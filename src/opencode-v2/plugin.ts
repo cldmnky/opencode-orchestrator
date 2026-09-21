@@ -12,6 +12,8 @@ import { addGatesTools } from "./gates/tools.js"
 import { gatesRpcDefinition, parseGatesGetInput, parseGatesSetInput } from "./gates/rpc.js"
 import { gateChangeMessage, gateStatuses, setGateDisabled } from "./gates/state.js"
 import { diagnosticsRpcDefinition } from "./diagnostics-rpc.js"
+import { parseProgressInput, progressRpcDefinition, unavailableProgressView } from "./progress/rpc.js"
+import { buildProgressView } from "./progress/status.js"
 import { createStateRpcHandlers, stateRpcDefinition } from "./state-rpc.js"
 import { countLegacyState } from "./state-recovery.js"
 import { addGhTools } from "./gh/tools.js"
@@ -239,6 +241,23 @@ export const orchestratorPlugin = (Plugin.define as any)({
               },
               tuiExport: { observable: true, available: true },
               legacyStateCount: await countLegacyState(ctx.storage),
+            }
+          },
+        }),
+      )
+
+      // Read-only progress for the CLI plugin.  The TUI is a separate plugin
+      // instance and must use this RPC rather than importing server storage or
+      // durable-state modules directly.
+      registrations.push(
+        await ctx.rpc.register(progressRpcDefinition, {
+          get: async (input) => {
+            const parsed = parseProgressInput(input)
+            if (!parsed) return unavailableProgressView("unknown", "sessionID is required")
+            try {
+              return await buildProgressView({ storage: ctx.storage, location: ctx.location, options, observability }, parsed.sessionID)
+            } catch {
+              return unavailableProgressView(parsed.sessionID, "progress state could not be assembled")
             }
           },
         }),

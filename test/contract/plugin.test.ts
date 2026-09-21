@@ -143,15 +143,18 @@ describe("server plugin contract", () => {
     // The gates command is orchestrator-only and carries no required argument.
     const gatesCommand = commands.find((command) => command.name === "gates")
     expect(gatesCommand).toBeDefined()
-    // The gates RPC surface is registered for the TUI picker and the bounded
-    // diagnostics RPC is registered for the live doctor; the model only gets
-    // the read-only gates tool.
-    expect(rpcRegistrations).toHaveLength(2)
+    // The gates RPC surface is registered for the TUI picker, the bounded
+    // diagnostics RPC is registered for the live doctor, and the bounded
+    // progress RPC is registered for the TUI sidebar/detail view; the model
+    // only gets the read-only gates tool.
+    expect(rpcRegistrations).toHaveLength(3)
     expect(rpcRegistrations[0]?.definition).toMatchObject({ id: "opencode-orchestrator.gates" })
     expect(typeof rpcRegistrations[0]?.handlers?.get).toBe("function")
     expect(typeof rpcRegistrations[0]?.handlers?.set).toBe("function")
     expect(rpcRegistrations[1]?.definition).toMatchObject({ id: "opencode-orchestrator.diagnostics" })
     expect(typeof rpcRegistrations[1]?.handlers?.get).toBe("function")
+    expect(rpcRegistrations[2]?.definition).toMatchObject({ id: "opencode-orchestrator.progress" })
+    expect(typeof rpcRegistrations[2]?.handlers?.get).toBe("function")
 
     // The tool transform registers the goal family plus the read-only
     // per-session gates surface and the orchestrator-only github, worktree,
@@ -282,6 +285,7 @@ describe("server plugin contract", () => {
     expect(disposed).toEqual([
       "execute.after",
       "session-hook",
+      "rpc",
       "rpc",
       "rpc",
       "tool",
@@ -427,12 +431,13 @@ describe("server plugin contract", () => {
     await cleanup?.()
     // Disposal order is reverse registration order: the worktree sync (inline
     // dispose, no named registration), the plugin's execute.after warn hook,
-    // the session hook, the diagnostics/gates RPCs, the tool/command/agent
+    // the session hook, the diagnostics/gates/progress RPCs, the tool/command/agent
     // transforms, and the observability runtime last (which disposes its
     // before/after hooks).
     expect(disposed).toEqual([
       "execute.after",
       "session-hook",
+      "rpc",
       "rpc",
       "rpc",
       "tool",
@@ -547,6 +552,7 @@ describe("server plugin contract", () => {
       "session:context",
       "rpc",
       "rpc",
+      "rpc",
       "tool",
       "command",
       "agent",
@@ -568,6 +574,7 @@ describe("server plugin contract", () => {
     expect(enforceHarness.disposed).toEqual([
       "execute.after",
       "session:context",
+      "rpc",
       "rpc",
       "rpc",
       "tool",
@@ -666,9 +673,10 @@ describe("server plugin contract", () => {
       "orchestrator_publish_policy_get",
       "orchestrator_status",
     ])
-    expect(rpcRegistrations).toHaveLength(2)
+    expect(rpcRegistrations).toHaveLength(3)
     expect((rpcRegistrations[0] as any)?.definition).toMatchObject({ id: "opencode-orchestrator.gates" })
     expect((rpcRegistrations[1] as any)?.definition).toMatchObject({ id: "opencode-orchestrator.diagnostics" })
+    expect((rpcRegistrations[2] as any)?.definition).toMatchObject({ id: "opencode-orchestrator.progress" })
 
     // The strict emphasis reaches the orchestrator and worker systems with the
     // pinned safety wording still intact, while disabled feature gates stay

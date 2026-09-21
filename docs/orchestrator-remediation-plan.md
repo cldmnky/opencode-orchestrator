@@ -15,7 +15,7 @@ items are checked only after their production behavior and tests are merged.
 - [x] Phase 6 runtime parallel dispatch admission (with documented beta-19507 completion limitation).
 - [x] Phase 7 model-visible surface reduction and D4 v2 removal.
 - [x] Phase 8 installer migration, live doctor, and state recovery.
-- [ ] Phase 9 read-only orchestration progress RPC/TUI.
+- [x] Phase 9 read-only orchestration progress RPC/TUI.
 - [ ] Phase 10 declarations, package API, and bundle cleanup.
 - [ ] Phase 11 final documentation and release verification.
 
@@ -1036,6 +1036,19 @@ Requirements:
 - The sidebar uses its existing `summaries` property with real RPC data.
 - The TUI never imports server storage modules.
 - No unbounded state crosses the RPC boundary.
+
+### Progress
+
+Phase 9 implementation is complete on the review branch. The server registers
+the read-only `opencode-orchestrator.progress` RPC and builds a bounded,
+redacted projection from goal, `lead-board/v2`, review, budget, worktree,
+publication, and gate state. The separate TUI plugin calls it through
+`context.client.rpc`, keeps summaries in an ephemeral reactive cache, refreshes
+on typed session completion/command events, and renders the existing sidebar
+summary plus a read-only progress detail dialog. Missing RPCs, malformed
+responses, missing state, and incomplete budget coverage remain visibly
+unknown. Contract/unit tests cover redaction, bounds, compatibility, refresh,
+and cleanup; see `docs/contracts/progress-rpc.md`.
 
 ---
 

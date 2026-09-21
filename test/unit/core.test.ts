@@ -13,7 +13,6 @@ import {
   BUDGET_GUIDANCE,
   CHILD_TASK_CONTRACT,
   CLARIFY_GUIDANCE,
-  D4_V2_COHERENCE_GUIDANCE,
   DELEGATION_GRAPH_GUIDANCE,
   DELEGATION_RULES,
   GITHUB_LIFECYCLE_GUIDANCE,
@@ -129,12 +128,9 @@ describe("configuration", () => {
       "orchestrate",
       "worker-models",
       "goal",
-      "restructure",
       "run-plan",
       "halt",
       "handover",
-      "polish",
-      "stress-plan",
       "publish",
       "gates",
     ])
@@ -186,7 +182,7 @@ describe("configuration", () => {
       max_parallel: 4,
       require_review: true,
       strict_agents: true,
-      commands: { polish: false, cd: true },
+      commands: { "run-plan": false, cd: true },
       goal: { auto_continue: false, max_continuations: 10, cooldown_ms: 250 },
       github: { enabled: true, allow_mutations: false },
       worktree: { enabled: true, allow_mutations: false, root: "/srv/worktrees" },
@@ -202,7 +198,7 @@ describe("configuration", () => {
     expect(prePhase2.authority).toEqual({ mode: "off" })
     expect(prePhase2.max_parallel).toBe(4)
     expect(prePhase2.review).toEqual({ mode: "bounded", max_rounds: 3 })
-    expect(prePhase2.commands.polish).toBe(false)
+    expect(prePhase2.commands["run-plan"]).toBe(false)
     expect(prePhase2.commands.cd).toBe(true)
     // An explicit MVP value is byte-for-byte the same parse as omitting the key.
     expect(parseOptions({ decomposition: { strategy: "mvp" } })).toEqual(parseOptions({}))
@@ -263,14 +259,12 @@ describe("prompts", () => {
     expect(prompt).toContain("directly")
   })
 
-  test("names only namespaced goal tools in system, command, and continuation prompts", () => {
+  test("names the canonical goal tool in system, command, and continuation prompts", () => {
     const system = buildOrchestratorSystem(parseOptions({}))
     const goal = buildCommandPrompt("goal", "pause")
     const continuation = buildContinuationPrompt("objective", 2)
     for (const prompt of [system, goal, continuation]) {
-      expect(prompt).toContain("orchestrator_goal_get")
-      expect(prompt).toContain("orchestrator_goal_set")
-      expect(prompt).toContain("orchestrator_goal_update")
+      expect(prompt).toContain("orchestrator_goal")
       expect(prompt).not.toMatch(/\bgoal_(get|set|update)\b/)
     }
   })
@@ -297,7 +291,7 @@ describe("prompts", () => {
         "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
       )
       expect(prompt, name).toContain("A slice is a coordination unit, never a permission or filesystem boundary")
-      expect(prompt, name).toContain("unknown coupling fails closed and serializes")
+      expect(prompt, name).toContain("unknown, broad, or overlapping scopes serialize")
       expect(prompt.split(VERTICAL_SLICE_GUIDANCE).length - 1, name).toBe(1)
     }
     // The worker role guidance prefers coherent slices over file-sized edits,
@@ -314,7 +308,7 @@ describe("prompts", () => {
     expect(worker).toContain(coupledFileRule)
   })
 
-  test("slice serialization rules cover overlap, unknown coupling, and disjoint parallelism", () => {
+  test("slice serialization rules cover overlap, unknown scopes, and disjoint parallelism", () => {
     const rules = orchestrationRules(4, true)
     expect(rules).toContain(
       "Require an exact disjoint write scope from every child before any parallel write; no two children may claim the same file or area.",
@@ -322,12 +316,12 @@ describe("prompts", () => {
     expect(rules).toContain(
       "Serialize implementation tasks when file ownership overlaps; parallelize writes only with explicit disjoint write scopes.",
     )
-    expect(rules).toContain("unknown coupling fails closed and serializes")
+    expect(rules).toContain("unknown, broad, or overlapping scopes serialize")
     expect(rules).toContain("never by concurrent overlapping writes")
     // The same fail-closed rules are restated to workers and continuations.
     for (const prompt of [buildWorkerSystem("implementation"), buildContinuationPrompt("objective", 2)]) {
       expect(prompt).toContain("never by concurrent overlapping writes")
-      expect(prompt).toContain("unknown coupling fails closed and serializes")
+      expect(prompt).toContain("unknown, broad, or overlapping scopes serialize")
     }
   })
 
@@ -372,11 +366,10 @@ describe("prompts", () => {
         "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
       )
       expect(after, name).toContain("A slice is a coordination unit, never a permission or filesystem boundary")
-      expect(after, name).toContain("unknown coupling fails closed and serializes")
+      expect(after, name).toContain("unknown, broad, or overlapping scopes serialize")
       expect(after.length, name).toBeGreaterThan(before.length)
-      // Prompt-preference only: no isolation or scheduling claim is added.
+      // Prompt-preference only: no isolation claim is added.
       expect(after, name).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
-      expect(after, name).not.toMatch(/scheduler|semaphore/i)
     }
   })
 
@@ -414,54 +407,6 @@ describe("prompts", () => {
     expect(featureSystem).toContain("Serialize implementation tasks when file ownership overlaps")
   })
 
-  test("additive D4 v2 coherence guidance reaches the same three prompt kinds and names the D2 flow-through question", () => {
-    // The pinned v1 slice guidance stays byte-identical: the additive v2 block
-    // is a separate constant appended after it, never a rewrite. No config
-    // option and no command prompt is added by this signal.
-    expect(VERTICAL_SLICE_GUIDANCE).not.toContain("D4 v2")
-    expect(verticalSliceGuidance()).toBe(VERTICAL_SLICE_GUIDANCE)
-    expect(verticalSliceGuidance("strict")).toBe(`${VERTICAL_SLICE_GUIDANCE}\n${STRICT_DECOMPOSITION_GUIDANCE}`)
-    expect(parseOptions({}).decomposition).toEqual({ strategy: "mvp" })
-
-    const kinds: Array<[string, string]> = [
-      ["orchestrator system", buildOrchestratorSystem(parseOptions({}))],
-      ["worker system", buildWorkerSystem("implementation")],
-      ["continuation", buildContinuationPrompt("objective", 1)],
-    ]
-    for (const [name, prompt] of kinds) {
-      expect(prompt.split(D4_V2_COHERENCE_GUIDANCE).length - 1, name).toBe(1)
-      expect(prompt, name).toContain("cohesive-slice")
-      expect(prompt, name).toContain("parallel-candidate")
-      expect(prompt, name).toContain("serializes")
-      expect(prompt, name).toContain("fail closed to collect-facts")
-      expect(prompt, name).toContain("D2 flow-through question (named upfront)")
-      expect(prompt, name).toContain("D2 v1 stays frozen")
-      expect(prompt, name).toContain("never changes handoff validation")
-      // The verbatim v1 safety lines survive next to the additive block.
-      expect(prompt, name).toContain(
-        "Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification — never by concurrent overlapping writes.",
-      )
-      expect(prompt, name).toContain("A slice is a coordination unit, never a permission or filesystem boundary")
-      // Advisory only: no isolation, scheduling, or automatic-enforcement claim.
-      expect(prompt, name).not.toMatch(/scheduler|semaphore/i)
-      expect(prompt, name).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
-    }
-
-    // Strict mode keeps the strict block appended after the byte-identical v1
-    // guidance, and the additive v2 block still appears exactly once.
-    const strictSystem = buildOrchestratorSystem(parseOptions({ decomposition: { strategy: "strict" } }))
-    expect(strictSystem).toContain(STRICT_DECOMPOSITION_GUIDANCE)
-    expect(strictSystem.split(D4_V2_COHERENCE_GUIDANCE).length - 1).toBe(1)
-    expect(strictSystem.indexOf(STRICT_DECOMPOSITION_GUIDANCE)).toBe(
-      strictSystem.indexOf(VERTICAL_SLICE_GUIDANCE) + VERTICAL_SLICE_GUIDANCE.length + 1,
-    )
-
-    // The signal never taxes every dispatch: command prompts stay unchanged.
-    for (const name of COMMAND_NAMES) {
-      expect(buildCommandPrompt(name, "scope")).not.toContain(D4_V2_COHERENCE_GUIDANCE)
-    }
-  })
-
   test("slice guidance never claims isolation or runtime concurrency enforcement", () => {
     expect(VERTICAL_SLICE_GUIDANCE).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
     expect(VERTICAL_SLICE_GUIDANCE).not.toMatch(/guarantee/i)
@@ -473,11 +418,10 @@ describe("prompts", () => {
       buildCommandPrompt("orchestrate", "scope"),
     ]) {
       // The advisory boundary caveats stay verbatim; a slice is never sold as
-      // a sandbox or a runtime scheduler.
+      // a sandbox or an isolation boundary.
       expect(prompt).toContain("Prompt-level rules are advisory and do not enforce filesystem isolation")
       expect(prompt).toContain("prompt-level disjoint write scopes do not equal filesystem isolation")
       expect(prompt).not.toMatch(/provid(?:e|ed).{0,40}isolat/i)
-      expect(prompt).not.toMatch(/scheduler|semaphore/i)
     }
   })
 
@@ -498,9 +442,8 @@ describe("prompts", () => {
       expect(STRUCTURED_HANDOFF_GUIDANCE).toContain(field)
     }
     expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("orchestrator_handoff_validate")
-    expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("orchestrator_task_complexity_classify")
     expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("callable/advisory, not automatic hooks")
-    expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("after collecting all eight structured facts")
+    expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("returned admission state is diagnostic")
   })
 
   test("renders complete command arguments", () => {
@@ -626,15 +569,15 @@ describe("prompts", () => {
 })
 
 describe("remote orchestration policy", () => {
-  const COMMAND_NAMES = [
+  const REMOTE_COMMAND_NAMES = [
     "orchestrate",
+    "worker-models",
     "goal",
-    "restructure",
     "run-plan",
     "halt",
     "handover",
-    "polish",
-    "stress-plan",
+    "publish",
+    "gates",
   ]
 
   // Universal guidance is asserted on the default (all-disabled) options;
@@ -651,7 +594,7 @@ describe("remote orchestration policy", () => {
       ["worker system", buildWorkerSystem("implementation", options)],
       ["continuation", buildContinuationPrompt("objective", 2, options)],
     ]
-    for (const name of COMMAND_NAMES) {
+    for (const name of REMOTE_COMMAND_NAMES) {
       prompts.push([`command ${name}`, buildCommandPrompt(name, "scope", options)])
     }
     return prompts
@@ -1023,7 +966,7 @@ describe("nested delegation policy", () => {
       ["worker implementation", buildWorkerSystem("implementation", DEFAULT)],
       ["worker review", buildWorkerSystem("review", DEFAULT)],
       ["continuation", buildContinuationPrompt("objective", 2, DEFAULT)],
-      ...["orchestrate", "goal", "restructure", "run-plan", "halt", "handover", "polish", "stress-plan"].map(
+        ...["orchestrate", "worker-models", "goal", "run-plan", "halt", "handover", "publish", "gates"].map(
         (name) => [`command ${name}`, buildCommandPrompt(name, "scope", DEFAULT)] as [string, string],
       ),
     ]
@@ -1077,7 +1020,7 @@ describe("nested delegation policy", () => {
 /**
  * G3 Phase 0 (docs/g3-communication-contract.md). The readability fixtures are
  * structural: one idea per line and no line over the 25-word plain-language
- * sentence budget, plus a precondition table proving the restructure kept
+ * sentence budget, plus a precondition table proving the communication
  * every fail-closed rule with the same meaning.
  */
 describe("G3 plain-language communication contract", () => {
@@ -1094,7 +1037,7 @@ describe("G3 plain-language communication contract", () => {
     return line.trim().split(/\s+/).filter(Boolean).length
   }
 
-  // Every restructured policy constant reads as short bullets: one rule per
+  // Every policy constant reads as short bullets: one rule per
   // line, and no line over the plain-language sentence budget. The pinned
   // safety phrases are preserved byte-for-byte inside these lines.
   const SHORT_BULLET_POLICY: Array<[string, string]> = [
@@ -1102,7 +1045,6 @@ describe("G3 plain-language communication contract", () => {
     ["DELEGATION_GRAPH_GUIDANCE", DELEGATION_GRAPH_GUIDANCE],
     ["VERTICAL_SLICE_GUIDANCE", VERTICAL_SLICE_GUIDANCE],
     ["STRICT_DECOMPOSITION_GUIDANCE", STRICT_DECOMPOSITION_GUIDANCE],
-    ["D4_V2_COHERENCE_GUIDANCE", D4_V2_COHERENCE_GUIDANCE],
     ["PROMPTING_POLICY_GUIDANCE", PROMPTING_POLICY_GUIDANCE],
     ["TOOL_AVAILABILITY_GUIDANCE", TOOL_AVAILABILITY_GUIDANCE],
     ["SECRET_HANDLING_GUIDANCE", SECRET_HANDLING_GUIDANCE],
@@ -1123,7 +1065,7 @@ describe("G3 plain-language communication contract", () => {
     ],
   ]
 
-  test("every restructured policy constant is a short-bullet list, not a dense sentence", () => {
+  test("every policy constant is a short-bullet list, not a dense sentence", () => {
     for (const [name, text] of SHORT_BULLET_POLICY) {
       for (const line of text.split("\n")) {
         expect(lineWords(line), `${name}: ${line}`).toBeLessThanOrEqual(SENTENCE_WORD_LIMIT)
@@ -1223,9 +1165,6 @@ describe("G3 plain-language communication contract", () => {
     for (const instruction of FORMER_DENSE_INSTRUCTIONS) {
       expect(composed).not.toContain(instruction)
     }
-    expect(buildCommandPrompt("restructure", "scope")).toContain(
-      "Execute the phases in order with behavior-preserving edits only.",
-    )
     expect(buildCommandPrompt("run-plan", "scope")).toContain("Delegate safe independent work only with disjoint write scopes.")
     expect(buildCommandPrompt("handover", "scope")).toContain("Then redact secrets.")
     expect(buildCommandPrompt("handover", "scope")).toContain("Then separate established facts from assumptions.")
@@ -1238,9 +1177,9 @@ describe("G3 plain-language communication contract", () => {
 
   // Fail-closed preconditions that must reach every prompt kind with the same
   // meaning. Phrases are the pinned safety wording; presence here is the
-  // test-enforced semantic-equivalence proof for the G3 restructure.
+  // test-enforced semantic-equivalence proof for the G3 communication contract.
   const UNIVERSAL_FAIL_CLOSED_PRECONDITIONS: Array<[string, string]> = [
-    ["unknown coupling fails closed", "unknown coupling fails closed and serializes"],
+    ["unknown declared scope fails closed", "unknown, broad, or overlapping scopes serialize"],
     ["no concurrent overlapping writes", "never by concurrent overlapping writes"],
     ["prompt scopes are advisory", "Prompt-level rules are advisory and do not enforce filesystem isolation"],
     ["scopes are not isolation", "prompt-level disjoint write scopes do not equal filesystem isolation"],
@@ -1287,7 +1226,7 @@ describe("G3 plain-language communication contract", () => {
     ["budget unknown fails closed", "Unknown token or cost observations fail closed"],
   ]
 
-  test("every fail-closed precondition survives the restructure with identical meaning", () => {
+  test("every fail-closed precondition keeps identical meaning", () => {
     const kinds: Array<[string, string]> = [
       ["orchestrator", buildOrchestratorSystem(ALL_FEATURES)],
       ["worker", buildWorkerSystem("implementation", ALL_FEATURES)],

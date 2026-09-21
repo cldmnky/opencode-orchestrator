@@ -11,7 +11,7 @@ import {
   type StorageLike,
   type GoalRecord,
 } from "./state.js"
-import { createLeadBoardV2, hydrateLeadBoardV2, writeLeadBoardV2 } from "../orchestration/lead-board-v2.js"
+import { createLeadBoardV2, hydrateLeadBoardV2, removeLeadBoardV2, writeLeadBoardV2 } from "../orchestration/lead-board-v2.js"
 import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 
 type ToolDraftLike = {
@@ -27,62 +27,57 @@ export function addGoalTools(
   options: OrchestratorOptions,
 ): void {
   draft.add({
-    name: "goal_get",
-    description: "Read the active orchestration goal for this session.",
-    input: emptyInput,
-    options: { namespace: "orchestrator", permission: GOAL_TOOL_PERMISSION },
-    execute: async (_input, tool) => {
-      requireOrchestrator(tool.agent, options)
-      const goal = await readGoal(storage, await goalKey(storage, location, tool.sessionID))
-      return result(goal ? JSON.stringify(goal) : "No active orchestration goal.")
-    },
-  })
-
-  draft.add({
-    name: "goal_set",
-    description: "Create or replace the active orchestration goal.",
-    input: setInput,
+    name: "goal",
+    description: "Get or mutate the current session goal with one strict action: get, set, pause, resume, complete, or clear.",
+    input: goalActionInput,
     options: { namespace: "orchestrator", permission: GOAL_TOOL_PERMISSION },
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, options)
-      return withSessionLock(location, tool.sessionID, async () => {
-        const objective = stringField(input, "objective")
-        if (!objective) return result("objective must be a non-empty string")
-        const goal = newGoal(tool.sessionID, objective)
-        const projectID = await stableProjectID(storage, location, tool.sessionID)
-        const stableLocation = stableLocationFor(projectID, location)
-        await storage.set(goalStorageKey(stableLocation, tool.sessionID), goal)
-        await storage.remove(stopStorageKey(stableLocation, tool.sessionID))
-        // A new goal generation enrolls its own deterministic lead board
-        // (same wiring as /goal set): new boardID, fresh idempotency keys, one
-        // planned root task. A board write failure leaves the goal on the
-        // legacy board-missing path, never a synthesized ledger.
-        try {
-          const hydration = await hydrateLeadBoardV2(storage, location, tool.sessionID)
-          if (hydration.status === "unavailable") return result(JSON.stringify(goal))
-          const board = createLeadBoardV2({
-            projectID,
-            leadSessionID: tool.sessionID,
-            goalGeneration: goal.createdAt,
-            objective: goal.objective,
-          })
-          await writeLeadBoardV2(storage, stableLocation, board)
-        } catch {
-          // Reported by the goal record itself; the board can be re-enrolled
-          // explicitly with orchestrator_lead_board_init.
-        }
-        return result(JSON.stringify(goal))
-      })
-    },
-  })
-
-  draft.add({
-    name: "goal_update",
-    description: "Pause, resume, or complete the active goal; completion requires evidence.",
-    input: updateInput,
-    options: { namespace: "orchestrator", permission: GOAL_TOOL_PERMISSION },
-    execute: async (input, tool) => {
-      requireOrchestrator(tool.agent, options)
+      const action = stringField(input, "action")
+      if (action === "get") {
+        const goal = await readGoal(storage, await goalKey(storage, location, tool.sessionID))
+        return result(goal ? JSON.stringify(goal) : "No active orchestration goal.")
+      }
+      if (action === "clear") {
+        return withSessionLock(location, tool.sessionID, async () => {
+          const projectID = await stableProjectID(storage, location, tool.sessionID)
+          const stableLocation = stableLocationFor(projectID, location)
+          await storage.remove(goalStorageKey(stableLocation, tool.sessionID))
+          await storage.remove(stopStorageKey(stableLocation, tool.sessionID))
+          await removeLeadBoardV2(storage, location, tool.sessionID)
+          return result("Orchestration goal cleared.")
+        })
+      }
+      if (action === "set") {
+        return withSessionLock(location, tool.sessionID, async () => {
+          const objective = stringField(input, "objective")
+          if (!objective) return result("objective must be a non-empty string")
+          const goal = newGoal(tool.sessionID, objective)
+          const projectID = await stableProjectID(storage, location, tool.sessionID)
+          const stableLocation = stableLocationFor(projectID, location)
+          await storage.set(goalStorageKey(stableLocation, tool.sessionID), goal)
+          await storage.remove(stopStorageKey(stableLocation, tool.sessionID))
+          try {
+            const hydration = await hydrateLeadBoardV2(storage, location, tool.sessionID)
+            if (hydration.status !== "unavailable") {
+              const board = createLeadBoardV2({
+                projectID,
+                leadSessionID: tool.sessionID,
+                goalGeneration: goal.createdAt,
+                objective: goal.objective,
+              })
+              await writeLeadBoardV2(storage, stableLocation, board)
+            }
+          } catch {
+            // The goal remains readable; board enrollment can be retried by a
+            // later set or the board action init operation.
+          }
+          return result(JSON.stringify(goal))
+        })
+      }
+      if (action !== "pause" && action !== "resume" && action !== "complete") {
+        return result("action must be get, set, pause, resume, complete, or clear")
+      }
       return withSessionLock(location, tool.sessionID, async () => {
         const projectID = await stableProjectID(storage, location, tool.sessionID)
         const stableLocation = stableLocationFor(projectID, location)
@@ -90,29 +85,26 @@ export function addGoalTools(
         const goal = await readGoal(storage, key)
         if (!goal) return result("No active orchestration goal.")
 
-        const status = stringField(input, "status")
-        if (status !== "active" && status !== "paused" && status !== "complete") {
-          return result("status must be active, paused, or complete")
-        }
+        const status = action === "pause" ? "paused" : action === "resume" ? "active" : "complete"
         const evidence = stringField(input, "evidence")
-        if (status === "complete" && evidence.length < 8) {
+        if (action === "complete" && evidence.length < 8) {
           return result("completion requires at least eight characters of evidence")
         }
         // A goal generation governed by a lead board cannot be bypassed: the
-        // board must reach `complete` through orchestrator_lead_board_complete
+        // board must reach `complete` through orchestrator_board_action
         // (all tasks completed + aggregate verification + approved
         // exact-revision review). A missing board keeps the legacy path; an
         // unavailable/malformed board fails closed.
-        if (status === "complete") {
+        if (action === "complete") {
           const hydration = await hydrateLeadBoardV2(storage, location, tool.sessionID, { goalGeneration: goal.createdAt })
           if (hydration.status === "unavailable") {
             return result("completion refused: the lead board is unavailable; repair or re-init it first")
           }
           if (hydration.status === "legacy") {
-            return result("completion refused: the lead board is still V1; migrate it with orchestrator_lead_board_init first")
+            return result("completion refused: the lead board is still V1; migrate it with orchestrator_board_action init first")
           }
           if (hydration.status === "ok" && hydration.board?.status !== "complete") {
-            return result("completion refused: complete the lead board with orchestrator_lead_board_complete first")
+            return result("completion refused: complete the lead board with orchestrator_board_action complete first")
           }
         }
 
@@ -122,7 +114,7 @@ export function addGoalTools(
           status,
           updatedAt: now,
         }
-        if (status === "complete") {
+        if (action === "complete") {
           updated.completedAt = now
           updated.completionEvidence = evidence
         } else {
@@ -162,27 +154,49 @@ function result(content: string): ToolResult {
   return { content }
 }
 
-const emptyInput = {
-  type: "object",
-  properties: {},
-  additionalProperties: false,
-} as const
-
-const setInput = {
-  type: "object",
-  properties: {
-    objective: { type: "string", minLength: 1 },
-  },
-  required: ["objective"],
-  additionalProperties: false,
-} as const
-
-const updateInput = {
-  type: "object",
-  properties: {
-    status: { type: "string", enum: ["active", "paused", "complete"] },
-    evidence: { type: "string" },
-  },
-  required: ["status"],
-  additionalProperties: false,
+const goalActionInput = {
+  oneOf: [
+    {
+      type: "object",
+      properties: { action: { const: "get" } },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        action: { const: "set" },
+        objective: { type: "string", minLength: 1 },
+      },
+      required: ["action", "objective"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { action: { const: "pause" } },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { action: { const: "resume" } },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        action: { const: "complete" },
+        evidence: { type: "string", minLength: 8 },
+      },
+      required: ["action", "evidence"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { action: { const: "clear" } },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  ],
 } as const

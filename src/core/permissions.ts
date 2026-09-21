@@ -2,7 +2,7 @@
  * Shared permission action for the namespaced orchestration goal tools.
  *
  * The goal tools are registered under the `orchestrator` namespace with
- * effective names like `orchestrator_goal_get`. Because V2 permission rules
+ * effective names like `orchestrator_goal`. Because V2 permission rules
  * match the full namespaced action, a deny-all rule (which the installer
  * writes for every agent) would hide them from the model. Declaring one
  * explicit `permission` action on every goal tool lets the installer and the
@@ -35,7 +35,7 @@ export const WORKTREE_TOOL_PERMISSION = "orchestrator_worktree"
  * discovery tools.
  *
  * `orchestrator_publish_policy_get` (publish family) and
- * `orchestrator_peer_list` (peer family) declare these explicit actions so a
+ * `orchestrator_status` (status family) declares this explicit action so a
  * single rule grants or revokes each family, while any exact user-authored
  * rule is respected. They are orchestrator-only (goal-style `allow`); worker
  * agents cannot see or invoke them unless the operator grants the action
@@ -75,8 +75,8 @@ export const REVIEW_SUBMIT_TOOL_PERMISSION = "orchestrator_review_submit"
 /**
  * Shared permission action for the serialized orchestration validation tools.
  *
- * The serialized runtime tools (task_complexity_classify, handoff_validate,
- * admission_transition) are registered under the `orchestrator` namespace and
+ * The serialized runtime tools (handoff_validate and the canonical board
+ * operations) are registered under the `orchestrator` namespace and
  * share this one explicit `permission` action so a single rule grants or
  * revokes the whole family. They are orchestrator-only: worker agents cannot
  * see or invoke them unless the operator grants the action explicitly. The

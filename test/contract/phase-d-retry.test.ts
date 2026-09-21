@@ -302,6 +302,7 @@ async function withProbeHost(
   try {
     host = await OpenCode.create({
       plugins: [...((options.plugins ?? []) as never[]), probe.plugin],
+      fs: { filewatcher: false },
       models: { fetch: false },
       database: { path: join(root, "database.sqlite") },
       config: { directory, content: probeConfig() },

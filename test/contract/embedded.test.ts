@@ -115,6 +115,7 @@ function createHost(directory: string, packageReference: string): Promise<Awaite
   return loadPlugin(packageReference, directory).then((plugin) =>
     OpenCode.create({
       plugins: [plugin],
+      fs: { filewatcher: false },
       config: {
         directory,
         content: JSON.stringify({

@@ -285,6 +285,7 @@ async function withProbeHost(
     (({ root: hostRoot, directory: hostDirectory }) =>
       OpenCode.create({
         plugins: [probe.plugin],
+        fs: { filewatcher: false },
         // Disable the models.dev catalog refresh so host startup makes no
         // external catalog request; the pinned bundled snapshot still
         // populates the catalog.

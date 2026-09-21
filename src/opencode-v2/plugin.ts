@@ -171,16 +171,15 @@ export const orchestratorPlugin = (Plugin.define as any)({
             session: ctx.session,
             moveCoordinator,
           })
-           addOrchestrationTools(draft, {
+          addOrchestrationTools(draft, {
             options,
             location: ctx.location,
             storage: ctx.storage,
             session: ctx.session,
             vcs: ctx.vcs,
-             generate: (input) => ctx.generate.text(input),
-           })
-           addVerificationTools(draft, { options, storage: ctx.storage, location: ctx.location, session: ctx.session })
-           addAuthorityTools(draft, { options, storage: ctx.storage, location: ctx.location })
+          })
+          addVerificationTools(draft, { options, storage: ctx.storage, location: ctx.location, session: ctx.session })
+          addAuthorityTools(draft, { options, storage: ctx.storage, location: ctx.location })
           addObservabilityTools(draft, {
             options,
             storage: ctx.storage,
@@ -228,10 +227,11 @@ export const orchestratorPlugin = (Plugin.define as any)({
               "A delegating worker stays accountable for its children, and research never delegates.",
               "Parallel writes require an exact disjoint write scope from every child.",
               "Separate established facts from assumptions.",
-              "Use orchestrator_goal_get, orchestrator_goal_set, and orchestrator_goal_update for session goal state.",
-              "Use orchestrator_lead_board_get, orchestrator_lead_board_init, orchestrator_lead_board_task_create, orchestrator_lead_board_task_assign, orchestrator_lead_board_transition, and orchestrator_lead_board_complete for the durable V2 lead board. Use intent actions report-task, validate-task, request-rework, mark-blocked, and reconcile-ambiguous; a delivered prompt never completes a task.",
+              "Use orchestrator_goal with get, set, pause, resume, complete, or clear actions for session goal state.",
+              "Use orchestrator_board_get and orchestrator_board_action for the durable lead board. Use action variants init, create-task, assign-task, transition, or complete; a delivered prompt never completes a task.",
+              "Use orchestrator_status with mode single and sessionID for one-session detail, or mode list for a bounded same-project session list.",
               ...(options.review.mode === "bounded"
-                ? ["After plugin-observed validation, start review directly with orchestrator_review_start; review start/submit apply legal board state internally and do not require orchestrator_admission_transition."]
+                ? ["After plugin-observed validation, start review directly with orchestrator_review_start; review start and submit apply the legal board state internally."]
                 : []),
               "Inspect or toggle the durable project-scoped publication capability with /publish (status|enable|disable).",
               "It is a capability toggle, not caller authentication.",
@@ -272,16 +272,14 @@ export const orchestratorPlugin = (Plugin.define as any)({
                 : []),
               ...(options.publish.enabled ? [PUBLICATION_POLICY_GUIDANCE] : []),
               ...(options.github.enabled || options.publish.enabled ? [terminalDriveGuidance(options)] : []),
-              "Use orchestrator_task_complexity_classify as advisory, user-overridable guidance only.",
               "Use orchestrator_verification_get after lead shell checks to discover bounded receipt IDs; pass those IDs, never caller-supplied pass labels, to lead validation.",
               "Use orchestrator_handoff_validate (callable, not an automatic gate) before using a worker handoff downstream.",
-              "Use orchestrator_admission_transition (stateless) to track admission state.",
               "Use the handoff format from the agent instructions and report direct verification evidence.",
               ...(options.review.mode === "bounded"
                 ? [
                     "Bounded review is enabled.",
                     "Use orchestrator_review_get and orchestrator_review_start from the lead; delegate the configured reviewer child and have it call orchestrator_review_submit.",
-                    "Review start and submit apply legal board state internally; no separate orchestrator_admission_transition call is required for the review flow.",
+                    "Review start and submit apply legal board state internally; no separate transition call is required for the review flow.",
                     "V2 submit derives reviewer agent/session identity from ToolContext; V1 records are legacy-unproven and never publication or completion proof.",
                     "Stop when the record is blocked or tripped.",
                   ]
@@ -299,12 +297,6 @@ export const orchestratorPlugin = (Plugin.define as any)({
                     "Runtime authority is in enforce mode: tagged plugin dispatches are checked before admission and configured-role children get tool-action containment.",
                     "Use orchestrator_authority_get (read-only) to inspect the recorded effective-authority snapshot for a session.",
                     "Snapshots never change admission decisions, and containment is not filesystem or process isolation.",
-                  ]
-                : []),
-              ...(options.hints.mode === "advisory"
-                ? [
-                    "Advisory generation hints are enabled: after a deterministic handoff pass, a bounded redacted hint may be attached to the handoff_validate result.",
-                    "Hints never change verdicts, admission states, or gates.",
                   ]
                 : []),
             ].join("\n"),

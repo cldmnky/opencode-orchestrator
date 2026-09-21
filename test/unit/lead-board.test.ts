@@ -380,6 +380,8 @@ describe("lead board DAG validation", () => {
     expect(
       createLeadTask(board, { taskID: "child", title: "x", owner: { sessionID: "lead", role: "lead" }, scope: normalizeScopePacket({}) }).ok,
     ).toBe(true)
+    const emptyScope = normalizeScopePacket({})
+    expect(emptyScope.ok && emptyScope.packet.broad).toBe(true)
   })
 })
 
@@ -406,6 +408,8 @@ describe("lead board scope overlap", () => {
   test("broad (or a '.' path) conflicts with every active write; unknown is conservative", () => {
     expect(scopesConflict(scope({ broad: true }), scope({ writePaths: ["anything"] }))).toBe(true)
     expect(scopesConflict(scope({ readPaths: ["."] }), scope({ writePaths: ["anything"] }))).toBe(true)
+    expect(scope({}).broad).toBe(true)
+    expect(scopesConflict(scope({}), scope({ readPaths: ["anything"] }))).toBe(true)
     expect(scope({ readPaths: ["."] }).broad).toBe(true)
   })
 })

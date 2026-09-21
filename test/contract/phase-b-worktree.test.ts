@@ -144,7 +144,7 @@ function makeRepo(label: string): Fixture {
   mkdirSync(repo, { recursive: true })
   mkdirSync(trees, { recursive: true })
   git(repo, ["init", "-q", "-b", "main"])
-  writeFileSync(join(repo, "README.md"), "# phase-b probe\n", "utf8")
+   writeFileSync(join(repo, "README.md"), `# phase-b probe ${label}\n`, "utf8")
   git(repo, ["add", "README.md"])
   git(repo, ["-c", "user.email=probe@example.invalid", "-c", "user.name=Phase B Probe", "commit", "-q", "-m", "init"])
   return { root, repo, trees, canonicalRepo: realpathSync(repo), canonicalRoot: realpathSync(root) }
@@ -171,6 +171,7 @@ async function withHost<T>(
   const probe = createWorktreeProbe()
   const host = await OpenCode.create({
     plugins: [probe.plugin],
+    fs: { filewatcher: false },
     config: { directory: fixture.repo, content: JSON.stringify({ agents: AGENTS }) },
   })
   try {

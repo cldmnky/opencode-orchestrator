@@ -13,13 +13,13 @@ items are checked only after their production behavior and tests are merged.
 - [x] Phase 4 reviewer-child provenance and review V2.
 - [x] Phase 5 lead-board V2 and completion-chain migration.
 - [x] Phase 6 runtime parallel dispatch admission (with documented beta-19507 completion limitation).
-- [ ] Phase 7 model-visible surface reduction and D4 v2 removal.
+- [x] Phase 7 model-visible surface reduction and D4 v2 removal.
 - [ ] Phase 8 installer migration, live doctor, and state recovery.
 - [ ] Phase 9 read-only orchestration progress RPC/TUI.
 - [ ] Phase 10 declarations, package API, and bundle cleanup.
 - [ ] Phase 11 final documentation and release verification.
 
-The current branch implements the first six foundational slices. Phase 3
+The current branch implements the first seven foundational slices. Phase 3
 measured the pinned beta-19507 shell hook, added bounded plugin-observed
 receipts, and replaced lead command-proof claims with exact-revision receipt
 matching. Phase 4 binds new review approvals to the configured reviewer agent
@@ -37,6 +37,11 @@ events, bounds its in-memory tables, and clears them on disposal. The pinned
 probe does not establish a bounded parent completion guarantee when a child
 provider fails or is cancelled, so the implementation does not claim one; it
 releases on any host after event and documents the unsupported path.
+Phase 7 reduces the registered surface from 35 tools with the optional GitHub
+and worktree families enabled to 23, and the default configuration exposes
+eight always-on orchestrator tools. Goal, board, and status families now use
+canonical action/mode variants; issue tools, generation hints, D4 v2, and the
+removed slash commands are documented with their replacements or boundaries.
 
 ## Purpose
 
@@ -651,7 +656,7 @@ actors, and V2 review references. The pure V1 migration preserves safe
 nonterminal lifecycle states, moves unproven validation/completion work to
 `awaiting-validation`, keeps fully completed goals readable as historical, and
 never upgrades V1 proof. Malformed records and invalid task graphs remain
-unavailable. `lead_board_init`, `/run-plan`, and goal enrollment use the
+unavailable. `orchestrator_board_action` with `action: "init"`, `/run-plan`, and goal enrollment use the
 explicit migration boundary; continuation, task tools, pause/cleanup, and
 completion now read/write only V2 records.
 
@@ -659,7 +664,8 @@ Review start/submit now applies the legal board intent transition internally,
 so the happy path does not require a separate admission-transition call. Board
 completion rechecks the goal generation, board revision, exact task head/base
 proof, aggregate observed receipts, and the approved V2 review under the
-session lock. The model-facing board surface now names intent actions such as
+session lock. The model-facing board surface now uses `orchestrator_board_action`
+with intent actions such as
 `report-task`, `validate-task`, `request-rework`, `mark-blocked`, and
 `reconcile-ambiguous`; direct lifecycle aliases remain only for serialized
 compatibility. Review/board persistence rolls back on a write failure, and V1

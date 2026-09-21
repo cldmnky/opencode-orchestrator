@@ -59,12 +59,9 @@ const descriptions: Record<CommandName, string> = {
   orchestrate: "Coordinate a task through specialized agents and verification",
   "worker-models": "Select durable models for worker agents",
   goal: "Set, show, pause, resume, or clear the active session goal",
-  restructure: "Perform a conservative, test-backed code restructuring",
   "run-plan": "Execute or resume a plan from .orchestrator/plans",
   halt: "Stop automated goal or plan continuation without deleting state",
   handover: "Create a factual continuation brief from session and VCS context",
-  polish: "Make narrowly scoped quality improvements and review the result",
-  "stress-plan": "Draft and independently critique a multi-agent execution plan",
   publish: "Inspect or toggle the durable project-scoped publication capability (status|enable|disable)",
   gates: "Show or narrow the per-session orchestrator gates (status|reset|<gate>=on|off)",
 }
@@ -73,14 +70,11 @@ const requiredRoles: Record<CommandName, CommandSpec["requiredRoles"]> = {
   orchestrate: ["orchestrator", "planning", "research", "implementation", "review"],
   "worker-models": ["orchestrator"],
   goal: ["orchestrator"],
-  restructure: ["orchestrator", "planning", "research", "implementation", "review"],
   "run-plan": ["orchestrator", "planning", "implementation", "review"],
   halt: ["orchestrator"],
   handover: ["orchestrator"],
-  polish: ["orchestrator", "research", "implementation", "review"],
-  "stress-plan": ["orchestrator", "planning", "research", "review"],
   publish: ["orchestrator"],
   gates: ["orchestrator"],
 }
 
-const requiresArgument = new Set<CommandName>(["orchestrate", "restructure", "stress-plan"])
+const requiresArgument = new Set<CommandName>(["orchestrate"])

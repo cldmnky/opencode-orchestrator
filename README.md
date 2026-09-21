@@ -57,10 +57,8 @@ Delegation outside an agent’s own graph is off-limits even if the host would a
 |--------------|----------|---------|
 | Build a feature or fix a bug in one go | `/orchestrate` | *“Fix the race in session locking and add a regression test”* |
 | Keep a long objective running through idle periods | `/goal` | *“Ship the checkout refactor without regressing payments”* |
-| Refactor safely | `/restructure` | `src/core/config.ts --scope=file` |
 | Run a written plan | `/run-plan` | `.orchestrator/plans/my-feature.md` |
-| Clean up code you just touched | `/polish` | `src/core/policy.ts` |
-| Critique a plan before coding | `/stress-plan` | *“Add rate limiting with Redis fallback”* |
+| Refactor or plan a change | `/orchestrate` | *“Safely refactor checkout validation and add tests”* |
 | Pause automation | `/halt` | — |
 | Hand context to the next session | `/handover` | *“Focus on payments regression”* |
 | Choose models for worker agents | `/worker-models` | — |
@@ -193,7 +191,24 @@ flowchart LR
 
 All commands are available after installation. They appear inside OpenCode — no files to create manually.
 
-Three workflows, pick one: **one-shot** (`/orchestrate` — research, plan in-reply, implement, review, report), **durable plan** (`/stress-plan` writes `.orchestrator/plans/*.md`, `/run-plan` executes it phase by phase), **persistent objective** (`/goal` keeps working across idle continuations, and can drive a plan via `/goal implement the plan at .orchestrator/plans/checkout.md`).
+### Phase 7 surface migration (`0.2.0`)
+
+Phase 7 removes overlapping model-visible names. The replacements are:
+
+| Removed surface | Replacement |
+|---|---|
+| `orchestrator_goal_get`, `orchestrator_goal_set`, `orchestrator_goal_update` | `orchestrator_goal` with `get`, `set`, `pause`, `resume`, `complete`, or `clear` actions |
+| `orchestrator_lead_board_get` | `orchestrator_board_get` |
+| `orchestrator_lead_board_init`, `orchestrator_lead_board_task_create`, `orchestrator_lead_board_task_assign`, `orchestrator_lead_board_transition`, `orchestrator_lead_board_complete` | `orchestrator_board_action` with `init`, `create-task`, `assign-task`, `transition`, or `complete` actions |
+| `orchestrator_peer_list`, `orchestrator_session_status` | `orchestrator_status` with `mode: "single"` or `mode: "list"` |
+| `orchestrator_task_complexity_classify` | No replacement tool; use the concise decomposition guidance and the lead board's declared-scope admission |
+| `orchestrator_admission_transition` | No separate call; validation, review, and board operations apply legal lifecycle transitions internally |
+| `/restructure`, `/polish`, `/stress-plan` | `/orchestrate` for a new task, or `/run-plan` for a hand-authored plan |
+| `orchestrator_github_issue_view`, `orchestrator_github_issue_list`, `orchestrator_github_issue_create` | Removed from the core plugin; use a separately configured GitHub/MCP integration when issue workflows are needed |
+
+The D4 v1 pure contract and fixtures remain supported. D4 v2 classification and generation hints are removed; no caller-supplied coherence label or second model call affects admission or publication.
+
+Two workflows, pick one: **one-shot** (`/orchestrate` — research, plan, implement, review, report) or **persistent objective** (`/goal` keeps working across idle continuations, and can drive a hand-authored plan via `/goal implement the plan at .orchestrator/plans/checkout.md`). Use `/run-plan` to execute a written plan phase by phase.
 
 ### `/orchestrate <task>` — your main command
 
@@ -222,30 +237,9 @@ Set an objective keyed to the current OpenCode session. The orchestrator can kee
 
 Goals auto-continue when that session goes idle (up to 50 continuations by default, with a cooldown). The orchestrator checks before each continuation that the goal is still active and unchanged. When a plan run is active, the continuation prompt embeds the plan ledger path and requires the orchestrator to execute the first unfinished ledger item with direct verification, update the ledger, and keep advancing in order — unless a real blocker or a configured breaker applies (halt flag, budget fail-closed, cooldown, max continuations, or an open review circuit), and it never marks the goal or plan complete without direct evidence. Deleting the session removes its goal state. Goals and plan runs are tracked by a durable [lead board](#the-durable-lead-board-goal-and-run-plan) that survives restarts.
 
-### `/restructure` — safe refactoring
-
-Behavior must not change. The plugin maps references and tests first.
-
-```
-/restructure src/core/config.ts --scope=file
-/restructure src/opencode-v2 --scope=module --risk=broad
-```
-
-Valid scopes are `--scope=file|module|project`; with project scope, target `.` or `project`.
-
-It writes the phased plan under `.orchestrator/plans/` before executing it, so the steps stay reviewable.
-
-### `/stress-plan` — write a reviewed plan file
-
-Drafts a plan for the given topic, critiques it from four angles (correctness, simplicity, security, feasibility), then finalizes it under `.orchestrator/plans/` for `/run-plan` to execute.
-
-```
-/stress-plan add rate limiting to the API with redis fallback
-```
-
 ### `/run-plan` — execute a written plan
 
-Put plans in `.orchestrator/plans/*.md` (via `/stress-plan` or `/restructure`, or by hand).
+Put plans in `.orchestrator/plans/*.md` by hand, then execute them phase by phase.
 
 ```
 /run-plan                    # picks the only incomplete plan, or resumes
@@ -258,16 +252,16 @@ Starting a plan run enrolls the current goal generation on its [durable lead boa
 
 ### The durable lead board (`/goal` and `/run-plan`)
 
-Every goal generation gets a durable **lead board** — a bounded task ledger keyed to the session's stable origin project, so it survives idle periods, restarts, and session moves and is removed with the session. `/goal` enrolls the new generation and `/run-plan` enrolls the current one (either can be re-enrolled explicitly with `orchestrator_lead_board_init`), so plan continuations advance ledger tasks instead of re-deriving work.
+Every goal generation gets a durable **lead board** — a bounded task ledger keyed to the session's stable origin project, so it survives idle periods, restarts, and session moves and is removed with the session. `/goal` enrolls the new generation and `/run-plan` enrolls the current one (either can be re-enrolled explicitly with `orchestrator_board_action` using `action: "init"`), so plan continuations advance ledger tasks instead of re-deriving work.
 
 - **Task DAG.** A board starts as one planned root task, and children are added through a strict validator (unique ids, known dependencies, no self-dependencies or cycles). A task becomes `ready` only when its dependencies are `completed`, reserves one continuation step at a time, and persists the step identity before a prompt is queued; restart recovery never replays a prior step.
 - **Conservative restart recovery.** A missing board is `board-missing` (the legacy goal-only path still works); a malformed or identity-mismatched board is `board-unavailable` — never auto-repaired and never dispatched from. A missing, malformed, unreadable, pending, dispatched, or failed receipt marks the claimed task `ambiguous` (the possible external effect is retained as a claim), and a completed idle-edge receipt advances a task at most to `awaiting-validation`, never to `completed`. Recovery is a fresh read plus an explicit lead transition.
 - **Advisory scope packets, conservative serialization.** Each task carries a bounded read/write packet (relative paths under a `project` or `managed-worktree` root). Write/write and write/read overlaps serialize, any broad, unknown, malformed, or unresolvable scope conflicts with active writes, and read/read work may proceed; a conflict leaves the task `ready`, not failed. Serialization is single-process only, and packets are coordination guidance — **not** filesystem isolation, a permission boundary, or a worktree binding.
-- **Lead-only completion.** A worker handoff is a report, never completion: the lead validates the unchanged D2 envelope, uses `orchestrator_verification_get` to select plugin-observed shell receipts for every required command, and binds them to the exact head revision. Completion also requires an approved exact-revision review for that same revision. The board completes only when every task is `completed`, aggregate verification passes in the lead context, the review matches, and the goal generation is unchanged; `orchestrator_goal_update` refuses goal completion while an enrolled board is not `complete` (a malformed board fails closed; a missing board keeps the legacy path).
-- **V2 migration boundary.** Runtime state is stored under `lead-board/v2/...`. A legacy V1 board remains readable and can be migrated explicitly through `orchestrator_lead_board_init` or enrollment; safe lifecycle states are preserved, while legacy validation/review claims are marked for revalidation and never authorize completion or publication. A fully completed V1 board is historical status only.
+- **Lead-only completion.** A worker handoff is a report, never completion: the lead validates the unchanged D2 envelope, uses `orchestrator_verification_get` to select plugin-observed shell receipts for every required command, and binds them to the exact head revision. Completion also requires an approved exact-revision review for that same revision. The board completes only when every task is `completed`, aggregate verification passes in the lead context, the review matches, and the goal generation is unchanged; `orchestrator_goal` with `action: "complete"` refuses goal completion while an enrolled board is not `complete` (a malformed board fails closed; a missing board keeps the legacy path).
+- **V2 migration boundary.** Runtime state is stored under `lead-board/v2/...`. A legacy V1 board remains readable and can be migrated explicitly through `orchestrator_board_action` with `action: "init"` or enrollment; safe lifecycle states are preserved, while legacy validation/review claims are marked for revalidation and never authorize completion or publication. A fully completed V1 board is historical status only.
 - **Lost PR responses are reconciled.** For draft-PR creation and merge, a bounded replay descriptor is persisted before the mutation; a retry or restart reads fresh remote truth first — an exact-match open PR is adopted with no second POST, a `merged: true` PR is adopted with no second PUT, and a missing or mismatched read stays ambiguous/blocked instead of retrying blindly.
 
-The board is durable but **not transactional or cross-process isolated**: it runs under the same process-local session lock, with no exactly-once, event-log, or scheduler/lease guarantee, and a replay descriptor makes a replay detectable — never an external side effect idempotent. Inspect it read-only with `orchestrator_lead_board_get` (a bounded projection, never raw receipts or transcripts); the six board tools share the existing orchestrator-only `orchestrator_validation` permission family, so no new permission action is needed. Review start/submit applies the legal board intent transition internally; a separate admission-transition call is not part of the review happy path.
+The board is durable but **not transactional or cross-process isolated**: it runs under the same process-local session lock, with no exactly-once, event-log, or scheduler/lease guarantee, and a replay descriptor makes a replay detectable — never an external side effect idempotent. Inspect it read-only with `orchestrator_board_get` (a bounded projection, never raw receipts or transcripts); mutate it with `orchestrator_board_action` and strict expected revisions. Both canonical board tools share the existing orchestrator-only `orchestrator_validation` permission family, so no new permission action is needed. Review start/submit applies the legal board intent transition internally; a separate admission-transition call is not part of the review happy path.
 
 ### Other commands
 
@@ -276,8 +270,6 @@ The board is durable but **not transactional or cross-process isolated**: it run
 /halt goal
 /handover          # get a summary brief for the next person/session
 /handover focus on payments regression
-/polish            # clean up only files changed in this branch
-/polish src/core/policy.ts src/core/prompts.ts
 /publish status    # inspect the durable project-scoped publication policy
 /publish enable    # opt in per project (requires publish.enabled: true in config)
 /publish disable   # revoke the durable authorization
@@ -290,7 +282,7 @@ The board is durable but **not transactional or cross-process isolated**: it run
 /worker-models reset      # restore all workers to configured models
 ```
 
-See [`/stress-plan`](#stress-plan--write-a-reviewed-plan-file) for writing plans and [`/run-plan`](#run-plan--execute-a-written-plan) for executing them.
+See [`/run-plan`](#run-plan--execute-a-written-plan) for executing a written plan.
 `/publish` toggles a durable, project-scoped **authorization policy** — see [Publication capability](#publication-capability-publish) for exactly what it does and does not authorize.
 `/gates` shows and narrows the per-session orchestrator gates (`push`, `pr-draft-create`, `pr-ready-transition`, `approve-after-review`, `merge`, `github-mutations`, `worktree-mutations`). Running it with no argument opens the TUI gate picker; `/gates <gate>=off` narrows one step for this session, `/gates <gate>=on` removes that narrowing, and `/gates reset` follows the project ceiling again. A session can only **narrow** the project/config ceiling and can never widen it — turning a gate on still requires the ceiling (the durable publication capability or the static `github`/`worktree` mutation switches) to allow it. Session gates apply to the current session only.
 `/worker-models` selects durable runtime models for `planner`, `explore`, `implementer`, and `reviewer` only. The TUI picker lists enabled, tool-capable models and their variants. Text form accepts `worker=provider/model[#variant]`, `worker=default`, `list`, and `reset`.
@@ -317,7 +309,7 @@ You configure baseline **models** with OpenCode’s native `agents.<id>.model`; 
       "max_parallel": 4,        // process-local configured-role dispatch ceiling (1..8)
       "require_review": true,   // ask a reviewer before finishing (prompt policy; exact-revision review receipts require bounded mode)
       "strict_agents": true,    // throw when a required agent is confirmed missing or has the wrong mode; false warns and continues
-      "commands": {},           // disable a command, e.g. { "polish": false }
+      "commands": {},           // disable a command, e.g. { "run-plan": false }
       "goal": { "auto_continue": true, "max_continuations": 50, "cooldown_ms": 1000 },
       "github": { "enabled": false, "allow_mutations": false },
       "worktree": { "enabled": false, "allow_mutations": false, "root": null },
@@ -404,10 +396,10 @@ Change a baseline model later by editing `agents.<id>.model` directly — no rei
 /goal   # check progress
 ```
 
-**Safe restructure**
+**Safe refactor**
 
 ```
-/restructure src/services/payments --scope=module --risk=conservative
+/orchestrate safely refactor src/services/payments and add regression tests
 ```
 
 ---
@@ -418,14 +410,14 @@ All disabled by default. Enable only what you need.
 
 ### GitHub integration
 
-Let the orchestrator create and list issues/PRs via your local `gh` CLI.
+Let the orchestrator inspect repositories and run the guarded pull-request lifecycle through your local `gh` CLI. Issue tools are no longer part of the core plugin; use a separately configured integration for issue workflows.
 
 ```jsonc
 "github": { "enabled": true, "allow_mutations": false }
 ```
 
-- Read-only (list/view) needs only `enabled: true`
-- Creating issues/PRs needs `allow_mutations: true` **and** `confirm: true` on each call
+- Repository and pull-request reads need only `enabled: true`
+- Pull-request mutations need `allow_mutations: true` plus the durable publication capability and the exact review/gate chain described below
 - Pull requests are **always created as drafts** — `orchestrator_github_pr_create` has no draft toggle; the client sends `draft: true` and refuses a response that is not a draft. A PR is moved to ready (`orchestrator_github_pr_ready`) only when a fresh view directly proves the exact head revision, `draft: true`, `mergeable: true`, no dirty/unknown conflict state, and current remote base ancestry; unknown mergeability stays draft and is truthfully deferred — no polling
 - Automatic approval (`orchestrator_github_pr_approve`) is **optional and best-effort**: it requires the ready transition, an exact-revision approved internal review, a non-author authenticated viewer, and fresh conflict-free evidence. A same-author attempt (the usual single-collaborator case), a missing `approve-after-review` capability, or an API failure is refused and reported truthfully with no success evidence — and that refusal **never blocks the merge**, because a GitHub APPROVE review is not a merge precondition. The automated approval is never claimed to satisfy branch protection
 - Merging (`orchestrator_github_pr_merge`) is **autonomous** once the durable `merge` capability and the per-session `merge` gate allow it: no separate user request, no GitHub APPROVE review, and no `confirm` flag are involved. It merges only after a fresh view proves the exact head/base revision, an open, unmerged, non-draft, `mergeable: true` pull with no dirty/unknown conflict state, the current remote base as an ancestor of the exact head, and an exact-revision approved internal review receipt — then verifies `merged: true` with a fresh post-merge view. A refused or skipped best-effort approval is not a precondition; any moved SHA, conflict, missing receipt, branch protection, required check/review, permission failure, or merge queue is reported truthfully, never bypassed or polled
@@ -490,7 +482,7 @@ Verify the current policy inside OpenCode with `/publish status` or `orchestrato
 
 ### Peer-orchestrator discovery
 
-`orchestrator_peer_list` (orchestrator-only) lists bounded metadata about other orchestrator sessions **in the same stable project**: session ID, goal status, and a redacted/truncated objective hint, ordered deterministically with an opaque `after` cursor. It is durable metadata only and never live-complete:
+`orchestrator_status` (orchestrator-only, read-only) returns bounded metadata for the caller's **same stable project**. Use `mode: "single"` with a `sessionID` for one session's goal/worktree/review summary, or `mode: "list"` for a deterministically ordered, cursor-paginated session list. It is durable metadata only and never live-complete:
 
 - never full objectives, transcripts, prompts, files, or credentials — known-pattern redaction runs before truncation
 - only goal records keyed under the caller’s own project are ever read
@@ -498,7 +490,7 @@ Verify the current policy inside OpenCode with `/publish status` or `orchestrato
 
 This tells you concurrent orchestration exists and what its goal state is — it is not a live directory of sessions.
 
-For a closer look, `orchestrator_session_status` (orchestrator-only, read-only) returns per-session summaries under the same stable project: pass a `sessionID` for that session’s goal/worktree/review summary (`summary: null` when no readable goal record exists), or omit it for a bounded, cursor-paginated session list with the same ordering, scan cap, and cursor semantics as `orchestrator_peer_list`. Objective hints, branch names, and worktree paths are known-pattern-redacted and length-truncated; SHAs, task IDs, repos, bases, evidence, transcripts, and credentials never leave the query, and nothing is mutated. Like peer discovery, it returns durable metadata that is never live-complete — `complete: false` means `storage.scan` is unavailable or the bounded scan cap was hit.
+For list mode, only sessions with readable goal records appear. Objective hints, branch names, and worktree paths are known-pattern-redacted and length-truncated; SHAs, task IDs, repos, bases, evidence, transcripts, and credentials never leave the query, and nothing is mutated. A missing or malformed goal yields `summary: null` in single-session mode. `complete: false` means `storage.scan` is unavailable or the bounded scan cap was hit.
 
 ### Budgets, tracing & review gates (observability)
 
@@ -561,7 +553,7 @@ OpenCode’s native `subagent_depth` is a **top-level** config key and defaults 
 <summary>How the orchestration works (for the curious)</summary>
 
 - **Roles are prompt policy, not hard sandboxing.** `explore` is told not to use shell, `planner`/`reviewer` not to edit, and nested delegation is bounded to the role graph (implementer→planner/explore, planner→explore, reviewer→explore, explore never delegates) — the installer writes matching permission rules, but V2’s plugin API doesn’t enforce this at the filesystem level. Treat it as strong instructions plus config-level permissions.
-- **Slices coordinate agents; file ownership is advisory.** The orchestrator prefers the smallest coherent end-to-end slice — tightly coupled code, tests, wiring, and docs under one owner — and splits only at a verified boundary where each resulting slice has its own outcome, acceptance evidence, and no hidden dependency. Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification, never concurrent overlapping writes; unknown coupling fails closed and serializes. Those prompt-level scopes are coordination units, **not** filesystem isolation, and a slice never becomes a permission boundary. `max_parallel` (default 4) admits only that many configured-role subagent calls per root session in this process; it is not automatic scheduling or a cross-process runtime cap. The optional `"decomposition": { "strategy": "strict" }` setting raises this preference in the orchestrator, worker, and continuation prompts; it changes emphasis only and never bypasses serialization, scope validation, review, the worktree lifecycle, or the publication preconditions.
+- **Slices coordinate agents; file ownership is advisory.** The orchestrator prefers the smallest coherent end-to-end slice — tightly coupled code, tests, wiring, and docs under one owner — and splits only at a verified boundary where each resulting slice has its own outcome, acceptance evidence, and no hidden dependency. Unavoidable coupling between files is resolved by sequencing or serialization with integrated parent verification, never concurrent overlapping writes; unknown, broad, or overlapping declared scopes serialize. Those prompt-level scopes are coordination units, **not** filesystem isolation, and a slice never becomes a permission boundary. `max_parallel` (default 4) admits only that many configured-role subagent calls per root session in this process; it is not automatic scheduling or a cross-process runtime cap. The optional `"decomposition": { "strategy": "strict" }` setting raises this preference in the orchestrator, worker, and continuation prompts; it changes emphasis only and never bypasses serialization, scope validation, review, the worktree lifecycle, or the publication preconditions.
 - **Handoffs are structured.** Workers return a five-field summary (`Outcome / Files / Verification / Risks / Follow-up`) plus a version-1 JSON envelope. The orchestrator can run `orchestrator_handoff_validate` for deterministic checks before using a handoff. Inter-agent messages — parent→child prompts and child→parent handoffs alike — are expected to be explicit, self-contained, and legible on their own.
 - **Review is prompt-based by default.** `require_review: true` means the orchestrator *asks* a reviewer. Bounded review adds an explicit `review_get` / `review_start` / `review_submit` flow with a circuit breaker; the plugin derives reviewer agent and child-session provenance from the host context, while legacy V1 identity remains unproven.
 - **Publication is capability policy.** `/publish` toggles a durable, project-scoped authorization record (never caller identity). When the config master gate is on and the record is enabled, the orchestrator may pass `confirm: true` without re-prompting for push / draft PR create / ready / best-effort approve / merge (merge is autonomous, ignores `confirm`, and never requires a GitHub approval) — never issue creation. Every step still requires the mandatory sync → verify → exact-revision review sequence and fails closed otherwise, and a per-session `/gates` narrowing can turn any step off for the current session.
@@ -587,7 +579,7 @@ Want the formal contracts? `docs/phase-1/` has them (D2 handoff, D4 gate, etc.) 
 - Session gates (`/gates`, `/gates <gate>=on|off`, `/gates reset`) are a per-session narrowing only: they can turn a ceiling-allowed step off, but never widen the project/config ceiling, and they do not carry over to another session. The model has a read-only `orchestrator_gates_get` view; only `/gates` and the TUI gate picker write the narrowing record.
 - Draft/ready/approval have hard limits by design: PRs are always created as drafts; a ready transition requires fresh conflict-free evidence at the exact revision (unknown mergeability stays draft — no polling); approval is best-effort and optional, so its refusal (including self-approval) never blocks the independently authorized merge; automated approval is never claimed or relied on to satisfy branch protection, and same-author or API failures are reported truthfully, never as successes.
 - The durable lead board is a task ledger under the same process-local session lock — not a transaction, CAS, event log, lease, or cross-process scheduler. There is no exactly-once guarantee; scope-packet serialization is single-process only, scope packets are advisory (never filesystem isolation or a permission boundary), a replay descriptor can make a replay detectable but never an external side effect idempotent, and a malformed/unavailable board is never auto-repaired or dispatched from.
-- Peer discovery and `orchestrator_session_status` cover the same stable project only, and only sessions with readable goal records appear — they return read-only, durable, redacted/truncated metadata, never a live or complete directory of sessions.
+- `orchestrator_status` covers the same stable project only, and only sessions with readable goal records appear in list mode — it returns read-only, durable, redacted/truncated metadata, never a live or complete directory of sessions.
 
 </details>
 

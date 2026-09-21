@@ -1,13 +1,10 @@
 import { stat } from "node:fs/promises"
 import type { OrchestratorOptions } from "../../core/config.js"
 import { ORCHESTRATION_TOOL_PERMISSION } from "../../core/permissions.js"
-import { ADMISSION_ACTIONS, ADMISSION_INPUT_SCHEMA, ADMISSION_STATES, transitionAdmission } from "../../core/admission.js"
-import { D4_PARALLELISM_VALUES, classifyTaskComplexity } from "../../core/d4.js"
 import { D2_LIMITS, RELATIVE_REPO_PATH_PATTERN } from "../../core/contracts.js"
 import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
 import { resolveRealpath } from "../worktree/git.js"
-import { HANDOFF_CHECK_IDS, HANDOFF_CONTRACT_SCHEMA, runHandoffHint, validateHandoff, type HandoffContract, type HandoffValidationResult, type SessionLocation, type ValidationDeps } from "./validation.js"
-import type { GenerationHintRecord } from "../observability/trace.js"
+import { HANDOFF_CONTRACT_SCHEMA, validateHandoff, type HandoffContract, type SessionLocation, type ValidationDeps } from "./validation.js"
 import {
   LEAD_BOARD_LIMITATIONS,
   LEAD_MAX_CHECK_IDS,
@@ -45,8 +42,8 @@ import { validateApprovedReviewV2Revision } from "../observability/review-v2.js"
 import { listVerificationReceipts } from "../verification/state.js"
 
 /**
- * Serialized runtime orchestration tools (orchestrator_task_complexity_classify,
- * orchestrator_handoff_validate, orchestrator_admission_transition).
+ * Serialized runtime orchestration tools (orchestrator_handoff_validate and
+ * the canonical board get/action pair).
  *
  * Registered unconditionally as core tools (no feature-enable gate) under the
  * `orchestrator` namespace with the shared `orchestrator_validation` permission
@@ -56,17 +53,10 @@ import { listVerificationReceipts } from "../verification/state.js"
  * They are callable/advisory primitives — NOT automatic hooks: nothing routes
  * worker output through them, they persist nothing, they mutate nothing, they
  * accept no `confirm` input, and they never enforce a completion gate.
- * `task_complexity_classify` is advisory/user-overridable; `handoff_validate`
- * is a deterministic fail-closed D2 validator that threads the invoking
+ * `handoff_validate` is a deterministic fail-closed D2 validator that threads the invoking
  * `tool.sessionID` into session resolution explicitly (session content is never
- * exposed or logged); `admission_transition` is a stateless state machine that
- * never treats D2 reviewState as approval.
- *
- * `handoff_validate` additionally honors the opt-in `hints.mode: "advisory"`
- * config: after a deterministic `pass` verdict it runs one bounded sessionless
- * generation post-step and attaches a redacted, metadata-only hint record.
- * The hint record never changes the verdict, the admission state, or any gate,
- * and it is not persisted by the plugin.
+ * exposed or logged). Its returned admission state is diagnostic; board and
+ * review operations compute legal transitions internally.
  */
 
 type ToolDraftLike = {
@@ -96,79 +86,26 @@ export type OrchestrationToolsDeps = {
   pathExists?: (absolutePath: string) => Promise<boolean>
   realpath?: (directory: string) => Promise<string | undefined>
   redact?: (text: string) => string
-  /**
-   * Sessionless generation surface for the opt-in hint post-step; plugin
-   * wiring passes context.generate. Absent means hints cannot run (the tool
-   * records a `generate-unavailable` skip when hints are enabled).
-   */
-  generate?: (input: {
-    prompt: string
-    model?: { providerID: string; id: string }
-  }) => Promise<{ text: string }>
-  /**
-   * Deterministic test/ops override for the hint timeout race; defaults to
-   * `HANDOFF_HINT_TIMEOUT_MS`. The underlying generation is never cancelled.
-   */
-  hintTimeoutMs?: number
 }
 
 export function addOrchestrationTools(draft: ToolDraftLike, deps: OrchestrationToolsDeps): void {
   const validationDeps = resolveValidationDeps(deps)
 
   draft.add({
-    name: "task_complexity_classify",
-    description:
-      "Classify task complexity from the eight structured D4 facts (each may be null when unknown). Returns an advisory, user-overridable recommendation; nothing is enforced automatically.",
-    input: classifyInput,
-    options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
-    execute: async (input, tool) => {
-      requireOrchestrator(tool.agent, deps.options)
-      try {
-        const result = classifyTaskComplexity(input ?? {})
-        return resultContent(JSON.stringify(result))
-      } catch {
-        // Deterministic generic failure: never echo the offending values.
-        return resultContent(
-          "task_complexity_classify rejected invalid structured input; supply only the eight typed dimension fields (each may be null when the fact is unknown) and retry",
-        )
-      }
-    },
-  })
-
-  draft.add({
     name: "handoff_validate",
     description:
-      "Validate a version-1 structured D2 handoff against a task contract (level worker or orchestrator). Deterministic fail-closed checks; returns an admission state for orchestrator_admission_transition. Callable/advisory: not an automatic gate and no completion gate is enforced. When hints.mode is advisory, a bounded metadata-only generation hint may be attached after a pass; it never changes the verdict or admission state.",
+      "Validate a version-1 structured D2 handoff against a task contract. Deterministic fail-closed checks return a diagnostic admission state; the operation is callable and never an automatic completion gate.",
     input: validateInput,
     options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
       const result = await validateHandoff(input, validationDeps, tool.sessionID)
-      const hints = await maybeRunHandoffHint(deps, result)
-      return resultContent(JSON.stringify(hints ? { ...result, hints } : result))
+      return resultContent(JSON.stringify(result))
     },
   })
 
   draft.add({
-    name: "admission_transition",
-    description:
-      "Compute the deterministic V2 admission transition for one (from, signal) pair. Stateless: returns the next admission state and never persists; the caller owns state. D2 reviewState is never treated as approval.",
-    input: admissionInput,
-    options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
-    execute: async (input, tool) => {
-      requireOrchestrator(tool.agent, deps.options)
-      const parsed = ADMISSION_INPUT_SCHEMA.safeParse(input)
-      if (!parsed.success) {
-        return resultContent(
-          "admission_transition rejected invalid input; supply from (one of the admission states) and a strict signal object with a valid action and retry",
-        )
-      }
-      return resultContent(JSON.stringify(transitionAdmission(parsed.data)))
-    },
-  })
-
-  draft.add({
-    name: "lead_board_get",
+    name: "board_get",
     description:
       "Read the durable lead board for this session as a bounded projection (task statuses, versions, attempts, scopes, replay summary). Orchestrator-only, lead-only, read-only: never raw step receipts, transcripts, or provider output. A missing board is board-missing (legacy); a malformed board is board-unavailable and is never repaired or dispatched from.",
     input: boardGetInput,
@@ -180,62 +117,24 @@ export function addOrchestrationTools(draft: ToolDraftLike, deps: OrchestrationT
   })
 
   draft.add({
-    name: "lead_board_init",
+    name: "board_action",
     description:
-      "Explicitly enroll the current goal generation on its durable lead board. Creates a deterministic board with one planned root lead task when absent; replaces it only when the goal generation changed; leaves a same-generation ledger untouched. Orchestrator-only and lead-only.",
-    input: boardInitInput,
+      "Apply one canonical lead-board action: init, create-task, assign-task, transition, or complete. Each mutation requires its exact expected revision/version and the plugin computes the legal transition.",
+    input: boardActionInput,
     options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
     execute: async (input, tool) => {
       requireOrchestrator(tool.agent, deps.options)
-      return resultContent(JSON.stringify(await initLeadBoardTool(deps, tool.sessionID, input)))
-    },
-  })
-
-  draft.add({
-    name: "lead_board_task_create",
-    description:
-      "Create one child task on the durable lead board with a strict bounded validator (task id pattern, title, owner role/session, normalized advisory scope, existing dependencies, task cap). Orchestrator-only and lead-only; every task starts planned. Scope packets are advisory, not isolation.",
-    input: boardTaskCreateInput,
-    options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
-    execute: async (input, tool) => {
-      requireOrchestrator(tool.agent, deps.options)
-      return resultContent(JSON.stringify(await createLeadBoardTaskTool(deps, tool.sessionID, input)))
-    },
-  })
-
-  draft.add({
-    name: "lead_board_task_assign",
-    description:
-      "Assign the owner (role/session) of one non-completed task on the durable lead board. Requires the task id plus its expected lifecycle version; bumps both versions once. Orchestrator-only and lead-only.",
-    input: boardTaskAssignInput,
-    options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
-    execute: async (input, tool) => {
-      requireOrchestrator(tool.agent, deps.options)
-      return resultContent(JSON.stringify(await assignLeadBoardTaskTool(deps, tool.sessionID, input)))
-    },
-  })
-
-  draft.add({
-    name: "lead_board_transition",
-    description:
-      "Apply one lead-only task intent with the task id and expected lifecycle version. Use report-task, validate-task, request-rework, mark-blocked, reconcile-ambiguous, requeue-task, or record-replay; the plugin selects the legal lifecycle edge. validate-task uses the unchanged D2 envelope and observed receipt IDs; reviewer submission completes approved tasks. Workers are rejected.",
-    input: boardTransitionInput,
-    options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
-    execute: async (input, tool) => {
-      requireOrchestrator(tool.agent, deps.options)
-      return resultContent(JSON.stringify(await transitionLeadBoardTool(deps, validationDeps, tool.sessionID, input)))
-    },
-  })
-
-  draft.add({
-    name: "lead_board_complete",
-    description:
-      "Complete the durable lead board and its goal generation only when every task is completed, the aggregate D2 verification passes in the lead context, an approved exact-revision review matches the same revision, and the goal identity is unchanged under the same lock. Pause/replacement/deletion/identity change cancels. Orchestrator-only and lead-only; the board is immutable afterward.",
-    input: boardCompleteInput,
-    options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
-    execute: async (input, tool) => {
-      requireOrchestrator(tool.agent, deps.options)
-      return resultContent(JSON.stringify(await completeLeadBoardTool(deps, validationDeps, tool.sessionID, input)))
+      const action = stringField(input, "action")
+      if (action === "init") return resultContent(JSON.stringify(await initLeadBoardTool(deps, tool.sessionID, input)))
+      if (action === "create-task") return resultContent(JSON.stringify(await createLeadBoardTaskTool(deps, tool.sessionID, input)))
+      if (action === "assign-task") return resultContent(JSON.stringify(await assignLeadBoardTaskTool(deps, tool.sessionID, input)))
+      if (action === "complete") return resultContent(JSON.stringify(await completeLeadBoardTool(deps, validationDeps, tool.sessionID, input)))
+      if (action === "transition") {
+        const intent = stringField(input, "intent")
+        const transitionInput = { ...(recordField(input) ?? {}), action: intent }
+        return resultContent(JSON.stringify(await transitionLeadBoardTool(deps, validationDeps, tool.sessionID, transitionInput)))
+      }
+      return resultContent(JSON.stringify(boardRefusal("invalid-action", "action must be init, create-task, assign-task, transition, or complete")))
     },
   })
 }
@@ -244,29 +143,6 @@ function requireOrchestrator(agent: string, options: OrchestratorOptions): void 
   if (agent !== options.orchestrator) {
     throw new Error("orchestration validation tools are available only to the orchestrator")
   }
-}
-
-/**
- * Opt-in advisory hint post-step. Runs only when `hints.mode: "advisory"` is
- * configured and the deterministic checks already produced a `pass` verdict.
- * The returned record is metadata only and never changes `result`: the
- * validator's verdict, admission state, checks, and prose are whatever the
- * deterministic path produced, and no error here can surface to the caller.
- */
-async function maybeRunHandoffHint(
-  deps: OrchestrationToolsDeps,
-  result: HandoffValidationResult,
-): Promise<GenerationHintRecord | undefined> {
-  if (deps.options.hints.mode !== "advisory") return undefined
-  return runHandoffHint({
-    level: result.level,
-    verdict: result.verdict,
-    checks: result.checks,
-    model: deps.options.hints.model,
-    generate: deps.generate,
-    redact: deps.redact,
-    ...(deps.hintTimeoutMs !== undefined ? { timeoutMs: deps.hintTimeoutMs } : {}),
-  })
 }
 
 function resultContent(content: string): ToolResult {
@@ -393,6 +269,7 @@ const BOARD_INTENT_ACTIONS = [
   "mark-blocked",
   "reconcile-ambiguous",
   "requeue-task",
+  "complete",
   "record-replay",
 ] as const
 
@@ -421,6 +298,7 @@ const BOARD_INTENT_TO_TRANSITION: Readonly<Record<Exclude<BoardIntentAction, "re
   "mark-blocked": "block",
   "reconcile-ambiguous": "reconcile",
   "requeue-task": "requeue",
+  complete: "complete",
 }
 
 function normalizeBoardAction(value: string): LeadTransitionAction | undefined {
@@ -1079,29 +957,6 @@ function arrayField(input: unknown, key: string): string[] {
 /* JSON input schemas (model-facing; runtime validation stays in core) */
 /* ------------------------------------------------------------------ */
 
-const nullableInteger = (minimum = 0) => ({ type: ["integer", "null"], minimum })
-
-const classifyInput = {
-  type: "object",
-  properties: {
-    independent_subtasks: nullableInteger(),
-    dependent_stages: nullableInteger(),
-    files_modules: nullableInteger(),
-    independent_review: { type: ["boolean", "null"] },
-    external_side_effects: { type: ["boolean", "null"] },
-    shared_mutable_state: { type: ["boolean", "null"] },
-    security_compliance_risk: { type: ["boolean", "null"] },
-    // JSON Schema 2020-12: `type: ["string", "null"]` combined with a shared
-    // `enum` rejects null (null is never one of the enum's string values), so
-    // the nullable enum needs an explicit `anyOf` null branch. Runtime
-    // behavior is unchanged: the D4 Zod schema stays the single authority.
-    expected_parallelism_value: {
-      anyOf: [{ type: "string", enum: D4_PARALLELISM_VALUES }, { type: "null" }],
-    },
-  },
-  additionalProperties: false,
-} as const
-
 const validateInput = {
   type: "object",
   properties: {
@@ -1138,28 +993,6 @@ const validateInput = {
     minimumCompletedAt: { type: "number", minimum: 0 },
   },
   required: ["level", "handoff", "contract"],
-  additionalProperties: false,
-} as const
-
-const admissionInput = {
-  type: "object",
-  properties: {
-    // The model-facing enum mirrors the runtime vocabulary exactly; the
-    // runtime Zod schema (ADMISSION_INPUT_SCHEMA) stays the single authority.
-    from: { type: "string", enum: ADMISSION_STATES },
-    signal: {
-      type: "object",
-      properties: {
-        action: { type: "string", enum: ADMISSION_ACTIONS },
-        reason: { type: "string", minLength: 1, maxLength: 2000 },
-        reviewRequired: { type: "boolean" },
-        humanDecision: { type: "boolean" },
-      },
-      required: ["action"],
-      additionalProperties: false,
-    },
-  },
-  required: ["from", "signal"],
   additionalProperties: false,
 } as const
 
@@ -1302,4 +1135,44 @@ const boardCompleteInput = {
   },
   required: ["expectedBoardRevision", "revision", "handoff", "contract"],
   additionalProperties: false,
+} as const
+
+/** One discriminated model-facing union replaces the six legacy board tools. */
+const boardActionInput = {
+  oneOf: [
+    {
+      type: "object",
+      properties: { action: { const: "init" }, ...boardInitInput.properties },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { action: { const: "create-task" }, ...boardTaskCreateInput.properties },
+      required: ["action", ...boardTaskCreateInput.required],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { action: { const: "assign-task" }, ...boardTaskAssignInput.properties },
+      required: ["action", ...boardTaskAssignInput.required],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        ...boardTransitionInput.properties,
+        action: { const: "transition" },
+        intent: { type: "string", enum: BOARD_INTENT_ACTIONS },
+      },
+      required: ["action", "intent", "taskID", "expectedVersion"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { action: { const: "complete" }, ...boardCompleteInput.properties },
+      required: ["action", ...boardCompleteInput.required],
+      additionalProperties: false,
+    },
+  ],
 } as const

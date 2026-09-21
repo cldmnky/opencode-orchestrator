@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { parseOptions } from "../../src/core/config.js"
 import { ORCHESTRATION_TOOL_PERMISSION } from "../../src/core/permissions.js"
-import { ADMISSION_ACTIONS, ADMISSION_STATES, type AdmissionState } from "../../src/core/admission.js"
-import { D4_PARALLELISM_VALUES, type D4Recommendation } from "../../src/core/d4.js"
+import { ADMISSION_STATES, type AdmissionState } from "../../src/core/admission.js"
 import { D2_LIMITS, RELATIVE_REPO_PATH_PATTERN } from "../../src/core/contracts.js"
 import {
   addOrchestrationTools,
@@ -10,15 +9,8 @@ import {
 } from "../../src/opencode-v2/orchestration/tools.js"
 import {
   HANDOFF_CHECK_IDS,
-  HANDOFF_HINT_OUTPUT_MAX_CHARS,
-  HANDOFF_HINT_PROMPT_MAX_CHARS,
-  handoffHintPrompt,
-  parseHandoffHintOutput,
-  runHandoffHint,
   type HandoffValidationResult,
 } from "../../src/opencode-v2/orchestration/validation.js"
-import { GENERATION_HINT_MAX_HINT_CHARS, type GenerationHintRecord } from "../../src/opencode-v2/observability/trace.js"
-import { createRedactor } from "../../src/opencode-v2/process/redact.js"
 import {
   createLeadBoardV2 as createLeadBoard,
   leadBoardV2StorageKey as leadBoardStorageKey,
@@ -151,15 +143,9 @@ describe("orchestration validation tool registration", () => {
     const tools = collect()
     const names = [...tools.keys()]
     expect(names).toEqual([
-      "task_complexity_classify",
       "handoff_validate",
-      "admission_transition",
-      "lead_board_get",
-      "lead_board_init",
-      "lead_board_task_create",
-      "lead_board_task_assign",
-      "lead_board_transition",
-      "lead_board_complete",
+      "board_get",
+      "board_action",
     ])
     for (const name of names) {
       const tool = tools.get(name)!
@@ -189,210 +175,17 @@ describe("orchestration validation tool registration", () => {
 })
 
 describe("orchestrator-only gating", () => {
-  test("rejects a worker agent for all three tools", async () => {
+  test("rejects a worker agent for all canonical tools", async () => {
     const tools = collect()
     const worker = toolContext("session-1", "explore")
-    await expect(tools.get("task_complexity_classify")!.execute({}, worker)).rejects.toThrow(/only to the orchestrator/)
     await expect(
       tools.get("handoff_validate")!.execute(
         { level: "worker", handoff: handoff(), contract: contract() },
         worker,
       ),
     ).rejects.toThrow(/only to the orchestrator/)
-    await expect(
-      tools.get("admission_transition")!.execute({ from: "candidate", signal: { action: "worker-pass" } }, worker),
-    ).rejects.toThrow(/only to the orchestrator/)
-  })
-})
-
-describe("task_complexity_classify", () => {
-  const FULL_FACTS = {
-    independent_subtasks: 0,
-    dependent_stages: 0,
-    files_modules: 1,
-    independent_review: false,
-    external_side_effects: false,
-    shared_mutable_state: false,
-    security_compliance_risk: false,
-    expected_parallelism_value: "none",
-  }
-
-  test("classifies a fully-known trivial input as an advisory direct-execution candidate", async () => {
-    const tools = collect()
-    const output = await tools
-      .get("task_complexity_classify")!
-      .execute(FULL_FACTS, toolContext("session-1", "orchestrator"))
-    const result = JSON.parse(output.content) as {
-      version: number
-      recommendation: D4Recommendation
-      rule: string
-      advisory: boolean
-    }
-    expect(result.version).toBe(1)
-    expect(result.recommendation).toBe("direct-execution-candidate")
-    expect(result.advisory).toBe(true)
-  })
-
-  test("unknown or missing facts classify as collect-facts", async () => {
-    const tools = collect()
-    const empty = await tools.get("task_complexity_classify")!.execute({}, toolContext("session-1", "orchestrator"))
-    expect((JSON.parse(empty.content) as { recommendation: string }).recommendation).toBe("collect-facts")
-
-    const partial = await tools
-      .get("task_complexity_classify")!
-      .execute({ ...FULL_FACTS, shared_mutable_state: null, security_compliance_risk: undefined }, toolContext("session-1", "orchestrator"))
-    const parsed = JSON.parse(partial.content) as { recommendation: string; unknownDimensions: string[] }
-    expect(parsed.recommendation).toBe("collect-facts")
-    expect(parsed.unknownDimensions.sort()).toEqual(["security_compliance_risk", "shared_mutable_state"])
-  })
-
-  test("invalid structured input returns a safe deterministic failure that does not echo offending values", async () => {
-    const tools = collect()
-    for (const bad of [{ files_modules: -1 }, { security_compliance_risk: "yes" }, { extra_field: true }, { independent_subtasks: 0.5 }]) {
-      const output = await tools
-        .get("task_complexity_classify")!
-        .execute(bad, toolContext("session-1", "orchestrator"))
-      expect(output.content).toBe(
-        "task_complexity_classify rejected invalid structured input; supply only the eight typed dimension fields (each may be null when the fact is unknown) and retry",
-      )
-      expect(output.content).not.toContain("-1")
-      expect(output.content).not.toContain("yes")
-      expect(output.content).not.toContain("extra_field")
-    }
-  })
-
-  test("classifies a null parallelism fact as collect-facts with that dimension unknown", async () => {
-    const tools = collect()
-    const output = await tools
-      .get("task_complexity_classify")!
-      .execute(
-        { ...FULL_FACTS, expected_parallelism_value: null },
-        toolContext("session-1", "orchestrator"),
-      )
-    const result = JSON.parse(output.content) as { recommendation: string; unknownDimensions: string[]; version: number }
-    expect(result.version).toBe(1)
-    expect(result.recommendation).toBe("collect-facts")
-    expect(result.unknownDimensions).toEqual(["expected_parallelism_value"])
-  })
-
-  test("the registered host schema accepts null for every nullable D4 field including the parallelism enum", () => {
-    const tools = collect()
-    const classify = schema(tools, "task_complexity_classify")
-    const props = classify.properties!
-
-    // Plain nullable fields use a null-inclusive type array (valid 2020-12).
-    expect(props.independent_subtasks.type).toEqual(["integer", "null"])
-    expect(props.dependent_stages.type).toEqual(["integer", "null"])
-    expect(props.files_modules.type).toEqual(["integer", "null"])
-    for (const field of ["independent_review", "external_side_effects", "shared_mutable_state", "security_compliance_risk"]) {
-      expect(props[field].type).toEqual(["boolean", "null"])
-    }
-
-    // Enum field: null must sit in its own `anyOf` branch, because a shared
-    // `type: ["string","null"]` + `enum` rejects null (2019-09/2020-12).
-    const parallelism = props.expected_parallelism_value
-    expect(parallelism.anyOf).toEqual([
-      { type: "string", enum: ["none", "low", "medium", "high"] },
-      { type: "null" },
-    ])
-    expect(parallelism.anyOf[0].enum).toEqual([...D4_PARALLELISM_VALUES])
-    // No invalid extreme leaks into the accepted values.
-    for (const invalid of ["extreme", "max", "unlimited"]) {
-      expect(parallelism.anyOf[0].enum).not.toContain(invalid)
-    }
-  })
-
-  test("high-risk and shared-state signals never authorize runtime parallelism", async () => {
-    const tools = collect()
-    const risky = await tools
-      .get("task_complexity_classify")!
-      .execute({ ...FULL_FACTS, security_compliance_risk: true }, toolContext("session-1", "orchestrator"))
-    const parsed = JSON.parse(risky.content) as { recommendation: string; rule: string }
-    expect(parsed.rule).toBe("high-risk")
-    expect(parsed.recommendation).toBe("orchestrate-with-review")
-  })
-})
-
-describe("admission_transition", () => {
-  test("transitions deterministic state pairs and never persists", async () => {
-    const tools = collect()
-    const input = { from: "candidate" as const, signal: { action: "worker-pass" as const } }
-    const output = await tools.get("admission_transition")!.execute(input, toolContext("session-1", "orchestrator"))
-    const result = JSON.parse(output.content) as { version: number; accepted: boolean; from: string; to: string; replacementReceipt: boolean }
-    expect(result.version).toBe(1)
-    expect(result.accepted).toBe(true)
-    expect(result.from).toBe("candidate")
-    expect(result.to).toBe("worker-passed")
-    expect(result.replacementReceipt).toBe(false)
-    // Pure/stateless: input is not mutated and nothing is written anywhere.
-    expect(input).toEqual({ from: "candidate", signal: { action: "worker-pass" } })
-  })
-
-  test("maps orchestrator-pass to admitted or review-pending via contract reviewRequired", async () => {
-    const tools = collect()
-    const admitted = await tools
-      .get("admission_transition")!
-      .execute(
-        { from: "worker-passed", signal: { action: "orchestrator-pass", reviewRequired: false } },
-        toolContext("session-1", "orchestrator"),
-      )
-    expect((JSON.parse(admitted.content) as { to: string }).to).toBe("admitted")
-
-    const pending = await tools
-      .get("admission_transition")!
-      .execute(
-        { from: "worker-passed", signal: { action: "orchestrator-pass", reviewRequired: true } },
-        toolContext("session-1", "orchestrator"),
-      )
-    expect((JSON.parse(pending.content) as { to: string }).to).toBe("review-pending")
-  })
-
-  test("blocked-unknown never auto-advances without an explicit human decision", async () => {
-    const tools = collect()
-    const output = await tools
-      .get("admission_transition")!
-      .execute({ from: "blocked-unknown", signal: { action: "new-receipt" } }, toolContext("session-1", "orchestrator"))
-    const result = JSON.parse(output.content) as { accepted: boolean; to?: string; requiresHuman: boolean }
-    expect(result.accepted).toBe(false)
-    expect(result.to).toBeUndefined()
-    expect(result.requiresHuman).toBe(true)
-  })
-
-  test("invalid input returns a generic deterministic rejection without echoing values", async () => {
-    const tools = collect()
-    const output = await tools
-      .get("admission_transition")!
-      .execute({ from: "bogus-state", signal: { action: "nope" } }, toolContext("session-1", "orchestrator"))
-    expect(output.content).toBe(
-      "admission_transition rejected invalid input; supply from (one of the admission states) and a strict signal object with a valid action and retry",
-    )
-    expect(output.content).not.toContain("bogus-state")
-  })
-
-  test("the admission host schema mirrors the runtime vocabulary and reason limits", () => {
-    const tools = collect()
-    const admission = schema(tools, "admission_transition")
-    const props = admission.properties!
-    expect(props.from.enum).toEqual([...ADMISSION_STATES])
-    const signal = props.signal
-    expect(signal.properties.action.enum).toEqual([...ADMISSION_ACTIONS])
-    expect(signal.properties.reason).toEqual({ type: "string", minLength: 1, maxLength: 2000 })
-    expect(signal.properties.reviewRequired.type).toBe("boolean")
-    expect(signal.properties.humanDecision.type).toBe("boolean")
-    expect(signal.required).toEqual(["action"])
-    expect(admission.required).toEqual(["from", "signal"])
-    expect(admission.additionalProperties).toBe(false)
-  })
-
-  test("the input is strictly a (from, signal) pair: D2 reviewState is never accepted as approval", async () => {
-    const tools = collect()
-    const output = await tools
-      .get("admission_transition")!
-      .execute(
-        { from: "worker-failed", signal: { action: "new-receipt" }, reviewState: "approved" },
-        toolContext("session-1", "orchestrator"),
-      )
-    expect(output.content).toContain("rejected invalid input")
+    await expect(tools.get("board_get")!.execute({}, worker)).rejects.toThrow(/only to the orchestrator/)
+    await expect(tools.get("board_action")!.execute({ action: "init" }, worker)).rejects.toThrow(/only to the orchestrator/)
   })
 })
 
@@ -1138,304 +931,6 @@ describe("handoff_validate orchestrator level", () => {
   })
 })
 
-const hintOptions = parseOptions({ hints: { mode: "advisory", model: { providerID: "probe", id: "deterministic" } } })
-
-type HintedResult = HandoffValidationResult & { hints?: GenerationHintRecord }
-
-function parseHinted(content: string): HintedResult {
-  return JSON.parse(content) as HintedResult
-}
-
-describe("generation hints (opt-in, default off)", () => {
-  test("config defaults to off, rejects typos, and requires an explicit model when advisory", () => {
-    expect(parseOptions({}).hints).toEqual({ mode: "off" })
-    expect(parseOptions({ hints: {} }).hints).toEqual({ mode: "off" })
-    expect(parseOptions({ hints: { mode: "off" } })).toEqual(parseOptions({}))
-    expect(parseOptions({ hints: { mode: "advisory", model: { providerID: "p", id: "m" } } }).hints).toEqual({
-      mode: "advisory",
-      model: { providerID: "p", id: "m" },
-    })
-    for (const invalid of [
-      { hints: { mode: "on" } },
-      { hints: { mode: "advisory" } },
-      { hints: { mode: "advisory", model: { providerID: "", id: "m" } } },
-      { hints: { mode: "advisory", model: { providerID: "p" } } },
-      { hints: { mode: "advisory", model: { providerID: "p", id: "m", extra: true } } },
-      { hints: { mode: "off", extra: true } },
-      { hint: { mode: "advisory", model: { providerID: "p", id: "m" } } },
-    ]) {
-      expect(() => parseOptions(invalid)).toThrow()
-    }
-  })
-
-  test("default off: no generation call and no hint record (result unchanged)", async () => {
-    let calls = 0
-    const tools = collect({
-      generate: async () => {
-        calls += 1
-        return { text: "unused" }
-      },
-    })
-    const output = await tools
-      .get("handoff_validate")!
-      .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
-    const result = parseHinted(output.content)
-    expect(result.hints).toBeUndefined()
-    expect(calls).toBe(0)
-    expect(result.verdict).toBe("pass")
-    expect(result.admissionState).toBe("worker-passed")
-  })
-
-  test("enabled: one call after a pass, prompt from verdicts only, verdict and admission unchanged", async () => {
-    const prompts: string[] = []
-    const tools = collect({
-      options: hintOptions,
-      vcs: vcsReturning([{ file: "src/a.ts" }]),
-      generate: async (input) => {
-        prompts.push(input.prompt)
-        return { text: "  Keep the\nreceipt scoped and verified.  " }
-      },
-    })
-    const output = await tools
-      .get("handoff_validate")!
-      .execute(
-        {
-          level: "orchestrator",
-          handoff: handoff({ filesChanged: [{ path: "src/a.ts", scope: "edited" }] }),
-          contract: contract(),
-        },
-        toolContext("session-1", "orchestrator"),
-      )
-    const result = parseHinted(output.content)
-    expect(result.verdict).toBe("pass")
-    expect(result.admissionState).toBe("admitted")
-    const hints = result.hints as GenerationHintRecord
-    expect(hints.version).toBe(1)
-    expect(hints.kind).toBe("handoff-validate")
-    expect(hints.status).toBe("completed")
-    expect(hints.level).toBe("orchestrator")
-    expect(hints.verdict).toBe("pass")
-    expect(hints.checkCount).toBe(result.checks.length)
-    expect(hints.model).toBe("probe/deterministic")
-    expect(hints.hint).toBe("Keep the receipt scoped and verified.")
-    expect(hints.outputRedacted).toBe(false)
-    expect(hints.outputTruncated).toBe(false)
-    expect(hints.promptChars).toBe(prompts[0]!.length)
-    expect(hints.durationMs).toBeGreaterThanOrEqual(0)
-
-    // The prompt carries check ids and verdicts only: no detail text, no
-    // command strings, no paths, no session values.
-    const prompt = prompts[0]!
-    expect(prompt).toContain("c1-structure=pass")
-    expect(prompt).toContain(`${HANDOFF_CHECK_IDS.o6Authority}=pass`)
-    expect(prompt.split("\n").filter((line) => line.includes("="))).toHaveLength(result.checks.length + 2)
-    expect(prompt).not.toContain("src/a.ts")
-    expect(prompt).not.toContain("handoff matches the strict D2 structure")
-    expect(prompt).not.toContain("bun test")
-    expect(prompt.length).toBeLessThanOrEqual(HANDOFF_HINT_PROMPT_MAX_CHARS)
-  })
-
-  test("enabled but deterministic checks fail: skipped, never generated, verdict unchanged", async () => {
-    let calls = 0
-    const tools = collect({
-      options: hintOptions,
-      generate: async () => {
-        calls += 1
-        return { text: "unused" }
-      },
-    })
-    const output = await tools
-      .get("handoff_validate")!
-      .execute(
-        { level: "worker", handoff: handoff({ taskId: "other-task" }), contract: contract() },
-        toolContext("session-1", "orchestrator"),
-      )
-    const result = parseHinted(output.content)
-    expect(result.verdict).toBe("fail")
-    expect(result.admissionState).toBe("worker-failed")
-    expect(calls).toBe(0)
-    expect(result.hints).toEqual(
-      expect.objectContaining({ status: "skipped", reason: "verdict-not-pass", verdict: "fail" }),
-    )
-  })
-
-  test("enabled with no generation surface: records a skip and still validates", async () => {
-    const tools = collect({ options: hintOptions })
-    const output = await tools
-      .get("handoff_validate")!
-      .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
-    const result = parseHinted(output.content)
-    expect(result.admissionState).toBe("worker-passed")
-    expect(result.hints?.status).toBe("skipped")
-    expect(result.hints?.reason).toBe("generate-unavailable")
-  })
-
-  test("bounds: oversized output is truncated and credential-shaped output is redacted, never echoed", async () => {
-    const oversized = collect({ options: hintOptions, generate: async () => ({ text: "x".repeat(4000) }) })
-    const big = parseHinted(
-      (
-        await oversized
-          .get("handoff_validate")!
-          .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
-      ).content,
-    )
-    expect(big.hints?.status).toBe("completed")
-    expect(big.hints?.outputTruncated).toBe(true)
-    expect(big.hints?.outputChars).toBe(HANDOFF_HINT_OUTPUT_MAX_CHARS)
-    expect(big.hints!.hint!.length).toBeLessThanOrEqual(GENERATION_HINT_MAX_HINT_CHARS)
-    expect(big.hints!.hint!.endsWith("…")).toBe(true)
-
-    const secret = "ghp_EXAMPLEFAKETOKENFORTEST123456"
-    const redacted = collect({ options: hintOptions, generate: async () => ({ text: `rotate ${secret} now` }) })
-    const output = await redacted
-      .get("handoff_validate")!
-      .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
-    const result = parseHinted(output.content)
-    expect(result.hints?.outputRedacted).toBe(true)
-    expect(result.hints?.hint).toBe("rotate [redacted] now")
-    expect(output.content).not.toContain("ghp_")
-    expect(output.content).not.toContain("EXAMPLEFAKETOKENFORTEST123456")
-    expect(JSON.stringify(result.hints)).not.toContain(secret)
-  })
-
-  test("threads caller-known exact secrets only through the injected redactor, with a no-secret control", async () => {
-    const secret = "FAKE-EXACT-SECRET-FOR-TEST"
-    const redactor = createRedactor([secret])
-    const withSecret = collect({
-      options: hintOptions,
-      redact: redactor,
-      generate: async () => ({ text: `value ${secret} end` }),
-    })
-    const secretResult = parseHinted(
-      (
-        await withSecret
-          .get("handoff_validate")!
-          .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
-      ).content,
-    )
-    expect(secretResult.hints?.outputRedacted).toBe(true)
-    expect(JSON.stringify(secretResult)).not.toContain(secret)
-    expect(secretResult.hints?.hint).toBe("value [redacted] end")
-
-    const control = collect({
-      options: hintOptions,
-      redact: redactor,
-      generate: async () => ({ text: "no secrets in this hint" }),
-    })
-    const controlResult = parseHinted(
-      (
-        await control
-          .get("handoff_validate")!
-          .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
-      ).content,
-    )
-    expect(controlResult.hints?.outputRedacted).toBe(false)
-    expect(controlResult.hints?.hint).toBe("no secrets in this hint")
-  })
-
-  test("external timeout race abandons the wait without throwing or changing the verdict", async () => {
-    let lateResolve: ((value: { text: string }) => void) | undefined
-    const tools = collect({
-      options: hintOptions,
-      hintTimeoutMs: 20,
-      generate: () =>
-        new Promise<{ text: string }>((resolve) => {
-          lateResolve = resolve
-        }),
-    })
-    const output = await tools
-      .get("handoff_validate")!
-      .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
-    const result = parseHinted(output.content)
-    expect(result.verdict).toBe("pass")
-    expect(result.admissionState).toBe("worker-passed")
-    expect(result.hints?.status).toBe("timeout")
-    expect(result.hints?.reason).toBe("timed-out")
-    expect(result.hints?.hint).toBeUndefined()
-    // A late resolution is abandoned, never surfaced, and never an unhandled rejection.
-    lateResolve?.({ text: "late output that must not appear" })
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(output.content).not.toContain("late output")
-  })
-
-  test("provider failure records a bounded failure without echoing error text", async () => {
-    const tools = collect({
-      options: hintOptions,
-      generate: async () => {
-        throw new Error("provider exploded at https://example.invalid/?token=SECRET")
-      },
-    })
-    const output = await tools
-      .get("handoff_validate")!
-      .execute({ level: "worker", handoff: handoff(), contract: contract() }, toolContext("session-1", "orchestrator"))
-    const result = parseHinted(output.content)
-    expect(result.verdict).toBe("pass")
-    expect(result.hints?.status).toBe("failed")
-    expect(result.hints?.reason).toBe("provider-failed")
-    expect(output.content).not.toContain("exploded")
-    expect(output.content).not.toContain("SECRET")
-    expect(output.content).not.toContain("example.invalid")
-  })
-
-  test("parse helpers are defensive: invalid envelopes and unknown check ids are rejected or skipped", () => {
-    for (const invalid of [undefined, null, "text", [], {}, { text: 5 }, { text: "" }, { text: "\n\t " }]) {
-      expect(parseHandoffHintOutput(invalid)).toBeUndefined()
-    }
-    expect(parseHandoffHintOutput({ text: "ok" })).toEqual({ text: "ok", truncated: false })
-    expect(parseHandoffHintOutput({ text: "a\nb\tc" })).toEqual({ text: "a b c", truncated: false })
-    const long = parseHandoffHintOutput({ text: "y".repeat(HANDOFF_HINT_OUTPUT_MAX_CHARS + 10) })
-    expect(long?.truncated).toBe(true)
-    expect(long?.text.length).toBe(HANDOFF_HINT_OUTPUT_MAX_CHARS)
-
-    const built = handoffHintPrompt("worker", [
-      { id: HANDOFF_CHECK_IDS.c2Status, verdict: "pass", detail: "detail must not travel: src/secret.ts" },
-      { id: "unknown-check-id", verdict: "fail", detail: "unknown must not travel" },
-    ])
-    expect(built.ok).toBe(true)
-    if (built.ok) {
-      expect(built.prompt).toContain("c2-status=pass")
-      expect(built.prompt).not.toContain("unknown-check-id")
-      expect(built.prompt).not.toContain("detail must not travel")
-      expect(built.prompt).not.toContain("src/secret.ts")
-    }
-  })
-
-  test("runHandoffHint is metadata-only and never throws for a hostile generator", async () => {
-    const record = await runHandoffHint({
-      level: "worker",
-      verdict: "pass",
-      checks: [],
-      model: { providerID: "p", id: "m" },
-      generate: async () => {
-        throw "boom"
-      },
-      now: () => 100,
-    })
-    expect(record.status).toBe("failed")
-    expect(record.reason).toBe("provider-failed")
-    expect(record.promptChars).toBeGreaterThan(0)
-    // Fixed key set: no error text, prompt text, or raw output can appear.
-    expect(Object.keys(record).sort()).toEqual(
-      [
-        "capturedAt",
-        "checkCount",
-        "durationMs",
-        "kind",
-        "level",
-        "model",
-        "outputChars",
-        "outputRedacted",
-        "outputTruncated",
-        "promptChars",
-        "reason",
-        "status",
-        "verdict",
-        "version",
-      ].sort(),
-    )
-  })
-})
-
 /* ------------------------------------------------------------------ */
 /* Lead board tools                                                    */
 /* ------------------------------------------------------------------ */
@@ -1512,30 +1007,30 @@ function readStoredBoard(values: Map<string, unknown>): LeadBoard {
 }
 
 describe("lead board tools", () => {
-  test("rejects a worker agent for every lead-board tool", async () => {
+  test("rejects a worker agent for the canonical board tools", async () => {
     const tools = collect()
     const worker = toolContext("session-1", "explore")
-    for (const name of ["lead_board_get", "lead_board_init", "lead_board_task_create", "lead_board_task_assign", "lead_board_transition", "lead_board_complete"]) {
+    for (const name of ["board_get", "board_action"]) {
       await expect(tools.get(name)!.execute({}, worker)).rejects.toThrow(/only to the orchestrator/)
     }
   })
 
-  test("lead_board_get reports missing, unavailable, and a bounded projection without raw receipts", async () => {
+  test("board_get reports missing, unavailable, and a bounded projection without raw receipts", async () => {
     const values = new Map<string, unknown>()
     const tools = collect({ storage: memStorage(values) })
-    const missing = JSON.parse((await tools.get("lead_board_get")!.execute({}, toolContext("session-1", "orchestrator"))).content) as Record<string, unknown>
+    const missing = JSON.parse((await tools.get("board_get")!.execute({}, toolContext("session-1", "orchestrator"))).content) as Record<string, unknown>
     expect(missing.status).toBe("missing")
     expect((missing.limitations as string[]).join(" ")).toContain("advisory")
 
     values.set(leadBoardStorageKey(boardLocation, "session-1"), { version: 1, boardID: "x" })
-    const unavailable = JSON.parse((await tools.get("lead_board_get")!.execute({}, toolContext("session-1", "orchestrator"))).content) as Record<string, unknown>
+    const unavailable = JSON.parse((await tools.get("board_get")!.execute({}, toolContext("session-1", "orchestrator"))).content) as Record<string, unknown>
     expect(unavailable.status).toBe("unavailable")
     expect(values.get(leadBoardStorageKey(boardLocation, "session-1"))).toEqual({ version: 1, boardID: "x" })
 
     values.clear()
     seedGoal(values)
     seedBoard(values, { tasks: [boardTask()] as never })
-    const ok = JSON.parse((await tools.get("lead_board_get")!.execute({}, toolContext("session-1", "orchestrator"))).content) as {
+    const ok = JSON.parse((await tools.get("board_get")!.execute({}, toolContext("session-1", "orchestrator"))).content) as {
       status: string
       board: { counts: Record<string, number>; tasks: Array<Record<string, unknown>> }
     }
@@ -1545,33 +1040,34 @@ describe("lead board tools", () => {
     expect(ok.board.tasks[0]!.replay).toEqual({ kind: "none" })
   })
 
-  test("lead_board_init requires a goal, creates once, and replaces only on a new generation", async () => {
+  test("board_action init requires a goal, creates once, and replaces only on a new generation", async () => {
     const values = new Map<string, unknown>()
     const tools = collect({ storage: memStorage(values) })
     const orchestrator = toolContext("session-1", "orchestrator")
-    const refused = JSON.parse((await tools.get("lead_board_init")!.execute({}, orchestrator)).content) as Record<string, unknown>
+    const refused = JSON.parse((await tools.get("board_action")!.execute({ action: "init" }, orchestrator)).content) as Record<string, unknown>
     expect(refused.reason).toBe("no-goal")
 
     seedGoal(values)
-    const created = JSON.parse((await tools.get("lead_board_init")!.execute({}, orchestrator)).content) as Record<string, unknown>
+    const created = JSON.parse((await tools.get("board_action")!.execute({ action: "init" }, orchestrator)).content) as Record<string, unknown>
     expect(created.status).toBe("created")
-    const again = JSON.parse((await tools.get("lead_board_init")!.execute({}, orchestrator)).content) as Record<string, unknown>
+    const again = JSON.parse((await tools.get("board_action")!.execute({ action: "init" }, orchestrator)).content) as Record<string, unknown>
     expect(again.status).toBe("exists")
 
     seedGoal(values, 11)
-    const replaced = JSON.parse((await tools.get("lead_board_init")!.execute({ goalGeneration: 11 }, orchestrator)).content) as Record<string, unknown>
+    const replaced = JSON.parse((await tools.get("board_action")!.execute({ action: "init", goalGeneration: 11 }, orchestrator)).content) as Record<string, unknown>
     expect(replaced.status).toBe("created")
     const stored = readStoredBoard(values)
     expect(stored.goalGeneration).toBe(11)
   })
 
-  test("lead_board_task_create validates scope, duplicates, dependencies, and the board revision", async () => {
+  test("board_action create-task validates scope, duplicates, dependencies, and the board revision", async () => {
     const values = new Map<string, unknown>()
     seedGoal(values)
     const board = seedBoard(values)
     const tools = collect({ storage: memStorage(values) })
     const orchestrator = toolContext("session-1", "orchestrator")
     const request = {
+      action: "create-task",
       expectedBoardRevision: board.boardRevision,
       taskID: "child-1",
       title: "child task",
@@ -1581,7 +1077,7 @@ describe("lead board tools", () => {
       writePaths: ["src/b.ts"],
       dependencies: ["root"],
     }
-    const created = JSON.parse((await tools.get("lead_board_task_create")!.execute(request, orchestrator)).content) as Record<string, unknown>
+    const created = JSON.parse((await tools.get("board_action")!.execute(request, orchestrator)).content) as Record<string, unknown>
     expect(created.status).toBe("created")
     const stored = readStoredBoard(values)
     expect(stored.tasks).toHaveLength(2)
@@ -1589,31 +1085,31 @@ describe("lead board tools", () => {
     expect(stored.boardRevision).toBe(2)
 
     const duplicate = JSON.parse(
-      (await tools.get("lead_board_task_create")!.execute({ ...request, expectedBoardRevision: 2 }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ ...request, expectedBoardRevision: 2 }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(duplicate.reason).toBe("invalid-task")
     expect((duplicate.issues as string[]).join(" ")).toContain("duplicate-task-id")
 
     const badScope = JSON.parse(
-      (await tools.get("lead_board_task_create")!.execute({ ...request, taskID: "child-2", expectedBoardRevision: 2, writePaths: ["/etc"] }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ ...request, taskID: "child-2", expectedBoardRevision: 2, writePaths: ["/etc"] }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(badScope.reason).toBe("invalid-scope")
 
     const stale = JSON.parse(
-      (await tools.get("lead_board_task_create")!.execute({ ...request, taskID: "child-3", expectedBoardRevision: 1 }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ ...request, taskID: "child-3", expectedBoardRevision: 1 }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(stale.reason).toBe("version-mismatch")
   })
 
-  test("lead_board_task_assign bumps versions once and refuses stale versions", async () => {
+  test("board_action assign-task bumps versions once and refuses stale versions", async () => {
     const values = new Map<string, unknown>()
     seedBoard(values, { tasks: [boardTask()] as never })
     const tools = collect({ storage: memStorage(values) })
     const orchestrator = toolContext("session-1", "orchestrator")
     const assigned = JSON.parse(
       (await tools
-        .get("lead_board_task_assign")!
-        .execute({ taskID: "t1", expectedVersion: 1, ownerSessionID: "child-2", ownerRole: "reviewer" }, orchestrator)).content,
+        .get("board_action")!
+        .execute({ action: "assign-task", taskID: "t1", expectedVersion: 1, ownerSessionID: "child-2", ownerRole: "reviewer" }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(assigned.status).toBe("assigned")
     const stored = readStoredBoard(values)
@@ -1621,45 +1117,45 @@ describe("lead board tools", () => {
     expect(stored.tasks[0]!.lifecycleVersion).toBe(2)
     expect(stored.boardRevision).toBe(2)
     const stale = JSON.parse(
-      (await tools.get("lead_board_task_assign")!.execute({ taskID: "t1", expectedVersion: 1, ownerSessionID: "x", ownerRole: "lead" }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ action: "assign-task", taskID: "t1", expectedVersion: 1, ownerSessionID: "x", ownerRole: "lead" }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(stale.reason).toBe("version-mismatch")
   })
 
-  test("lead_board_transition reports evidence, rejects stale versions, foreign actors, and workers", async () => {
+  test("board_action transition reports evidence, rejects stale versions, foreign actors, and workers", async () => {
     const values = new Map<string, unknown>()
     seedBoard(values, { tasks: [boardTask({ status: "in-progress", lifecycleVersion: 4 })] as never })
     const tools = collect({ storage: memStorage(values) })
     const orchestrator = toolContext("session-1", "orchestrator")
     const missingEvidence = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 4, action: "report-task" }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ action: "transition", intent: "report-task", taskID: "t1", expectedVersion: 4 }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(missingEvidence.reason).toBe("missing-evidence")
     const reported = JSON.parse(
       (await tools
-        .get("lead_board_transition")!
+        .get("board_action")!
         .execute(
-          { taskID: "t1", expectedVersion: 4, action: "report-task", evidence: [{ kind: "command", reference: "bun test", description: "green" }] },
+          { action: "transition", intent: "report-task", taskID: "t1", expectedVersion: 4, evidence: [{ kind: "command", reference: "bun test", description: "green" }] },
           orchestrator,
         )).content,
     ) as Record<string, unknown>
     expect(reported.status).toBe("applied")
     expect(readStoredBoard(values).tasks[0]!.status).toBe("awaiting-validation")
     const stale = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 4, action: "request-changes" }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ action: "transition", intent: "request-rework", taskID: "t1", expectedVersion: 4 }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(stale.reason).toBe("version-mismatch")
     // A foreign session cannot even reach the actor check: the board record is
     // keyed to and identity-verified against the lead session, so a different
     // session reads board-missing/unavailable and is refused.
     const foreign = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 5, action: "request-changes" }, toolContext("session-2", "orchestrator"))).content,
+      (await tools.get("board_action")!.execute({ action: "transition", intent: "request-rework", taskID: "t1", expectedVersion: 5 }, toolContext("session-2", "orchestrator"))).content,
     ) as Record<string, unknown>
     expect(foreign.status).toBe("refused")
     expect(["missing", "unavailable"]).toContain(foreign.reason as string)
   })
 
-  test("lead_board_transition validate runs the unchanged D2 validator and refuses non-pass results", async () => {
+  test("board_action transition validate runs the unchanged D2 validator and refuses non-pass results", async () => {
     const values = new Map<string, unknown>()
     seedBoard(values, { tasks: [boardTask({ status: "awaiting-validation", lifecycleVersion: 5 })] as never })
     const tools = collect({ storage: memStorage(values), vcs: vcsReturning([{ file: "src/a.ts" }]) })
@@ -1667,38 +1163,39 @@ describe("lead board tools", () => {
     const validateRequest = {
       taskID: "t1",
       expectedVersion: 5,
-      action: "validate",
+      action: "transition",
+      intent: "validate-task",
       revision: HEAD_SHA,
       handoff: handoff({ taskId: "t1", filesChanged: [{ path: "src/a.ts", scope: "child" }] }),
       contract: contract({ taskId: "t1", writeScope: ["src/a.ts"], requiredCommands: [], reviewRequired: true }),
       checks: [{ id: "scope-review", verdict: "pass" }],
     }
     const failedCheck = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ ...validateRequest, checks: [{ id: "scope-review", verdict: "fail" }] }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ ...validateRequest, checks: [{ id: "scope-review", verdict: "fail" }] }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(failedCheck.reason).toBe("check-failed")
 
     const contractMismatch = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ ...validateRequest, contract: contract({ taskId: "other" }) }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ ...validateRequest, contract: contract({ taskId: "other" }) }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(contractMismatch.reason).toBe("contract-mismatch")
 
     const scopeEscape = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ ...validateRequest, contract: contract({ taskId: "t1", writeScope: ["src/z.ts"] }) }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ ...validateRequest, contract: contract({ taskId: "t1", writeScope: ["src/z.ts"] }) }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(scopeEscape.reason).toBe("contract-scope")
 
     const badRevision = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ ...validateRequest, revision: "abc" }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ ...validateRequest, revision: "abc" }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(badRevision.reason).toBe("invalid-revision")
 
     // Without VCS truth the validator blocks conservatively and the action refuses.
     const noVcs = collect({ storage: memStorage(values) })
-    const blocked = JSON.parse((await noVcs.get("lead_board_transition")!.execute(validateRequest, orchestrator)).content) as Record<string, unknown>
+    const blocked = JSON.parse((await noVcs.get("board_action")!.execute(validateRequest, orchestrator)).content) as Record<string, unknown>
     expect(blocked.reason).toBe("validation-failed")
 
-    const applied = JSON.parse((await tools.get("lead_board_transition")!.execute(validateRequest, orchestrator)).content) as {
+    const applied = JSON.parse((await tools.get("board_action")!.execute(validateRequest, orchestrator)).content) as {
       status: string
       board: { tasks: Array<{ status: string; lifecycleVersion: number; validation?: { checkIDs: string[] } }> }
     }
@@ -1708,7 +1205,7 @@ describe("lead board tools", () => {
     expect(readStoredBoard(values).tasks[0]!.validation?.revision).toBe(HEAD_SHA)
   })
 
-  test("lead_board_transition complete requires an approved exact-revision review and is sticky", async () => {
+  test("board_action transition complete requires an approved exact-revision review and is sticky", async () => {
     const values = new Map<string, unknown>()
     seedBoard(values, {
       tasks: [
@@ -1722,37 +1219,37 @@ describe("lead board tools", () => {
     const tools = collect({ storage: memStorage(values) })
     const orchestrator = toolContext("session-1", "orchestrator")
     const noReview = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 6, action: "complete" }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ action: "transition", intent: "complete", taskID: "t1", expectedVersion: 6 }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(noReview.reason).toBeDefined()
 
     seedReview(values, { state: "changes-requested" })
     const notApproved = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 6, action: "complete" }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ action: "transition", intent: "complete", taskID: "t1", expectedVersion: 6 }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(notApproved.reason).toBe("not-approved")
 
     seedReview(values, { headSha: "c".repeat(40) })
     const mismatch = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 6, action: "complete" }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ action: "transition", intent: "complete", taskID: "t1", expectedVersion: 6 }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(mismatch.reason).toBe("revision-mismatch")
 
     seedReview(values)
     const completed = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 6, action: "complete" }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ action: "transition", intent: "complete", taskID: "t1", expectedVersion: 6 }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(completed.status).toBe("applied")
     const stored = readStoredBoard(values)
     expect(stored.tasks[0]!.status).toBe("completed")
     expect(stored.tasks[0]!.review?.revision).toBe(HEAD_SHA)
     const sticky = JSON.parse(
-      (await tools.get("lead_board_transition")!.execute({ taskID: "t1", expectedVersion: 7, action: "requeue" }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ action: "transition", intent: "requeue-task", taskID: "t1", expectedVersion: 7 }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(sticky.status).toBe("refused")
   })
 
-  test("lead_board_complete requires all tasks completed, the aggregate verification, the exact review, and an unchanged goal", async () => {
+  test("board_action complete requires all tasks completed, the aggregate verification, the exact review, and an unchanged goal", async () => {
     const values = new Map<string, unknown>()
     seedGoal(values)
     seedReview(values)
@@ -1760,13 +1257,14 @@ describe("lead board tools", () => {
     const tools = collect({ storage: memStorage(values), vcs: vcsReturning([]) })
     const orchestrator = toolContext("session-1", "orchestrator")
     const request = {
+      action: "complete",
       expectedBoardRevision: board.boardRevision,
       revision: HEAD_SHA,
       handoff: handoff({ taskId: board.boardID, outcome: "aggregate verified" }),
       contract: contract({ taskId: board.boardID, writeScope: [], requiredCommands: [], reviewRequired: true }),
       checks: [],
     }
-    const incomplete = JSON.parse((await tools.get("lead_board_complete")!.execute(request, orchestrator)).content) as Record<string, unknown>
+    const incomplete = JSON.parse((await tools.get("board_action")!.execute(request, orchestrator)).content) as Record<string, unknown>
     expect(incomplete.reason).toBe("board-incomplete")
 
     seedBoard(values, {
@@ -1785,18 +1283,18 @@ describe("lead board tools", () => {
       ] as never,
     })
     const contractMismatch = JSON.parse(
-      (await tools.get("lead_board_complete")!.execute({ ...request, contract: contract({ taskId: "other", writeScope: [], requiredCommands: [], reviewRequired: true }) }, orchestrator)).content,
+      (await tools.get("board_action")!.execute({ ...request, contract: contract({ taskId: "other", writeScope: [], requiredCommands: [], reviewRequired: true }) }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(contractMismatch.reason).toBe("contract-mismatch")
 
     // Goal identity change (a replaced generation) cancels the completion.
     seedGoal(values, 11)
-    const identityChanged = JSON.parse((await tools.get("lead_board_complete")!.execute(request, orchestrator)).content) as Record<string, unknown>
+    const identityChanged = JSON.parse((await tools.get("board_action")!.execute(request, orchestrator)).content) as Record<string, unknown>
     expect(identityChanged.reason).toBe("goal-identity-changed")
 
     // Restore the matching generation and complete under the lock.
     seedGoal(values, 10)
-    const completed = JSON.parse((await tools.get("lead_board_complete")!.execute(request, orchestrator)).content) as Record<string, unknown>
+    const completed = JSON.parse((await tools.get("board_action")!.execute(request, orchestrator)).content) as Record<string, unknown>
     expect(completed.status).toBe("complete")
     const stored = readStoredBoard(values)
     expect(stored.status).toBe("complete")
@@ -1826,7 +1324,7 @@ describe("lead board tools", () => {
     })
     const pausedTools = collect({ storage: memStorage(pausedValues), vcs: vcsReturning([]) })
     const paused = JSON.parse(
-      (await pausedTools.get("lead_board_complete")!.execute({ ...request, expectedBoardRevision: pausedBoard.boardRevision }, orchestrator)).content,
+      (await pausedTools.get("board_action")!.execute({ ...request, expectedBoardRevision: pausedBoard.boardRevision }, orchestrator)).content,
     ) as Record<string, unknown>
     expect(paused.reason).toBe("goal-identity-changed")
     expect(readStoredBoard(pausedValues).status).toBe("active")

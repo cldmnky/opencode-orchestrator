@@ -564,7 +564,8 @@ type LegacyReservation = {
 type Reservation = BoardReservation | LegacyReservation
 
 // Identity of the exact record the reservation wrote, used at admission time.
-// A replacement (`goal_set`) or update (`goal_update`) changes these fields,
+// A replacement (`orchestrator_goal` action `set`) or update (`pause`,
+// `resume`, or `complete`) changes these fields,
 // so comparing them on top of the continuation count prevents an older or
 // replaced goal from being mistaken for the reservation.
 function isSameReservation(current: GoalRecord, reserved: GoalRecord): boolean {

@@ -21,10 +21,9 @@ export type {
 
 // Serialized runtime public pure APIs. No package subpath: these are exported
 // from the main entrypoint only. The orchestration tools
-// (orchestrator_task_complexity_classify, orchestrator_handoff_validate,
-// orchestrator_admission_transition) are wired behind the plugin, and these
-// modules are their callable/stateless primitives — none of them enforces an
-// automatic gate.
+// (orchestrator_handoff_validate and the canonical board operations) are wired
+// behind the plugin, and these modules are callable/stateless primitives — none
+// of them enforces an automatic gate.
 
 // D4 complexity classifier (advisory).
 export {
@@ -260,6 +259,18 @@ export {
   PEER_RESULT_LIMIT_DEFAULT,
   PEER_RESULT_LIMIT_MAX,
   PEER_QUERY_LIMITATIONS,
+  SESSION_STATUS_LIMITATIONS,
   queryPeerGoals,
+  querySessionStatus,
+  querySessionStatuses,
 } from "./opencode-v2/peers/tools.js"
-export type { PeerSummary, PeerQueryInput, PeerQueryResult } from "./opencode-v2/peers/tools.js"
+export type {
+  PeerSummary,
+  PeerQueryInput,
+  PeerQueryResult,
+  SessionStatusSummary,
+  SessionStatusSingleInput,
+  SessionStatusSingleResult,
+  SessionStatusListInput,
+  SessionStatusListResult,
+} from "./opencode-v2/peers/tools.js"

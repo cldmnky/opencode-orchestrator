@@ -181,6 +181,7 @@ async function withHost<T>(probe: Probe, run: (host: Awaited<ReturnType<typeof O
   try {
     host = await OpenCode.create({
       plugins: [probe.plugin],
+      fs: { filewatcher: false },
       models: { fetch: false },
       database: { path: join(root, "database.sqlite") },
       config: { directory, content: config(directory) },

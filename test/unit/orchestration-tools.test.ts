@@ -26,7 +26,7 @@ import {
   parseLeadBoard,
   type LeadBoard,
 } from "../../src/opencode-v2/orchestration/lead-board.js"
-import { reviewStorageKey } from "../../src/opencode-v2/observability/review.js"
+import { reviewV2StorageKey, type ReviewV2Record } from "../../src/opencode-v2/observability/review-v2.js"
 import { goalStorageKey } from "../../src/opencode-v2/goal/state.js"
 import { verificationCommandDigest } from "../../src/core/verification.js"
 import { verificationStorageKey } from "../../src/opencode-v2/verification/state.js"
@@ -174,7 +174,7 @@ describe("orchestration validation tool registration", () => {
     // addObservabilityTools (src/opencode-v2/observability/tools.ts) only when
     // a mode is enabled, so default tool registration is unchanged.
     const tools = collect()
-    for (const name of ["observability_get", "review_get", "review_transition"]) {
+    for (const name of ["observability_get", "review_get", "review_start", "review_submit"]) {
       expect(tools.has(name)).toBe(false)
     }
   })
@@ -1486,16 +1486,17 @@ function seedBoard(values: Map<string, unknown>, overrides: Partial<LeadBoard> =
 }
 
 function seedReview(values: Map<string, unknown>, overrides: Record<string, unknown> = {}): void {
-  values.set(reviewStorageKey(boardLocation, "session-1"), {
-    version: 1,
+  const state = (overrides.state as ReviewV2Record["state"] | undefined) ?? "approved"
+  values.set(reviewV2StorageKey(boardLocation, "session-1"), {
+    version: 2,
     taskId: "t1",
     runId: "r1",
-    maker: "session-1",
-    checker: "reviewer-1",
-    state: "approved",
+    leadSessionID: "session-1",
+    reviewerAgentID: "reviewer",
+    ...(state !== "pending" ? { reviewerSessionID: "reviewer-session-1", submittedAt: 2 } : {}),
+    ...(state === "approved" ? { checks: { diff: true, scope: true, verification: true } } : {}),
+    state,
     round: 1,
-    maxRounds: 3,
-    requiresHuman: false,
     createdAt: 1,
     updatedAt: 2,
     headSha: HEAD_SHA,

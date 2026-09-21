@@ -46,7 +46,7 @@ import { moveSessionToDirectory } from "../../src/opencode-v2/session/move.js"
 import { createSessionMoveCoordinator, type SessionMoveCoordinator } from "../../src/opencode-v2/session/move-coordinator.js"
 import { sessionAnchorStorageKey, type SessionAnchor } from "../../src/opencode-v2/session/state.js"
 import { evidenceSchema, type EvidenceRecord } from "../../src/opencode-v2/orchestration/evidence.js"
-import { reviewStorageKey, type ReviewV1Record } from "../../src/opencode-v2/observability/review.js"
+import { reviewV2StorageKey, type ReviewV2Record } from "../../src/opencode-v2/observability/review-v2.js"
 import { publishStorageKey } from "../../src/opencode-v2/publish/state.js"
 import { gatesStorageKey } from "../../src/opencode-v2/gates/state.js"
 
@@ -225,26 +225,27 @@ function seedApprovedReview(
   overrides: {
     headSha?: string
     baseSha?: string
-    state?: ReviewV1Record["state"]
+    state?: ReviewV2Record["state"]
   } = {},
 ): void {
-  const review: ReviewV1Record = {
-    version: 1,
+  const state = overrides.state ?? "approved"
+  const review: ReviewV2Record = {
+    version: 2,
     taskId: "impl-worktree-sync",
     runId: "run-1",
-    maker: "implementer",
-    checker: "reviewer",
-    state: overrides.state ?? "approved",
+    leadSessionID: "session-1",
+    reviewerAgentID: "reviewer",
+    state,
     round: 1,
-    maxRounds: 3,
-    reason: overrides.state === "approved" ? "approval-complete" : "manual-start",
-    requiresHuman: false,
+    reason: state === "approved" ? "approval-complete" : "manual-start",
     createdAt: 1,
     updatedAt: 2,
+    ...(state !== "pending" ? { submittedAt: 2, reviewerSessionID: "reviewer-session-1" } : {}),
+    ...(state === "approved" ? { checks: { diff: true, scope: true, verification: true } } : {}),
     headSha: overrides.headSha ?? HEAD_SHA,
     baseSha: overrides.baseSha ?? BASE_SHA,
   }
-  values.set(reviewStorageKey({ project: { id: "origin" } }, "session-1"), review)
+  values.set(reviewV2StorageKey({ project: { id: "origin" } }, "session-1"), review)
 }
 
 /**

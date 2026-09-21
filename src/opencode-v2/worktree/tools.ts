@@ -38,8 +38,8 @@ import {
   type WorktreeSyncReceipt,
 } from "./state.js"
 import { requireGateEnabled } from "../gates/state.js"
-import { readReviewRecord } from "../observability/runtime.js"
-import { validateApprovedReviewRevision } from "../observability/review.js"
+import { readReviewRecord, readReviewRecordV2 } from "../observability/runtime.js"
+import { validateApprovedReviewV2Revision } from "../observability/review-v2.js"
 import { moveSessionToDirectory } from "../session/move.js"
 import type { SessionMoveCoordinator } from "../session/move-coordinator.js"
 
@@ -454,9 +454,15 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
         }
         // Exact-revision approved review receipt: the current bounded review
         // record must be APPROVED and carry the exact synced base/head pair.
-        const reviewRecord = await readReviewRecord(deps.storage, deps.location, tool.sessionID)
-        const review = validateApprovedReviewRevision({
+        const [reviewRecord, legacyReviewRecord] = await Promise.all([
+          readReviewRecordV2(deps.storage, deps.location, tool.sessionID),
+          readReviewRecord(deps.storage, deps.location, tool.sessionID),
+        ])
+        const review = validateApprovedReviewV2Revision({
           record: reviewRecord,
+          legacyRecord: legacyReviewRecord,
+          leadSessionID: tool.sessionID,
+          expectedReviewerAgentID: deps.options.roles.review,
           headSha: receipt.headSha,
           baseSha: receipt.baseSha,
         })

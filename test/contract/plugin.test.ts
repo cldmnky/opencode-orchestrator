@@ -8,6 +8,7 @@ import {
   ORCHESTRATION_TOOL_PERMISSION,
   PEER_TOOL_PERMISSION,
   PUBLISH_TOOL_PERMISSION,
+  REVIEW_SUBMIT_TOOL_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
 } from "../../src/core/permissions.js"
 import { orchestratorPlugin } from "../../src/index.js"
@@ -398,15 +399,17 @@ describe("server plugin contract", () => {
       "orchestrator_admission_transition",
       "orchestrator_observability_get",
       "orchestrator_review_get",
-      "orchestrator_review_transition",
+      "orchestrator_review_start",
+      "orchestrator_review_submit",
     ]) {
       expect(tools.some((tool) => `${tool.options?.namespace}_${tool.name}` === name)).toBe(true)
     }
     expect(tools.filter((tool) => tool.options?.permission === OBSERVABILITY_TOOL_PERMISSION).map((tool) => tool.name).sort()).toEqual([
       "observability_get",
       "review_get",
-      "review_transition",
+      "review_start",
     ])
+    expect(tools.filter((tool) => tool.options?.permission === REVIEW_SUBMIT_TOOL_PERMISSION).map((tool) => tool.name)).toEqual(["review_submit"])
 
     // The orchestrator system prompt embeds the bounded flow guidance.
     expect(agents.get("orchestrator")?.system).toContain("Bounded review mode is configured")

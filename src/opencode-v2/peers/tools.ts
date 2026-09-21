@@ -39,7 +39,9 @@ import {
   type LocationLike,
   type StorageLike,
 } from "../goal/state.js"
-import { parseReviewRecord, reviewStorageKey, type ReviewV1State } from "../observability/review.js"
+import { parseReviewRecord, reviewStorageKey } from "../observability/review.js"
+import { parseReviewV2Record, reviewV2StorageKey } from "../observability/review-v2.js"
+import type { ReviewV2State } from "../observability/review-v2.js"
 import { redactKnownPatterns } from "../process/redact.js"
 import { readWorktree, type WorktreeStatus } from "../worktree/state.js"
 import type { Info as ToolInfo } from "@opencode/plugin/promise/tool"
@@ -62,6 +64,7 @@ export const PEER_QUERY_LIMITATIONS = [
   "same stable project only: goal records keyed under other projects are never read",
   "no live completeness guarantee: sessions without a readable goal record (or with a malformed one) do not appear",
   "read-only: this query never mutates storage, Git, or GitHub",
+  "legacy V1 review records surface as legacy-unproven status and never authorize publication",
 ]
 
 export type PeerSummary = {
@@ -298,7 +301,7 @@ export type SessionStatusSummary = {
   sessionID: string
   goal: { status: GoalStatus; objectiveHint: string } | null
   worktree: { status: WorktreeStatus; branch: string; dir: string } | null
-  review: { state: ReviewV1State } | null
+  review: { state: ReviewV2State | "legacy-unproven" } | null
 }
 
 export type SessionStatusSingleInput = {
@@ -366,7 +369,8 @@ export async function querySessionStatus(
  * Bounded same-project session status list: identical scan bounds, cap,
  * page size, cursor, ordering,and self-filter as `queryPeerGoals`, but
  * each returned session additionally joins its worktree/review records (both
- * null when missing or malformed; only the returned slice is joined).
+ * null when missing or malformed; only the returned slice is joined). Legacy
+ * V1 review records are status-only and surface as `legacy-unproven`.
  */
 export async function querySessionStatuses(
   storage: StorageLike,
@@ -455,7 +459,9 @@ async function summarizeSessionStatus(
 
 
   const worktree = await readWorktree(storage, projectID, sessionID)
-  const review = parseReviewRecord(await storage.get(reviewStorageKey({ project: { id: projectID } }, sessionID)))
+  const keyed = { project: { id: projectID } }
+  const v2 = parseReviewV2Record(await storage.get(reviewV2StorageKey(keyed, sessionID)))
+  const v1 = v2 ? undefined : parseReviewRecord(await storage.get(reviewStorageKey(keyed, sessionID)))
   return {
     sessionID,
     goal: { status: goal.status, objectiveHint: objectiveHint(goal.objective) },
@@ -466,7 +472,7 @@ async function summarizeSessionStatus(
           dir: redactPath(worktree.dir, SESSION_STATUS_PATH_LENGTH),
         }
       : null,
-    review: review ? { state: review.state } : null,
+    review: v2 ? { state: v2.state } : v1 ? { state: "legacy-unproven" } : null,
   }
 }
 

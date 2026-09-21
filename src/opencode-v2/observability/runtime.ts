@@ -1,5 +1,6 @@
 /**
- * S3/V1 observability runtime - hooks, events, bounded summaries, dispatch gate.
+ * S3 observability runtime plus V2 review dispatch state - hooks, events,
+ * bounded summaries, and dispatch gate.
  *
  * Started only when `trace.mode !== "off"`, `budget.mode === "stop-between-steps"`,
  * or `review.mode === "bounded"`. Uses only pinned V2 surfaces: tool
@@ -36,6 +37,7 @@ import {
   type UsageSnapshotInput,
 } from "./trace.js"
 import { parseReviewRecord, reviewStorageKey, type ReviewV1Record } from "./review.js"
+import { parseReviewV2Record, readReviewV2Record, reviewV2StorageKey, type ReviewV2Record } from "./review-v2.js"
 import {
   stableProjectID,
   withSessionLock,
@@ -137,7 +139,7 @@ export async function startObservability(deps: ObservabilityDeps): Promise<Obser
     async allowDispatch(sessionID: string, check: DispatchCheck): Promise<DispatchDecision> {
       let reviewBreaker: string | undefined
       if (deps.options.review.mode === "bounded" && check === "auto") {
-        const record = await readCurrentReviewRecord(sessionID)
+        const record = await readCurrentReviewStatus(sessionID)
         if (record && (record.state === "blocked" || record.state === "tripped")) {
           reviewBreaker = `review circuit is open: ${record.state} for task ${record.taskId} (run ${record.runId}); a human decision is required`
         }
@@ -322,10 +324,12 @@ export async function startObservability(deps: ObservabilityDeps): Promise<Obser
     })
   }
 
-  async function readCurrentReviewRecord(sessionID: string): Promise<ReviewV1Record | undefined> {
+  async function readCurrentReviewStatus(sessionID: string): Promise<{ state: string; taskId: string; runId: string } | undefined> {
     const keyed = await keyedLocation(sessionID)
-    const value = await deps.storage.get(reviewStorageKey(keyed, sessionID))
-    return parseReviewRecord(value)
+    const v2 = parseReviewV2Record(await deps.storage.get(reviewV2StorageKey(keyed, sessionID)))
+    if (v2) return v2
+    const v1 = parseReviewRecord(await deps.storage.get(reviewStorageKey(keyed, sessionID)))
+    return v1
   }
 
   async function keyedLocation(sessionID: string): Promise<LocationLike> {
@@ -351,7 +355,9 @@ export function createDispatchGate(input: {
       let reviewBreaker: string | undefined
       if (input.options.review.mode === "bounded" && check === "auto") {
         const keyed = await stableKeyedLocation(input.storage, input.location, sessionID)
-        const record = parseReviewRecord(await input.storage.get(reviewStorageKey(keyed, sessionID)))
+        const record =
+          parseReviewV2Record(await input.storage.get(reviewV2StorageKey(keyed, sessionID))) ??
+          parseReviewRecord(await input.storage.get(reviewStorageKey(keyed, sessionID)))
         if (record && (record.state === "blocked" || record.state === "tripped")) {
           reviewBreaker = `review circuit is open: ${record.state} for task ${record.taskId} (run ${record.runId}); a human decision is required`
         }
@@ -378,10 +384,21 @@ export async function readReviewRecord(storage: StorageLike, location: LocationL
   return parseReviewRecord(await storage.get(reviewStorageKey(keyed, sessionID)))
 }
 
+/** Read only the provenance-bound V2 record; V1 is deliberately not upgraded. */
+export async function readReviewRecordV2(storage: StorageLike, location: LocationLike, sessionID: string): Promise<ReviewV2Record | undefined> {
+  return readReviewV2Record(storage, location, sessionID)
+}
+
 /** Lock-free review record write; callers must serialize via withSessionLock. */
 export async function setReviewRecord(storage: StorageLike, location: LocationLike, sessionID: string, record: ReviewV1Record): Promise<void> {
   const keyed = await stableKeyedLocation(storage, location, sessionID)
   await storage.set(reviewStorageKey(keyed, sessionID), record)
+}
+
+/** Lock-free V2 write; callers must serialize through withSessionLock. */
+export async function setReviewRecordV2(storage: StorageLike, location: LocationLike, sessionID: string, record: ReviewV2Record): Promise<void> {
+  const keyed = await stableKeyedLocation(storage, location, sessionID)
+  await storage.set(reviewV2StorageKey(keyed, sessionID), record)
 }
 
 /** Write a review record under the existing process-local session lock. */

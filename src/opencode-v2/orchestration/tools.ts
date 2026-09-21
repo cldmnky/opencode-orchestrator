@@ -38,8 +38,8 @@ import {
   type LeadTransitionAction,
 } from "./lead-board.js"
 import { goalStorageKey, readGoal, withSessionLock, type LocationLike, type StorageLike } from "../goal/state.js"
-import { readReviewRecord } from "../observability/runtime.js"
-import { validateApprovedReviewRevision } from "../observability/review.js"
+import { readReviewRecord, readReviewRecordV2 } from "../observability/runtime.js"
+import { validateApprovedReviewV2Revision } from "../observability/review-v2.js"
 import { listVerificationReceipts } from "../verification/state.js"
 
 /**
@@ -621,9 +621,15 @@ async function transitionLeadBoardTool(
           "this legacy validation has no plugin-observed receipt IDs; validate the task again before completion",
         )
       }
-      const review = await readReviewRecord(deps.storage, deps.location, sessionID)
-      const check = validateApprovedReviewRevision({
+      const [review, legacyReview] = await Promise.all([
+        readReviewRecordV2(deps.storage, deps.location, sessionID),
+        readReviewRecord(deps.storage, deps.location, sessionID),
+      ])
+      const check = validateApprovedReviewV2Revision({
         record: review,
+        legacyRecord: legacyReview,
+        leadSessionID: sessionID,
+        expectedReviewerAgentID: deps.options.roles.review,
         headSha: task.validation.revision,
         baseSha: review?.baseSha ?? "",
       })
@@ -637,7 +643,7 @@ async function transitionLeadBoardTool(
         actorSessionID: sessionID,
         action: "complete",
         review: {
-          reference: `review/${review!.taskId}/${review!.runId}`,
+          reference: `review/v2/${review!.taskId}/${review!.runId}`,
           revision: task.validation.revision,
           approvedAt: review!.updatedAt,
         },
@@ -824,12 +830,22 @@ async function completeLeadBoardTool(
       checks: [...failures, ...blockers].slice(0, 8).map((check) => `${check.id}:${check.verdict}`),
     })
   }
-  const review = await readReviewRecord(deps.storage, deps.location, sessionID)
-  const reviewCheck = validateApprovedReviewRevision({ record: review, headSha: revision, baseSha: review?.baseSha ?? "" })
+  const [review, legacyReview] = await Promise.all([
+    readReviewRecordV2(deps.storage, deps.location, sessionID),
+    readReviewRecord(deps.storage, deps.location, sessionID),
+  ])
+  const reviewCheck = validateApprovedReviewV2Revision({
+    record: review,
+    legacyRecord: legacyReview,
+    leadSessionID: sessionID,
+    expectedReviewerAgentID: deps.options.roles.review,
+    headSha: revision,
+    baseSha: review?.baseSha ?? "",
+  })
   if (!reviewCheck.valid) {
     return boardRefusal(reviewCheck.verdict, `aggregate completion requires an approved exact-revision review: ${reviewCheck.message}`)
   }
-  const reviewReference = `review/${review!.taskId}/${review!.runId}`
+  const reviewReference = `review/v2/${review!.taskId}/${review!.runId}`
 
   return withSessionLock(deps.location, sessionID, async () => {
     const read = await readBoard(deps, sessionID)

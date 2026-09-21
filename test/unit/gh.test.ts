@@ -46,6 +46,7 @@ import { addGhTools } from "../../src/opencode-v2/gh/tools.js"
 import type { StorageLike } from "../../src/opencode-v2/goal/state.js"
 import { evidenceSchema, type EvidenceRecord } from "../../src/opencode-v2/orchestration/evidence.js"
 import type { ReviewV1Record } from "../../src/opencode-v2/observability/review.js"
+import type { ReviewV2Record } from "../../src/opencode-v2/observability/review-v2.js"
 
 const location = { directory: "/workspace", project: { id: "origin" } }
 
@@ -94,20 +95,21 @@ const REPO = {
   defaultBranchRef: { name: "main" },
 }
 
-/** Durable exact-revision APPROVED review receipt (review/v1 schema). */
-const APPROVED_REVIEW: ReviewV1Record = {
-  version: 1,
+/** Durable exact-revision APPROVED review receipt (review/v2 schema). */
+const APPROVED_REVIEW: ReviewV2Record = {
+  version: 2,
   taskId: "task-1",
   runId: "run-1",
-  maker: "implementer",
-  checker: "reviewer",
+  leadSessionID: "session-1",
+  reviewerAgentID: "reviewer",
+  reviewerSessionID: "reviewer-session-1",
   state: "approved",
   round: 1,
-  maxRounds: 2,
   reason: "approval-complete",
-  requiresHuman: false,
   createdAt: 1,
   updatedAt: 2,
+  submittedAt: 2,
+  checks: { diff: true, scope: true, verification: true },
   headSha: HEAD_SHA,
   baseSha: BASE_SHA,
 }
@@ -116,13 +118,15 @@ const APPROVED_REVIEW: ReviewV1Record = {
  * Storage backing the durable publication capability, the per-session gate
  * narrowing record, and the internal review receipt. `capabilities` grants the
  * publish record for the stable project "origin"; `record` (when provided) is
- * returned for the session's review key; `disabledGates` (when non-empty) is
+ * returned for the session's V2 review key; `legacyRecord` is returned only
+ * from the V1 key for migration/refusal tests; `disabledGates` (when non-empty) is
  * returned for the session's `gates/v1/<sessionID>` key exactly as
  * `gates/state.ts` writes it.
  */
 function lifecycleStorage(options: {
   capabilities?: readonly string[]
-  record?: ReviewV1Record | undefined
+  record?: ReviewV2Record | undefined
+  legacyRecord?: ReviewV1Record | undefined
   publishRecord?: unknown
   disabledGates?: readonly string[]
 } = {}): StorageLike {
@@ -140,7 +144,8 @@ function lifecycleStorage(options: {
       : undefined)
   return {
     async get(key) {
-      if (key.startsWith("review/v1/")) return options.record
+      if (key.startsWith("review/v2/")) return options.record
+      if (key.startsWith("review/v1/")) return options.legacyRecord
       if (key.startsWith("publish/v1/")) return publishRecord
       if (key.startsWith("gates/v1/")) {
         if (!options.disabledGates || options.disabledGates.length === 0) return undefined
@@ -1475,8 +1480,37 @@ describe("github tools", () => {
       expect(output.content).toContain("no review record")
     })
 
+    test("refuses a legacy V1 receipt as legacy-unproven before any remote read", async () => {
+      const legacy: ReviewV1Record = {
+        version: 1,
+        taskId: "task-1",
+        runId: "run-1",
+        maker: "implementer",
+        checker: "reviewer",
+        state: "approved",
+        round: 1,
+        maxRounds: 2,
+        reason: "approval-complete",
+        requiresHuman: false,
+        createdAt: 1,
+        updatedAt: 2,
+        headSha: HEAD_SHA,
+        baseSha: BASE_SHA,
+      }
+      const { runner, calls } = createScripted()
+      const { tools } = collectGhTools({
+        runner,
+        storage: lifecycleStorage({ capabilities: ["pr-draft-create"], legacyRecord: legacy }),
+      })
+      const output = await tools
+        .get("github_pr_create")!
+        .execute(createInput, toolContext("session-1", "orchestrator"))
+      expect(output.content).toContain("legacy-unproven")
+      expect(calls).toHaveLength(0)
+    })
+
     test("refuses a receipt that is not approved or bound to a different revision", async () => {
-      const pending: ReviewV1Record = { ...APPROVED_REVIEW, state: "pending", reason: "manual-start" }
+      const pending: ReviewV2Record = { ...APPROVED_REVIEW, state: "pending", reviewerSessionID: undefined, submittedAt: undefined, checks: undefined, reason: "manual-start" }
       const { runner } = createScripted()
       const { tools } = collectGhTools({
         runner,
@@ -1586,7 +1620,7 @@ describe("github tools", () => {
       expectedHeadSha: HEAD_SHA,
       confirm: true,
     }
-    const READY_STORAGE = lifecycleStorage({ capabilities: ["pr-ready-transition"] })
+    const READY_STORAGE = lifecycleStorage({ capabilities: ["pr-ready-transition"], record: APPROVED_REVIEW })
     const OPEN_DRAFT = { ...PULL, state: "open", merged: false, draft: true, mergeable: true, mergeable_state: "clean" }
     const READY_DONE = { ...PULL, state: "open", merged: false, draft: false, mergeable: true, mergeable_state: "clean" }
 
@@ -2112,7 +2146,7 @@ describe("github tools", () => {
       expectedBaseSha: BASE_SHA,
     }
     /** Exact-revision APPROVED receipt bound to the merge head/base pair. */
-    const MERGE_REVIEW: ReviewV1Record = { ...APPROVED_REVIEW, headSha: HEAD_SHA_7_40, baseSha: BASE_SHA }
+    const MERGE_REVIEW: ReviewV2Record = { ...APPROVED_REVIEW, headSha: HEAD_SHA_7_40, baseSha: BASE_SHA }
     const MERGE_STORAGE = lifecycleStorage({ capabilities: ["merge"], record: MERGE_REVIEW })
 
     /** Scripted gh for the merge pipeline: refs, compare, pre/post views, PUT. */
@@ -2433,7 +2467,7 @@ describe("github tools", () => {
       base: { ref: "main", sha: BASE_SHA },
     }
     const MERGED_PULL = { ...OPEN_PULL, state: "closed", merged: true, merged_at: "2026-08-31T00:00:00Z" }
-    const MERGE_REVIEW: ReviewV1Record = { ...APPROVED_REVIEW, headSha: HEAD_SHA_7_40, baseSha: BASE_SHA }
+    const MERGE_REVIEW: ReviewV2Record = { ...APPROVED_REVIEW, headSha: HEAD_SHA_7_40, baseSha: BASE_SHA }
     const approveInput = {
       owner: "acme",
       repo: "widgets",

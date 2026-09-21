@@ -7,6 +7,7 @@ import {
   ORCHESTRATION_TOOL_PERMISSION,
   PEER_TOOL_PERMISSION,
   PUBLISH_TOOL_PERMISSION,
+  REVIEW_SUBMIT_TOOL_PERMISSION,
   WORKTREE_TOOL_PERMISSION,
   orchestratorOnlyPermissionRules,
 } from "../../src/core/permissions.js"
@@ -93,8 +94,16 @@ describe("agent transform feature permissions", () => {
       planner: { mode: "subagent", permissions: [] },
     })
     applyAgentTransform(draft, options)
-    expect(draft.get("orchestrator")!.permissions).toEqual([GOAL_ALLOW, ...FEATURE_ALLOWS])
-    expect(draft.get("planner")!.permissions).toEqual([GOAL_DENY, ...FEATURE_DENIES])
+    expect(draft.get("orchestrator")!.permissions).toEqual([
+      GOAL_ALLOW,
+      ...FEATURE_ALLOWS,
+      { action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: "deny" },
+    ])
+    expect(draft.get("planner")!.permissions).toEqual([
+      GOAL_DENY,
+      ...FEATURE_DENIES,
+      { action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: "deny" },
+    ])
   })
 
   test("keeps an existing explicit orchestrator allow instead of duplicating it", () => {
@@ -136,6 +145,7 @@ describe("agent transform feature permissions", () => {
       expect(draft.get("orchestrator")!.permissions).toEqual([
         { action: GOAL_TOOL_PERMISSION, resource: "*", effect },
         ...FEATURE_ALLOWS,
+        { action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: "deny" },
       ])
     }
   })
@@ -152,6 +162,7 @@ describe("agent transform feature permissions", () => {
     expect(draft.get("explore")!.permissions).toEqual([
       { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "allow" },
       ...FEATURE_DENIES,
+      { action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: "deny" },
     ])
   })
 
@@ -204,6 +215,7 @@ describe("agent transform feature permissions", () => {
       { action: ORCHESTRATION_TOOL_PERMISSION, resource: "*", effect: "ask" },
       GOAL_ALLOW,
       ...orchestratorOnlyPermissionRules("allow").filter((rule) => rule.action !== ORCHESTRATION_TOOL_PERMISSION),
+      { action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: "deny" },
     ])
   })
 

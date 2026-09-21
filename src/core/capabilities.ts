@@ -21,7 +21,7 @@ export const CAPABILITY_VOCABULARY = [
   "Never describe guidance or recorded state as observed or enforced.",
 ].join("\n")
 
-/** Current boundaries after shell receipts; reviewer provenance and dispatch admission remain separate phases. */
+/** Current boundaries after shell receipts and reviewer-child provenance; dispatch admission remains a later phase. */
 export const CURRENT_CAPABILITY_STATEMENTS: readonly CapabilityStatement[] = [
   {
     id: "parallel-dispatch",
@@ -35,8 +35,8 @@ export const CURRENT_CAPABILITY_STATEMENTS: readonly CapabilityStatement[] = [
   },
   {
     id: "bounded-review-identity",
-    level: "recorded",
-    statement: "bounded review records contain caller-supplied maker/checker identities; reviewer-child provenance is not proven.",
+    level: "observed",
+    statement: "bounded review approval records contain plugin-observed reviewer agent and child-session provenance; legacy V1 records remain unproven.",
   },
   {
     id: "publication-revision-gates",

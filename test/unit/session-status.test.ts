@@ -65,8 +65,9 @@ describe("session status query", () => {
     expect(Object.keys(result.summary!.worktree!).sort()).toEqual(["branch", "dir", "status"])
     expect(result.summary?.worktree?.branch).toContain("API_KEY: [redacted]")
     expect(result.summary?.worktree?.branch).not.toContain("sk_test_12345abc")
-    // The review join exposes only the state: never taskId, runs, or SHAs.
-    expect(result.summary?.review).toEqual({ state: "pending" })
+    // The review join exposes only a bounded status: legacy V1 state is
+    // deliberately reported as unproven, never as publication proof.
+    expect(result.summary?.review).toEqual({ state: "legacy-unproven" })
     expect(Object.keys(result.summary!.review!)).toEqual(["state"])
     expect(JSON.stringify(result)).not.toContain("sk_test_12345abc")
     expect(JSON.stringify(result)).not.toContain("completionEvidence")

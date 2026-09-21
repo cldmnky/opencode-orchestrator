@@ -53,16 +53,24 @@ export const PUBLISH_TOOL_PERMISSION = "orchestrator_publish"
 export const PEER_TOOL_PERMISSION = "orchestrator_peer"
 
 /**
- * Shared permission action for the S3/V1 observability and review tools.
+ * Shared permission action for the S3 observability and V2/V1 review tools.
  *
- * The conditional runtime tools (observability_get, review_get,
- * review_transition) are registered under the `orchestrator` namespace only
+ * The conditional runtime tools (observability_get, review_get, and
+ * review_start) are registered under the `orchestrator` namespace only
  * when their modes are enabled, and share this one explicit `permission`
  * action so a single rule grants or revokes the whole family. They are
  * orchestrator-only: a worker that somehow reaches an execute handler is
  * rejected regardless of visibility rules.
  */
 export const OBSERVABILITY_TOOL_PERMISSION = "orchestrator_observability"
+
+/**
+ * Dedicated reviewer-owned action for the provenance-bound V2 submit tool.
+ * It is intentionally not part of the orchestrator-only family: a fresh
+ * install grants it only to the configured review agent and denies it to the
+ * orchestrator and every other configured role.
+ */
+export const REVIEW_SUBMIT_TOOL_PERMISSION = "orchestrator_review_submit"
 
 /**
  * Shared permission action for the serialized orchestration validation tools.
@@ -149,8 +157,8 @@ export function goalToolPermissionRule(effect: PermissionEffect): PermissionRule
  * state or run external mutations. Deliberate exclusions, kept available while
  * a gate refuses so the user/model can inspect and recover:
  *   - `orchestrator_observability` — the bounded-review recovery surface
- *     (`review_transition` starts the replacement round a human decision
- *     requires); denying it would trap an open circuit.
+ *     (`review_start` starts the replacement round a human decision requires);
+ *     denying it would trap an open circuit.
  *   - `orchestrator_gates` and `orchestrator_peer` — read-only inspection and
  *     discovery surfaces that cannot advance a stopped run.
  * Permission actions are family-granular, so a read-only tool inside an

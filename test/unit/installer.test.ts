@@ -15,6 +15,7 @@ import {
   ORCHESTRATION_TOOL_PERMISSION,
   PEER_TOOL_PERMISSION,
   PUBLISH_TOOL_PERMISSION,
+  REVIEW_SUBMIT_TOOL_PERMISSION,
 } from "../../src/core/permissions.js"
 
 describe("plugin reference helpers", () => {
@@ -547,14 +548,35 @@ describe("installer", () => {
     }
   })
 
-  test("reinstall never duplicates the publish, peer, or gates permission rules", () => {
+  test("grants reviewer submission only to the configured reviewer agent", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+
+    const effective = (rules: Rule[], action: string): string | undefined =>
+      [...rules].reverse().find((rule) => rule.action === action || rule.action === "*")?.effect
+
+    const orchestrator = document.agents.orchestrator.permissions as Rule[]
+    expect(effective(orchestrator, REVIEW_SUBMIT_TOOL_PERMISSION)).toBe("deny")
+    for (const id of ["planner", "explore", "implementer"] as const) {
+      expect(effective(document.agents[id].permissions as Rule[], REVIEW_SUBMIT_TOOL_PERMISSION)).toBe("deny")
+    }
+    expect(effective(document.agents.reviewer.permissions as Rule[], REVIEW_SUBMIT_TOOL_PERMISSION)).toBe("allow")
+    expect((document.agents.reviewer.permissions as Rule[]).filter((rule) => rule.action === REVIEW_SUBMIT_TOOL_PERMISSION)).toEqual([
+      { action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: "deny" },
+      { action: REVIEW_SUBMIT_TOOL_PERMISSION, resource: "*", effect: "allow" },
+    ])
+  })
+
+  test("reinstall never duplicates the publish, peer, gates, or reviewer-submit permission rules", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     const path = join(directory, "opencode.jsonc")
     installConfig(path, {})
     installConfig(path, {})
     const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
 
-    for (const action of [PUBLISH_TOOL_PERMISSION, PEER_TOOL_PERMISSION, GATES_TOOL_PERMISSION]) {
+    for (const action of [PUBLISH_TOOL_PERMISSION, PEER_TOOL_PERMISSION, GATES_TOOL_PERMISSION, REVIEW_SUBMIT_TOOL_PERMISSION]) {
       const orchestratorPermissions = document.agents.orchestrator.permissions as Rule[]
       expect(orchestratorPermissions.filter((rule) => rule.action === action)).toHaveLength(1)
       const workerPermissions = document.agents.explore.permissions as Rule[]

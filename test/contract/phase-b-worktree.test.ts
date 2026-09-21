@@ -144,7 +144,7 @@ function makeRepo(label: string): Fixture {
   mkdirSync(repo, { recursive: true })
   mkdirSync(trees, { recursive: true })
   git(repo, ["init", "-q", "-b", "main"])
-  writeFileSync(join(repo, "README.md"), "# phase-b probe\n", "utf8")
+   writeFileSync(join(repo, "README.md"), `# phase-b probe ${label}\n`, "utf8")
   git(repo, ["add", "README.md"])
   git(repo, ["-c", "user.email=probe@example.invalid", "-c", "user.name=Phase B Probe", "commit", "-q", "-m", "init"])
   return { root, repo, trees, canonicalRepo: realpathSync(repo), canonicalRoot: realpathSync(root) }
@@ -253,14 +253,7 @@ describe("phase B native worktree contract (pinned beta-19507)", () => {
         expect(updatedIds(probe, fixture)).toHaveLength(0)
 
         // A different project's inventory is disjoint, in both directions.
-        // Location routing is asynchronous on the pinned embedded host. Give
-        // the first non-current location a bounded opportunity to settle before
-        // asserting its exact one-row inventory.
-        let otherInventory = await domain.list({ location: { directory: other.repo } })
-        for (let attempt = 0; attempt < 8 && otherInventory.length !== 1; attempt += 1) {
-          await settle(100)
-          otherInventory = await domain.list({ location: { directory: other.repo } })
-        }
+        const otherInventory = await domain.list({ location: { directory: other.repo } })
         expect(otherInventory).toHaveLength(1)
         expect(otherInventory[0]?.directory).toBe(other.canonicalRepo)
         const fixtureInventory = await domain.list(at)

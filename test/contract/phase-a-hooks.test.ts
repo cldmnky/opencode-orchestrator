@@ -10,7 +10,7 @@ import { loadBuiltPlugin } from "./helpers/build-plugin.js"
 /**
  * Phase A pinned-host probe (measurement only; no N1/N2 enforcement).
  *
- * These contract tests record what the pinned 2.0.12 host actually does for
+ * These contract tests record what the pinned 2.0.14 host actually does for
  * the three runtime-authority surfaces the plan's N1/N2 items depend on:
  *
  *   1. `session.hook("prompt")` mutations become the admitted prompt data.

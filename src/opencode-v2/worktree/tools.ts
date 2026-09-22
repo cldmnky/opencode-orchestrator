@@ -215,7 +215,7 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
 
   draft.add({
     name: "worktree_status",
-    description: "Report the tracked worktree status: ready, dirty, moved, or orphaned.",
+    description: "Report the tracked worktree status, including uninitialized before the current session creates one.",
     input: statusInput,
     options: { namespace: "orchestrator", permission: WORKTREE_TOOL_PERMISSION },
     execute: async (input, tool) => {
@@ -225,6 +225,22 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
       if (!repoRoot) return result("no worktree record and no repoRoot provided")
       try {
         const entries = await gitWorktreeList(git, repoRoot)
+        // No record is the expected state before the orchestrator initializes
+        // this session's managed worktree. Do not inspect the main checkout's
+        // status and mislabel its user changes as a managed-worktree state.
+        if (!record) {
+          return result(
+            JSON.stringify({
+              record: null,
+              status: "uninitialized",
+              dirty: false,
+              worktrees: entries,
+              next: "orchestrator_worktree_create",
+              message: "no managed worktree is tracked for this session; create one before delegating implementation",
+              evidence: liveEvidence({ source: "opencode-orchestrator.worktree.status", sessionID: tool.sessionID }),
+            }),
+          )
+        }
         const dirtyText = await gitStatus(git, record?.dir ?? repoRoot)
         // Presence is compared canonically so a record stored under one alias
         // (e.g. `/private/tmp/...`) matches porcelain output under another
@@ -240,7 +256,7 @@ export function addWorktreeTools(draft: ToolDraftLike, deps: WorktreeToolsDeps):
             }
           }
         }
-        let status: WorktreeRecord["status"] = record?.status ?? "pending"
+        let status: WorktreeRecord["status"] = record.status
         if (!present) status = "orphaned"
         else if (
           dirtyText.length > 0 &&

@@ -443,6 +443,8 @@ describe("prompts", () => {
     }
     expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("orchestrator_handoff_validate")
     expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("callable/advisory, not automatic hooks")
+    expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("only after a worker returns a handoff")
+    expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("never a pre-implementation or managed-worktree-creation service")
     expect(STRUCTURED_HANDOFF_GUIDANCE).toContain("returned admission state is diagnostic")
   })
 
@@ -661,6 +663,9 @@ describe("remote orchestration policy", () => {
       expect(prompt).toContain("owned by the current session")
       expect(prompt).toContain("not atomic child isolation")
       expect(prompt).toContain("required order is orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer")
+      expect(prompt).toContain("A missing tracked worktree is the normal initialization state before creation")
+      expect(prompt).toContain("Never use a bare git worktree list as an integration probe")
+      expect(prompt).toContain("create the managed worktree instead of reporting support unavailable")
       expect(prompt).toContain("moves only the current session")
       expect(prompt).toContain("children delegated afterward inherit or start from that context")
       expect(prompt).not.toMatch(/\/cd/)
@@ -797,6 +802,7 @@ describe("remote orchestration policy", () => {
       expect(prompt).toContain("Worktree lifecycle is mandatory for implementation when worktree support is enabled")
       expect(prompt).toContain("the orchestrator MUST run orchestrator_worktree_create -> orchestrator_worktree_enter")
       expect(prompt).toContain("only the orchestrator creates, enters, pushes, and cleans up managed worktrees")
+      expect(prompt).toContain("A missing record is a create-next condition, not a blocker")
       expect(prompt).toContain("stop and ask the user")
       expect(prompt).toContain("never delegate implementation from the main checkout")
     }

@@ -1087,6 +1087,28 @@ describe("worktree tools", () => {
     expect(output.content).toContain("no tracked worktree for this session")
   })
 
+  test("status treats an absent session record as uninitialized, not unavailable", async () => {
+    const { tools } = collectWorktreeTools({
+      runner: scriptedGit((call) => {
+        if (call.args[0] === "worktree" && call.args[1] === "list") return ok(MAIN_ONLY)
+        return undefined
+      }).runner,
+    })
+    const output = await tools
+      .get("worktree_status")!
+      .execute({ repoRoot: "/repo" }, toolContext("session-1", "orchestrator"))
+    const parsed = JSON.parse(output.content) as {
+      status: string
+      dirty: boolean
+      next: string
+      message: string
+    }
+    expect(parsed.status).toBe("uninitialized")
+    expect(parsed.dirty).toBe(false)
+    expect(parsed.next).toBe("orchestrator_worktree_create")
+    expect(parsed.message).toContain("create one before delegating implementation")
+  })
+
   describe("worktree_enter", () => {
     test("moves the invoking parent session into its tracked ready worktree with verified durable state", async () => {
       const tracked = await mkdtemp(path.join(tmpdir(), "orchestrator-enter-"))

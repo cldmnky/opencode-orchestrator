@@ -44,7 +44,7 @@ type ActiveDispatch = {
  * before hook prevents child creation, while the after hook releases the
  * call. This is deliberately not a scheduler, a cross-process limit, or a
  * filesystem isolation boundary. Background subagent work is bounded at the
- * native dispatch-call boundary because OpenCode 2.0.12 reports that call as
+ * native dispatch-call boundary because OpenCode 2.0.14 reports that call as
  * completed once the child has been launched.
  */
 export async function startDispatchAdmission(

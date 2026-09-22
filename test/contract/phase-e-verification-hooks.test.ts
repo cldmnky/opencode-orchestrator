@@ -134,7 +134,7 @@ function config(directory: string, baseURL: string): string {
   })
 }
 
-describe("phase E native verification hook contract (pinned 2.0.12)", () => {
+describe("phase E native verification hook contract (pinned 2.0.14)", () => {
   test("pairs a native shell call with stable identity and explicit result status", async () => {
     const root = mkdtempSync(join(tmpdir(), "orchestrator-phase-e-"))
     const directory = join(root, "project")

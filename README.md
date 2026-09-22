@@ -47,7 +47,7 @@ explore      → (nothing — answers directly, using webfetch/websearch itself)
 
 Delegation outside an agent’s own graph is off-limits even if the host would allow it, and the orchestrator verifies child claims directly instead of trusting a child’s self-report.
 
-> **Native depth:** OpenCode’s native subagent nesting depth defaults to 1 — *"Maximum subagent nesting depth. Defaults to 1, which prevents subagents from launching subagents"* — so without it, a worker could never delegate further. The deepest approved chain above is three subagent hops, and the installer therefore sets `experimental.subagent_depth: 3` in your config, but only when neither spelling is present: an explicit value you set (lower or higher) always wins. On 2.0.12 the live spelling is nested under `experimental` — a top-level `subagent_depth` is unsupported legacy config that the server drops at startup — and the installer migrates a legacy top-level value into `experimental` for you. The plugin itself does not enforce depth — it’s a native OpenCode setting.
+> **Native depth:** OpenCode’s native subagent nesting depth defaults to 1 — *"Maximum subagent nesting depth. Defaults to 1, which prevents subagents from launching subagents"* — so without it, a worker could never delegate further. The deepest approved chain above is three subagent hops, and the installer therefore sets `experimental.subagent_depth: 3` in your config, but only when neither spelling is present: an explicit value you set (lower or higher) always wins. On 2.0.14 the live spelling is nested under `experimental` — a top-level `subagent_depth` is unsupported legacy config that the server drops at startup — and the installer migrates a legacy top-level value into `experimental` for you. The plugin itself does not enforce depth — it’s a native OpenCode setting.
 
 ---
 
@@ -364,7 +364,7 @@ The installer writes one native OpenCode key — only when neither spelling is p
 
 | Key | Value | Why |
 |-----|-------|-----|
-| `experimental.subagent_depth` | `3` | Native subagent nesting limit; `1` would stop `orchestrator → implementer → planner → explore` after the first hop. On 2.0.12 a top-level `subagent_depth` is unsupported legacy config and is dropped at startup, so the installer migrates a legacy top-level value into `experimental` |
+| `experimental.subagent_depth` | `3` | Native subagent nesting limit; `1` would stop `orchestrator → implementer → planner → explore` after the first hop. On 2.0.14 a top-level `subagent_depth` is unsupported legacy config and is dropped at startup, so the installer migrates a legacy top-level value into `experimental` |
 
 ```jsonc
 {
@@ -372,7 +372,7 @@ The installer writes one native OpenCode key — only when neither spelling is p
 }
 ```
 
-> Older installer versions also wrote `experimental.continue_loop_on_deny` and `experimental.batch_tool`. Both are unsupported legacy settings on 2.0.12 and are dropped at startup with a diagnostic; the installer no longer writes them. A value you already have stays in your config untouched — remove it to silence the startup diagnostic.
+> Older installer versions also wrote `experimental.continue_loop_on_deny` and `experimental.batch_tool`. Both are unsupported legacy settings on 2.0.14 and are dropped at startup with a diagnostic; the installer no longer writes them. A value you already have stays in your config untouched — remove it to silence the startup diagnostic.
 
 ### Choosing models
 
@@ -566,7 +566,7 @@ For teams that want cost/usage limits or a stricter review gate:
 
 **Nested delegation stops after the first hop?**
 
-OpenCode’s native subagent nesting depth lives at **`experimental.subagent_depth`** on 2.0.12 and defaults to 1, which prevents subagents from launching subagents. Older installer versions wrote a top-level `subagent_depth`, which the server now drops as unsupported legacy config — so that install silently ran at depth 1. Re-run the installer: it moves a legacy top-level `subagent_depth` value into `experimental` (value preserved, stale key removed) and adds `experimental.subagent_depth: 3` only when neither spelling is present — or set the value yourself; an explicit value you configure always wins and is never overwritten.
+OpenCode’s native subagent nesting depth lives at **`experimental.subagent_depth`** on 2.0.14 and defaults to 1, which prevents subagents from launching subagents. Older installer versions wrote a top-level `subagent_depth`, which the server now drops as unsupported legacy config — so that install silently ran at depth 1. Re-run the installer: it moves a legacy top-level `subagent_depth` value into `experimental` (value preserved, stale key removed) and adds `experimental.subagent_depth: 3` only when neither spelling is present — or set the value yourself; an explicit value you configure always wins and is never overwritten.
 
 ---
 
@@ -628,8 +628,8 @@ bun run scripts/package-smoke.ts  # verifies the packed tarball and typed consum
 
 Tested against:
 
-- `@opencode/plugin` `2.0.12`
-- `@opencode/sdk` `2.0.12` (integration tests)
+- `@opencode/plugin` `2.0.14`
+- `@opencode/sdk` `2.0.14` (integration tests)
 
 Main plugin sets `tui: true` and publishes `./tui`. CLI-only config belongs in `cli.json`.
 

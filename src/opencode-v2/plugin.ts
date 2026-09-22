@@ -2,7 +2,12 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import { defineTuiAwarePlugin, type ToolDefinition, type ToolDraftLike } from "./compat.js"
 import { parseOptions } from "../core/config.js"
 import { delegationGraphSummary } from "../core/roles.js"
-import { PEER_DISCOVERY_GUIDANCE, PUBLICATION_POLICY_GUIDANCE, terminalDriveGuidance } from "../core/policy.js"
+import {
+  MANAGED_WORKTREE_GUIDANCE,
+  PEER_DISCOVERY_GUIDANCE,
+  PUBLICATION_POLICY_GUIDANCE,
+  terminalDriveGuidance,
+} from "../core/policy.js"
 import { applyAgentTransform, validateAgentSet, type AgentInfoLike } from "./agents.js"
 import { applyCommandTransform } from "./commands/index.js"
 import { runCommand } from "./commands/runtime.js"
@@ -299,19 +304,16 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
               PEER_DISCOVERY_GUIDANCE,
               ...(options.worktree.enabled
                 ? [
-                    "Use orchestrator_worktree_list, orchestrator_worktree_create, orchestrator_worktree_status, orchestrator_worktree_sync, orchestrator_worktree_enter, orchestrator_worktree_push, and orchestrator_worktree_cleanup only for the current session's managed worktree.",
+                    MANAGED_WORKTREE_GUIDANCE,
                     "Delegated children get no atomic isolation.",
                     "Worktree lifecycle is enabled and orchestrator-owned.",
-                    "Implementation delegation MUST be preceded by orchestrator_worktree_create -> orchestrator_worktree_enter -> delegate to the implementer.",
-                    "orchestrator_worktree_enter moves only the current session into its tracked worktree; session ID and history are preserved.",
-                    "Children delegated afterward inherit or start from that context.",
                     "Only the orchestrator creates, enters, pushes, and cleans up managed worktrees.",
-                    "A pending or failed worktree_enter result is not a successful receipt: wait for the V2 safe boundary and retry until entered:true before delegating.",
+                    "A missing record is a create-next condition, not a support failure; do not infer support from bare Git output.",
+                    "Do not delegate until creation produced a ready tracked worktree and worktree_enter returns entered:true.",
                     "When any of these is unavailable, stop and ask the user instead of delegating implementation from the main checkout:",
                     "the worktree tools;",
                     "a whitelisted worktree.root;",
                     "allow_mutations;",
-                    "a ready tracked worktree;",
                     "a successful worktree_enter result.",
                   ]
                 : []),

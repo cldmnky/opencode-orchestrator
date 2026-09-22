@@ -9,7 +9,7 @@ import { createMockOpenAI, openAIError, openAIText, type MockOpenAI } from "./he
 
 /**
  * Phase C pinned-host contract probe for the sessionless `ctx.generate.text`
- * surface (pinned `@opencode/plugin`/`@opencode/sdk` `2.0.12`).
+ * surface (pinned `@opencode/plugin`/`@opencode/sdk` `2.0.14`).
  *
  * Measurement only: no production wiring, no configuration, no trace fields,
  * no tools, and no runtime behavior change. The probe boots an embedded host
@@ -34,7 +34,7 @@ import { createMockOpenAI, openAIError, openAIText, type MockOpenAI } from "./he
  *     can be restored on cleanup (never passed to the host, logged, or
  *     persisted).
  *
- * Harness fact measured here, not assumed: released 2.0.12 resolves the
+ * Harness fact measured here, not assumed: released 2.0.14 resolves the
  *   configured OpenAI-compatible model through its native provider route, so
  *   this contract uses a loopback HTTP endpoint instead of the beta-era
  *   in-process AISDK hook replacement.
@@ -279,7 +279,7 @@ function expectNoSessionSideEffects(probe: Probe): void {
   expect(probe.toolHooks).toEqual([])
 }
 
-describe("phase C sessionless generate contract (pinned 2.0.12)", () => {
+describe("phase C sessionless generate contract (pinned 2.0.14)", () => {
   test("returns the exact text envelope from a deterministic local provider", async () => {
     await withProbeHost(async ({ probe, guard, mock }) => {
       const generate = probe.generate as GenerateApi

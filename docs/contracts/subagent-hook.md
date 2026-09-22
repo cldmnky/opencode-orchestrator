@@ -1,7 +1,7 @@
 # Native subagent dispatch hook contract
 
 This document records the pinned `@opencode/plugin` / `@opencode/sdk`
-`2.0.12` behavior measured by
+`2.0.14` behavior measured by
 `test/contract/phase-f-subagent-hooks.test.ts`.
 
 ## Observed contract
@@ -29,7 +29,7 @@ The plugin enforces `max_parallel` for configured-role `subagent` calls per
 root session in one plugin process. It serializes admission, refuses a call
 before child creation when the ceiling is full, and releases the call on the
 matching after event. Background child work is not converted into an
- autonomous scheduler or a cross-process lease: 2.0.12 reports the native
+ autonomous scheduler or a cross-process lease: 2.0.14 reports the native
 background dispatch complete after launch.
 
 The pinned probe does not establish a bounded parent completion guarantee for a

@@ -12,7 +12,7 @@ items are checked only after their production behavior and tests are merged.
 - [x] Phase 3 plugin-observed verification receipts and read-only receipt discovery.
 - [x] Phase 4 reviewer-child provenance and review V2.
 - [x] Phase 5 lead-board V2 and completion-chain migration.
-- [x] Phase 6 runtime parallel dispatch admission (with documented 2.0.12 completion limitation).
+- [x] Phase 6 runtime parallel dispatch admission (with documented 2.0.14 completion limitation).
 - [x] Phase 7 model-visible surface reduction and D4 v2 removal.
 - [x] Phase 8 installer migration, live doctor, and state recovery.
 - [x] Phase 9 read-only orchestration progress RPC/TUI.
@@ -20,12 +20,12 @@ items are checked only after their production behavior and tests are merged.
 - [x] Phase 11 final documentation and release verification.
 
 The current branch implements all eleven slices. Phase 3
-measured the pinned 2.0.12 shell hook, added bounded plugin-observed
+measured the pinned 2.0.14 shell hook, added bounded plugin-observed
 receipts, and replaced lead command-proof claims with exact-revision receipt
 matching. Phase 4 binds new review approvals to the configured reviewer agent
 and verified child-session ancestry; legacy V1 records remain status-only and
 are reported as `legacy-unproven`. Later status updates will record exact
-host-contract findings and any item that remains advisory because 2.0.12
+host-contract findings and any item that remains advisory because 2.0.14
 cannot provide the required provenance. Phase 5 makes `lead-board/v2` the
 runtime authority, migrates V1 state conservatively without upgrading proof,
 and binds review/verification decisions to the board lifecycle.
@@ -67,7 +67,7 @@ This is a V2-only plan. Do not add V1 compatibility. Before changing plugin, CLI
 - <https://opencode.ai/v2/docs/api>
 - <https://opencode.ai/v2/openapi.json>
 
-The repository is pinned to `@opencode/plugin` and `@opencode/sdk` `2.0.12`. Any change that depends on host behavior must be proven against that pinned version before production code relies on it.
+The repository is pinned to `@opencode/plugin` and `@opencode/sdk` `2.0.14`. Any change that depends on host behavior must be proven against that pinned version before production code relies on it.
 
 ---
 
@@ -694,7 +694,7 @@ the pinned host identity and refusal behavior; `src/opencode-v2/dispatch/runtime
 enforces same-root admission for configured-role calls; and the README, policy,
 capability vocabulary, and hook contract distinguish admission from scheduling,
 cross-process coordination, and isolation. Child failure/cancellation is not
-treated as proven unless 2.0.12 delivers the corresponding after event.
+treated as proven unless 2.0.14 delivers the corresponding after event.
 
 ### Contract probe
 

@@ -11,7 +11,7 @@ import { createMockOpenAI, openAIError, openAIText, type MockOpenAI } from "./he
 
 /**
  * Phase D (N5) pinned-host contract probe and production wiring measurement
- * (pinned `@opencode/plugin`/`@opencode/sdk` `2.0.11`).
+ * (pinned `@opencode/plugin`/`@opencode/sdk` `2.0.12`).
  *
  * The probe boots embedded hosts against a throwaway directory with a
  * deterministic loopback OpenAI-compatible provider. It performs no external network traffic:
@@ -380,7 +380,7 @@ function wrapBuiltPlugin(
   }
 }
 
-describe("phase D retry-hook contract (pinned 2.0.11)", () => {
+describe("phase D retry-hook contract (pinned 2.0.12)", () => {
   test("delivers the documented callback shape with physical attempt numbering", async () => {
     await withProbeHost(async ({ host, probe, directory, guard }) => {
       const sessionID = await createSession(host, directory, "phase-d shape", ORCHESTRATOR_AGENT)
@@ -484,7 +484,7 @@ describe("phase D retry-hook contract (pinned 2.0.11)", () => {
 
       await promptAndWait(host, sessionID, "phase-d prompt")
 
-      // OpenCode 2.0.11 permits ten physical retries (attempts 2..11).
+      // OpenCode 2.0.12 permits ten physical retries (attempts 2..11).
       expect(probe.retryEvents.map((event) => event.attempt)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
       expect(probe.scheduledEvents.map((event) => event.attempt)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
       expect(probe.streamCalls).toBe(11)

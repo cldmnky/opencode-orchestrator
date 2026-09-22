@@ -67,7 +67,7 @@
   ],
   // Native OpenCode subagent nesting depth: defaults to 1, which would stop
   // the approved deepest chain (orchestrator -> implementer -> planner ->
-  // explore) after the first hop. On 2.0.11 the live spelling is
+  // explore) after the first hop. On 2.0.12 the live spelling is
   // `experimental.subagent_depth`; a top-level `subagent_depth` is unsupported
   // legacy config and is dropped at startup. The installer adds this key only
   // when neither spelling is present, migrates a legacy top-level value into

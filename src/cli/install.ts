@@ -101,14 +101,14 @@ export function defaultConfigPath(target: InstallTarget, cwd = process.cwd()): s
 /**
  * Native V2 subagent nesting depth written by the installer.
  *
- * OpenCode 2.0.11 reads `experimental.subagent_depth` ("Maximum subagent
+ * OpenCode 2.0.12 reads `experimental.subagent_depth` ("Maximum subagent
  * nesting depth", default 1, which prevents subagents from launching
  * subagents), which would block the approved deepest bounded-delegation path
  * `orchestrator -> implementation -> planning -> research` (three subagent
  * hops). The installer writes this value only when neither spelling is present
  * and never enforces depth itself; an explicit user value always wins.
  *
- * A **top-level** `subagent_depth` is unsupported legacy config on 2.0.11 and
+ * A **top-level** `subagent_depth` is unsupported legacy config on 2.0.12 and
  * is dropped at startup (A17/G4), so a legacy top-level value is migrated into
  * `experimental` (value preserved, stale top-level key removed).
  */
@@ -216,7 +216,7 @@ export function planInstallConfig(
     if (Object.hasOwn(existingAgents, id)) continue
     result = applyEdits(result, modify(result, ["agents", id], value, { formattingOptions }))
   }
-  // Native 2.0.11 subagent nesting depth lives at `experimental.subagent_depth`
+  // Native 2.0.12 subagent nesting depth lives at `experimental.subagent_depth`
   // and defaults to 1, which stops a subagent from launching another subagent.
   // The approved deepest delegation path — orchestrator -> implementation ->
   // planning -> research — is three subagent hops, so a fresh install needs
@@ -224,7 +224,7 @@ export function planInstallConfig(
   // plugin-enforced one: an explicitly authored nested value (any value) is the
   // user's policy and is preserved untouched.
   //
-  // A top-level `subagent_depth` is unsupported legacy config on 2.0.11 — the
+  // A top-level `subagent_depth` is unsupported legacy config on 2.0.12 — the
   // server drops it at startup — so a legacy top-level value migrates into
   // `experimental` (value preserved, stale key removed) only when no nested
   // value exists. When both spellings are present the nested value is live and

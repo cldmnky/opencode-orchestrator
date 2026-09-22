@@ -709,11 +709,11 @@ describe("installer", () => {
     const path = join(directory, "opencode.jsonc")
     installConfig(path, {})
     const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
-    // Native 2.0.11 subagent depth defaults to 1, which would block the
+    // Native 2.0.12 subagent depth defaults to 1, which would block the
     // approved deepest path orchestrator -> implementation -> planning ->
     // research.
     expect(document.experimental.subagent_depth).toBe(3)
-    // The top-level spelling is unsupported legacy config on 2.0.11 and is
+    // The top-level spelling is unsupported legacy config on 2.0.12 and is
     // dropped at startup, so the installer never writes it.
     expect(Object.hasOwn(document, "subagent_depth")).toBe(false)
     expect(Object.keys(document.experimental)).toEqual(["subagent_depth"])
@@ -850,7 +850,7 @@ describe("installer", () => {
   })
 
   test("installer-written host keys stay within the verified schema snapshot (pin-drift guard)", () => {
-    // G4/A17 re-verified against the installed 2.0.11 server normalization on
+    // G4/A17 re-verified against the installed 2.0.12 server normalization on
     // 2026-09-22: a top-level `subagent_depth` is unsupported legacy config and
     // is dropped at startup, while `experimental.subagent_depth` is the live
     // spelling (native default 1). `experimental.continue_loop_on_deny` and

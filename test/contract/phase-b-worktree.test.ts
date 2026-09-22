@@ -11,7 +11,7 @@ import { activatePlugin } from "./helpers/activate-plugin.js"
  * Phase B pinned-host contract probe for the native `ctx.worktree` domain.
  *
  * Measurement only: no adapter, no strategy registration, no production
- * behavior change. Every probe runs in an embedded 2.0.11 host against a
+ * behavior change. Every probe runs in an embedded 2.0.12 host against a
  * throwaway Git repository under the OS temp directory, and every native call
  * is routed to that repository through the domain's `location` input so the
  * repository's current checkout is never touched.
@@ -29,7 +29,7 @@ import { activatePlugin } from "./helpers/activate-plugin.js"
  *   - create/remove error classes and workspace-scoped location rejection.
  *
  * Harness facts measured here, not assumed:
- *   - Worktree operations are project-scoped in 2.0.11. The harness activates
+ *   - Worktree operations are project-scoped in 2.0.12. The harness activates
  *     one plugin instance in the ambient checkout and one in the fixture
  *     repository, then passes the fixture's project ID to every operation.
  *     Event ids can still be delivered more than once to a directly-passed
@@ -235,7 +235,7 @@ async function captureFailure(promise: Promise<unknown>): Promise<Record<string,
   )
 }
 
-describe("phase B native worktree contract (pinned 2.0.11)", () => {
+describe("phase B native worktree contract (pinned 2.0.12)", () => {
   test("scopes inventory to the routed project and returns a void refresh on a stable repository", async () => {
     const fixture = makeRepo("scope")
     const other = makeRepo("scope-other")
@@ -432,7 +432,7 @@ describe("phase B native worktree contract (pinned 2.0.11)", () => {
         const baseline = updatedIds(probe, fixture).length
 
         // A worktree created outside the native domain is adopted by an
-        // explicit refresh; list reads the saved inventory in 2.0.11.
+        // explicit refresh; list reads the saved inventory in 2.0.12.
         const external = join(fixture.trees, "external")
         git(fixture.repo, ["worktree", "add", "--detach", "--", external, "HEAD"])
         const discoveredDir = realpathSync(external)

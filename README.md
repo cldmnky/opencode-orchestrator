@@ -61,9 +61,9 @@ Delegation outside an agent’s own graph is off-limits even if the host would a
 | Refactor or plan a change | `/orchestrate` | *“Safely refactor checkout validation and add tests”* |
 | Pause automation | `/halt` | — |
 | Hand context to the next session | `/handover` | *“Focus on payments regression”* |
-| Choose models for worker agents | `/worker-models` | — |
-| Inspect or toggle the durable publication capability | `/publish` | `/publish status` |
-| Narrow the publication/gate steps for this session only | `/gates` | `/gates merge=off` |
+| Choose models for worker agents | TUI command palette: `worker-models` | — |
+| Inspect or toggle the durable publication capability | TUI command palette: `publish` | `publish status` |
+| Narrow the publication/gate steps for this session only | TUI command palette: `gates` | `gates merge=off` |
 
 For a single-file typo or one-line edit, just prompt the model directly — you don’t need orchestration.
 
@@ -217,7 +217,10 @@ flowchart LR
 
 ## How to use — commands & examples
 
-All commands are available after installation. They appear inside OpenCode — no files to create manually.
+All commands are available after installation. They appear inside OpenCode — no files to create manually. In the TUI,
+execution workflows (`orchestrate`, `goal`, `run-plan`, `halt`, and `handover`) are slash commands, while configuration
+and operator controls (`worker-models`, `publish`, and `gates`) are command-palette items only. The palette controls still
+dispatch through the same guarded server command runtime.
 
 ### Phase 7 surface migration (`0.2.0`)
 

@@ -1,6 +1,6 @@
 import type { Definition } from "@opencode/plugin/tui/plugin"
 import type { Context, KeymapCommand } from "@opencode/plugin/tui/context"
-import { commandDefinitions } from "./opencode-v2/commands/index.js"
+import { commandDefinitions, tuiCommandSurface, type CommandName, type TuiCommandSurface } from "./opencode-v2/commands/index.js"
 import { gatesRpcDefinition, parseGatesView } from "./opencode-v2/gates/rpc.js"
 import type { GateStatus } from "./opencode-v2/gates/state.js"
 import { parseOptions, type OrchestratorOptions } from "./core/config.js"
@@ -51,7 +51,7 @@ export const tuiPlugin = {
             commands: [
               ...commandDefinitions(options)
                 .filter((spec) => available.get(spec.name) === spec.description)
-                .map((spec) => tuiCommand(context, spec.name, spec.description)),
+                .map((spec) => tuiCommand(context, spec.name, spec.description, tuiCommandSurface(spec.name))),
               progressCommand(context, progress),
             ],
           }
@@ -268,16 +268,17 @@ function registerSidebar(context: Context, options: OrchestratorOptions, progres
   }
 }
 
-function tuiCommand(context: Context, name: string, description: string): KeymapCommand {
+function tuiCommand(context: Context, name: CommandName, description: string, surface: TuiCommandSurface): KeymapCommand {
   return {
     id: `${RUNTIME_PLUGIN_ID}.${name}`,
-    title: `/${name}`,
+    title: surface === "slash" ? `/${name}` : name,
     description,
     group: "OpenCode Orchestrator",
-    // Palette + slash: short `/name` titles (the group header already says
-    // who owns them), with the worker-models picker interception in `run`.
-    palette: true,
-    slash: { name, arguments: true },
+    // Execution workflows are prompt slash commands. Configuration and
+    // operator controls are palette-only actions; keeping the two surfaces
+    // exclusive prevents the command popup from becoming a second execution
+    // menu.
+    ...(surface === "slash" ? { slash: { name, arguments: true } } : { palette: true }),
     enabled: () => activeSessionID(context) !== undefined,
     run: async (input) => {
       const sessionID = activeSessionID(context)

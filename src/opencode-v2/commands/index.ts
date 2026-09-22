@@ -19,6 +19,29 @@ export type CommandSpec = {
   requiresArgument: boolean
 }
 
+/**
+ * TUI presentation for the command catalog. Execution workflows belong in
+ * slash completion; configuration and operator controls belong in the
+ * command palette. The server command surface remains unchanged so both
+ * surfaces still dispatch through the same guarded runtime.
+ */
+export type TuiCommandSurface = "slash" | "palette"
+
+const tuiCommandSurfaces: Record<CommandName, TuiCommandSurface> = {
+  orchestrate: "slash",
+  "worker-models": "palette",
+  goal: "slash",
+  "run-plan": "slash",
+  halt: "slash",
+  handover: "slash",
+  publish: "palette",
+  gates: "palette",
+}
+
+export function tuiCommandSurface(name: CommandName): TuiCommandSurface {
+  return tuiCommandSurfaces[name]
+}
+
 export function commandDefinitions(options: OrchestratorOptions): CommandSpec[] {
   return COMMAND_NAMES.filter((name) => isCommandEnabled(options, name)).map((name) => ({
     name,

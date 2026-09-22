@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { Context } from "@opencode/plugin/tui/context"
 import { tuiPlugin } from "../../src/tui.js"
-import { commandDefinitions } from "../../src/opencode-v2/commands/index.js"
+import { commandDefinitions, tuiCommandSurface } from "../../src/opencode-v2/commands/index.js"
 import { parseOptions } from "../../src/core/config.js"
 import { unavailableProgressView } from "../../src/opencode-v2/progress/rpc.js"
 
@@ -213,9 +213,11 @@ describe("TUI plugin contract", () => {
     expect(stopped).toContain("session.idle")
   })
 
-  test("registers palette commands with short /name titles", async () => {
+  test("keeps execution commands slash-only and configuration commands palette-only", async () => {
     const commands: Array<{ id?: string; title?: string; group?: string; palette?: boolean; slash?: { name: string } }> = []
     const specs = commandDefinitions(parseOptions({}))
+    const slashSpecs = specs.filter((spec) => tuiCommandSurface(spec.name) === "slash")
+    const paletteSpecs = specs.filter((spec) => tuiCommandSurface(spec.name) === "palette")
     const context = {
       options: {},
       location: { directory: "/workspace" },
@@ -246,16 +248,29 @@ describe("TUI plugin contract", () => {
     const cleanup = await tuiPlugin.setup(context)
     await cleanup?.()
 
-    // Every runtime command is in the palette and `/` completion with a
-    // short /name title; the group header already says "OpenCode
-    // Orchestrator" so titles carry no redundant prefix.
+    // Execution workflows are slash-only. The group header still identifies
+    // the owner, so the slash command title carries no redundant prefix.
     const slashCommands = commands.filter((command) => command.slash)
-    expect(slashCommands.map((command) => command.slash?.name).sort()).toEqual(specs.map((spec) => spec.name).sort())
+    expect(slashCommands.map((command) => command.slash?.name).sort()).toEqual(slashSpecs.map((spec) => spec.name).sort())
     for (const command of slashCommands) {
       expect(command.title).toBe(`/${command.slash?.name}`)
       expect(command.group).toBe("OpenCode Orchestrator")
-      expect(command.palette).toBe(true)
+      expect(command.palette).toBeUndefined()
       expect(command.slash?.name).toBeTruthy()
+    }
+
+    // Configuration/operator controls are palette-only. They deliberately do
+    // not create slash completion entries or execution-looking `/name` titles.
+    const paletteCommands = commands.filter(
+      (command) => command.palette && command.id !== "opencode-orchestrator.progress",
+    )
+    expect(paletteCommands.map((command) => command.id?.split(".").pop()).sort()).toEqual(
+      paletteSpecs.map((spec) => spec.name).sort(),
+    )
+    for (const command of paletteCommands) {
+      expect(command.title).not.toMatch(/^\//)
+      expect(command.slash).toBeUndefined()
+      expect(command.group).toBe("OpenCode Orchestrator")
     }
     expect(commands.find((command) => command.title === "View orchestrator progress")?.palette).toBe(true)
   })

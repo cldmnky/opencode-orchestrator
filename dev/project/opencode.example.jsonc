@@ -67,19 +67,14 @@
   ],
   // Native OpenCode subagent nesting depth: defaults to 1, which would stop
   // the approved deepest chain (orchestrator -> implementer -> planner ->
-  // explore) after the first hop. It is a TOP-LEVEL key on the current host
-  // schema: `experimental` rejects additional properties, so the legacy nested
-  // `experimental.subagent_depth` is dead config. The installer adds this key
-  // only when it is absent, migrates a legacy nested value up (value preserved,
-  // stale key removed), and never overwrites an explicit value you set.
-  "subagent_depth": 3,
-  // Recommended host keys, added by the installer only when absent and never
-  // overwritten: continue_loop_on_deny keeps the agent loop alive after a denied
-  // tool call (orchestrator-only denials and runtime-authority refusals stay
-  // recoverable), and batch_tool enables per-turn parallel tool invocation.
+  // explore) after the first hop. On 2.0.11 the live spelling is
+  // `experimental.subagent_depth`; a top-level `subagent_depth` is unsupported
+  // legacy config and is dropped at startup. The installer adds this key only
+  // when neither spelling is present, migrates a legacy top-level value into
+  // `experimental` (value preserved, stale key removed), and never overwrites
+  // an explicit value you set.
   "experimental": {
-    "continue_loop_on_deny": true,
-    "batch_tool": true
+    "subagent_depth": 3
   },
   // The `permissions` blocks below mirror the installer's fresh-install
   // defaults (src/cli/install.ts): a broad `subagent` deny followed by exact

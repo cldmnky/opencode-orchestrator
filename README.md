@@ -47,7 +47,7 @@ explore      → (nothing — answers directly, using webfetch/websearch itself)
 
 Delegation outside an agent’s own graph is off-limits even if the host would allow it, and the orchestrator verifies child claims directly instead of trusting a child’s self-report.
 
-> **Native depth:** OpenCode’s native **top-level** `subagent_depth` defaults to 1 — *"Maximum subagent nesting depth. Defaults to 1, which prevents subagents from launching subagents"* — so without it, a worker could never delegate further. The deepest approved chain above is three subagent hops, and the installer therefore sets `subagent_depth: 3` in your config, but only when the key is absent: an explicit value you set (lower or higher) always wins. The key is top-level — the older `experimental.subagent_depth` spelling is dead on the current host schema (`experimental` rejects additional properties) — and the installer migrates a legacy nested value up for you. The plugin itself does not enforce depth — it’s a native OpenCode setting.
+> **Native depth:** OpenCode’s native subagent nesting depth defaults to 1 — *"Maximum subagent nesting depth. Defaults to 1, which prevents subagents from launching subagents"* — so without it, a worker could never delegate further. The deepest approved chain above is three subagent hops, and the installer therefore sets `experimental.subagent_depth: 3` in your config, but only when neither spelling is present: an explicit value you set (lower or higher) always wins. On 2.0.11 the live spelling is nested under `experimental` — a top-level `subagent_depth` is unsupported legacy config that the server drops at startup — and the installer migrates a legacy top-level value into `experimental` for you. The plugin itself does not enforce depth — it’s a native OpenCode setting.
 
 ---
 
@@ -113,8 +113,7 @@ What the installer does:
 - Adds the plugin to `opencode.jsonc` (as a local file reference like `./node_modules/.../dist/index.js`)
 - Accepts `--global` to write to OpenCode’s global config instead of a project’s `opencode.jsonc` — `$XDG_CONFIG_HOME/opencode/opencode.jsonc`, or `~/.config/opencode/opencode.jsonc` when `XDG_CONFIG_HOME` is unset
 - Adds the five agents (`orchestrator`, `planner`, `explore`, `implementer`, `reviewer`) if they’re missing
-- Sets top-level `subagent_depth: 3` (only when the key is absent) so OpenCode’s native subagent depth limit — which defaults to 1 — doesn’t block the deepest approved chain `orchestrator → implementer → planner → explore`; a legacy nested `experimental.subagent_depth` value is migrated to the top level (value preserved, stale nested key removed)
-- Adds the recommended host keys `experimental.continue_loop_on_deny: true` (a denied tool call keeps the agent loop alive instead of terminating it) and `experimental.batch_tool: true` (per-turn parallel tool invocation) — each only when the key is absent and never overwriting an explicit value (see [Recommended host keys](#recommended-host-keys))
+- Sets `experimental.subagent_depth: 3` (only when neither spelling is present) so OpenCode’s native subagent depth limit — which defaults to 1 — doesn’t block the deepest approved chain `orchestrator → implementer → planner → explore`; a legacy top-level `subagent_depth` value is migrated into `experimental` (value preserved, stale top-level key removed)
 - Gives new agents permission defaults that allow exactly the bounded nested-delegation graph (see [Bounded nested delegation](#bounded-nested-delegation)): a broad `subagent` deny followed by exact target-specific allows, with `webfetch`/`websearch` granted directly to `explore`
 - Writes the orchestrator-only permission actions for the feature tool families — `orchestrator_gh`, `orchestrator_worktree`, `orchestrator_validation` (the serialized validation tools plus the durable lead-board tools), `orchestrator_observability`, plus the publication policy (`orchestrator_publish`), peer discovery (`orchestrator_peer`), and the read-only session gate inspection (`orchestrator_gates`) — as `allow` for the orchestrator and `deny` for every worker
 - Leaves your existing config and commands untouched — re-running it is safe
@@ -139,7 +138,7 @@ What the installer does:
 >
 > and the same three actions with `"effect": "deny"` to each worker you want kept locked down. Anything you write explicitly stays authoritative — the installer and the agent transform never rewrite it.
 >
-> The plugin’s agent transform never overrides user-authored permission rules, so whatever you write stays authoritative. Re-running the installer also adds top-level `subagent_depth: 3` when that key is absent — migrating a legacy nested `experimental.subagent_depth` value up (value preserved, stale key removed) — plus the recommended `experimental.continue_loop_on_deny: true` and `experimental.batch_tool: true` when they are absent; an explicit value you set is always preserved.
+> The plugin’s agent transform never overrides user-authored permission rules, so whatever you write stays authoritative. Re-running the installer also adds `experimental.subagent_depth: 3` when neither spelling is present — migrating a legacy top-level `subagent_depth` value into `experimental` (value preserved, stale key removed); an explicit value you set is always preserved.
 
 > Working from a source checkout? Configure OpenCode to load `./src/index.ts` and see [Development](#development). This repository's live setup uses global config; the checkout has no repo-level `opencode.jsonc`.
 
@@ -359,22 +358,21 @@ You configure baseline **models** with OpenCode’s native `agents.<id>.model`; 
 
 `require_review` and `clarify` are prompt guidance, while `max_parallel` is a process-local runtime admission ceiling for configured-role subagent calls. It is not a scheduler, cross-process limit, or filesystem boundary. The orchestrator explores repository facts before asking anything — workers never ask on your behalf. Bounded review records use reviewer-child provenance in V2; legacy V1 records remain unproven. Publication exact-revision and remote-state checks are enforced. `decomposition.strategy` is prompt policy too: `"strict"` only adds emphasis on the coherent end-to-end slice preference (default `"mvp"` preserves the current behavior) and never disables serialization, scope validation, review, worktree lifecycle, or publication preconditions. `strict_agents` is different: `true` throws at startup for a confirmed missing or wrong-mode required agent, while `false` downgrades that to a warning and continues. OpenCode’s beta startup can materialize config-backed agents after external plugins load, so an early missing-agent or empty-list result is treated as pending — validation is deferred and re-checked when the agents arrive instead of failing setup.
 
-### Recommended host keys
+### Host keys
 
-The installer writes these native OpenCode keys — each only when absent, and never overwriting an explicit value you set:
+The installer writes one native OpenCode key — only when neither spelling is present, and never overwriting an explicit value you set:
 
 | Key | Value | Why |
 |-----|-------|-----|
-| `subagent_depth` (top-level) | `3` | Native subagent nesting limit; `1` would stop `orchestrator → implementer → planner → explore` after the first hop. The older `experimental.subagent_depth` spelling is dead on the current host schema, so the installer migrates a legacy nested value up |
-| `experimental.continue_loop_on_deny` | `true` | Continue the agent loop when a tool call is denied, so orchestrator-only denials and runtime-authority refusals stay recoverable instead of terminating the model’s loop |
-| `experimental.batch_tool` | `true` | Enable per-turn parallel tool invocation |
+| `experimental.subagent_depth` | `3` | Native subagent nesting limit; `1` would stop `orchestrator → implementer → planner → explore` after the first hop. On 2.0.11 a top-level `subagent_depth` is unsupported legacy config and is dropped at startup, so the installer migrates a legacy top-level value into `experimental` |
 
 ```jsonc
 {
-  "subagent_depth": 3,
-  "experimental": { "continue_loop_on_deny": true, "batch_tool": true }
+  "experimental": { "subagent_depth": 3 }
 }
 ```
+
+> Older installer versions also wrote `experimental.continue_loop_on_deny` and `experimental.batch_tool`. Both are unsupported legacy settings on 2.0.11 and are dropped at startup with a diagnostic; the installer no longer writes them. A value you already have stays in your config untouched — remove it to silence the startup diagnostic.
 
 ### Choosing models
 
@@ -568,7 +566,7 @@ For teams that want cost/usage limits or a stricter review gate:
 
 **Nested delegation stops after the first hop?**
 
-OpenCode’s native `subagent_depth` is a **top-level** config key and defaults to 1, which prevents subagents from launching subagents. Older installer versions wrote it under `experimental`, where the current host schema rejects additional properties — that spelling is dead config, so the install silently ran at depth 1. Re-run the installer: it moves a legacy `experimental.subagent_depth` value to the top level (value preserved, stale key removed) and adds top-level `subagent_depth: 3` only when the key is absent — or set the value yourself; an explicit value you configure always wins and is never overwritten.
+OpenCode’s native subagent nesting depth lives at **`experimental.subagent_depth`** on 2.0.11 and defaults to 1, which prevents subagents from launching subagents. Older installer versions wrote a top-level `subagent_depth`, which the server now drops as unsupported legacy config — so that install silently ran at depth 1. Re-run the installer: it moves a legacy top-level `subagent_depth` value into `experimental` (value preserved, stale key removed) and adds `experimental.subagent_depth: 3` only when neither spelling is present — or set the value yourself; an explicit value you configure always wins and is never overwritten.
 
 ---
 

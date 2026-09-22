@@ -704,21 +704,22 @@ describe("installer", () => {
     expect(orchestratorSystem).toContain("orchestrator→all configured roles")
   })
 
-  test("sets top-level subagent_depth to 3 on a fresh install", () => {
+  test("sets experimental.subagent_depth to 3 on a fresh install", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     const path = join(directory, "opencode.jsonc")
     installConfig(path, {})
     const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
-    // Native V2 subagent depth defaults to 1, which would block the approved
-    // deepest path orchestrator -> implementation -> planning -> research.
-    expect(document.subagent_depth).toBe(3)
-    // The legacy nested spelling is never written: on the current host schema
-    // `experimental` rejects additional properties, so the nested key is dead.
-    expect(document.experimental).toEqual({ continue_loop_on_deny: true, batch_tool: true })
-    expect(Object.hasOwn(document.experimental, "subagent_depth")).toBe(false)
+    // Native 2.0.11 subagent depth defaults to 1, which would block the
+    // approved deepest path orchestrator -> implementation -> planning ->
+    // research.
+    expect(document.experimental.subagent_depth).toBe(3)
+    // The top-level spelling is unsupported legacy config on 2.0.11 and is
+    // dropped at startup, so the installer never writes it.
+    expect(Object.hasOwn(document, "subagent_depth")).toBe(false)
+    expect(Object.keys(document.experimental)).toEqual(["subagent_depth"])
   })
 
-  test("adds top-level subagent_depth to an existing experimental object and preserves unrelated keys", () => {
+  test("adds experimental.subagent_depth to an existing experimental object and preserves unrelated keys", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     const path = join(directory, "opencode.jsonc")
     writeFileSync(path, JSON.stringify({ experimental: { something: true, nested: { a: 1 } }, agents: {} }))
@@ -726,46 +727,42 @@ describe("installer", () => {
     installConfig(path, {})
 
     const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
-    expect(document.subagent_depth).toBe(3)
     expect(document.experimental).toEqual({
       something: true,
       nested: { a: 1 },
-      continue_loop_on_deny: true,
-      batch_tool: true,
+      subagent_depth: 3,
     })
-    expect(Object.hasOwn(document.experimental, "subagent_depth")).toBe(false)
+    expect(Object.hasOwn(document, "subagent_depth")).toBe(false)
   })
 
-  test("preserves explicit top-level subagent_depth values, lower, higher, or otherwise", () => {
+  test("preserves explicit experimental.subagent_depth values, lower, higher, or otherwise", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     for (const [index, depth] of [1, 2, 8, "3", null, false].entries()) {
       const path = join(directory, `depth-${index}.jsonc`)
-      writeFileSync(path, JSON.stringify({ subagent_depth: depth }))
+      writeFileSync(path, JSON.stringify({ experimental: { subagent_depth: depth } }))
 
       installConfig(path, {})
 
       const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
-      expect(document.subagent_depth, String(depth)).toBe(depth)
-      // Nothing else was added at the top level for depth, and the nested
-      // spelling stays absent: the explicit value wins by presence alone.
-      expect(Object.hasOwn(document.experimental, "subagent_depth"), String(depth)).toBe(false)
-      expect(Object.keys(document.experimental), String(depth)).toEqual(["continue_loop_on_deny", "batch_tool"])
+      expect(document.experimental.subagent_depth, String(depth)).toBe(depth)
+      // Nothing else was added for depth, and the dead top-level spelling stays
+      // absent: the explicit value wins by presence alone.
+      expect(Object.hasOwn(document, "subagent_depth"), String(depth)).toBe(false)
     }
   })
 
-  test("migrates a legacy nested experimental.subagent_depth to the top level and removes the stale key", () => {
+  test("migrates a legacy top-level subagent_depth into experimental and removes the stale key", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     const path = join(directory, "opencode.jsonc")
-    writeFileSync(path, JSON.stringify({ experimental: { subagent_depth: 5, keep: true }, agents: {} }))
+    writeFileSync(path, JSON.stringify({ subagent_depth: 5, agents: {} }))
 
     installConfig(path, {})
 
     const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
-    // The user's value moves up byte-for-byte instead of being replaced by the
-    // default, and the dead nested key is removed.
-    expect(document.subagent_depth).toBe(5)
-    expect(Object.hasOwn(document.experimental, "subagent_depth")).toBe(false)
-    expect(document.experimental).toEqual({ keep: true, continue_loop_on_deny: true, batch_tool: true })
+    // The user's value moves into `experimental` byte-for-byte instead of being
+    // replaced by the default, and the dead top-level key is removed.
+    expect(document.experimental.subagent_depth).toBe(5)
+    expect(Object.hasOwn(document, "subagent_depth")).toBe(false)
 
     // The migration is idempotent and leaves the config byte-identical.
     const migrated = readFileSync(path, "utf8")
@@ -773,47 +770,19 @@ describe("installer", () => {
     expect(readFileSync(path, "utf8")).toBe(migrated)
   })
 
-  test("keeps an explicit top-level subagent_depth and leaves a coexisting legacy nested value untouched", () => {
+  test("keeps an explicit nested subagent_depth and leaves a coexisting legacy top-level value untouched", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     const path = join(directory, "opencode.jsonc")
-    writeFileSync(path, JSON.stringify({ subagent_depth: 2, experimental: { subagent_depth: 6 } }))
+    writeFileSync(path, JSON.stringify({ subagent_depth: 6, experimental: { subagent_depth: 2 } }))
 
     installConfig(path, {})
 
     const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
-    // The explicit top-level value is the user's policy and wins...
-    expect(document.subagent_depth).toBe(2)
-    // ...and the dead nested value is preserved rather than deleted, so no
-    // user-authored data is lost; the recommended keys are still added.
-    expect(document.experimental.subagent_depth).toBe(6)
-    expect(document.experimental.continue_loop_on_deny).toBe(true)
-    expect(document.experimental.batch_tool).toBe(true)
-  })
-
-  test("adds the recommended experimental keys only when absent and preserves user values", () => {
-    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
-    const path = join(directory, "opencode.jsonc")
-    writeFileSync(path, JSON.stringify({ experimental: { continue_loop_on_deny: false, other: 1 } }))
-
-    installConfig(path, {})
-
-    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
-    // The explicit `false` wins; only the absent key is added; unrelated keys
-    // are untouched.
-    expect(document.experimental).toEqual({ continue_loop_on_deny: false, other: 1, batch_tool: true })
-  })
-
-  test("reinstall neither duplicates nor rewrites the recommended experimental keys", () => {
-    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
-    const path = join(directory, "opencode.jsonc")
-    installConfig(path, {})
-    const first = readFileSync(path, "utf8")
-
-    installConfig(path, {})
-
-    expect(readFileSync(path, "utf8")).toBe(first)
-    const document = JSON.parse(first) as Record<string, any>
-    expect(document.experimental).toEqual({ continue_loop_on_deny: true, batch_tool: true })
+    // The explicit nested value is the user's policy and wins...
+    expect(document.experimental.subagent_depth).toBe(2)
+    // ...and the dead top-level value is preserved rather than deleted, so no
+    // user-authored data is lost.
+    expect(document.subagent_depth).toBe(6)
   })
 
   test("rejects a non-object experimental entry without writing any change", () => {
@@ -843,11 +812,11 @@ describe("installer", () => {
     expect(readFileSync(path, "utf8")).toBe(first)
 
     const document = JSON.parse(first) as Record<string, any>
-    expect(document.subagent_depth).toBe(3)
-    expect(document.experimental).toEqual({ continue_loop_on_deny: true, batch_tool: true })
+    expect(document.experimental.subagent_depth).toBe(3)
+    expect(Object.hasOwn(document, "subagent_depth")).toBe(false)
   })
 
-  test("an older install without a depth key gains the top-level depth on reinstall without re-adding agents", () => {
+  test("an older install without a depth key gains the nested depth on reinstall without re-adding agents", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     const path = join(directory, "opencode.jsonc")
     installConfig(path, {})
@@ -860,8 +829,8 @@ describe("installer", () => {
 
     expect(result.addedAgents).toEqual([])
     const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
-    expect(document.subagent_depth).toBe(3)
-    expect(document.experimental).toEqual({ continue_loop_on_deny: true, batch_tool: true })
+    expect(document.experimental.subagent_depth).toBe(3)
+    expect(Object.hasOwn(document, "subagent_depth")).toBe(false)
   })
 
   test("depth insertion stays localized in commented JSONC", () => {
@@ -876,21 +845,22 @@ describe("installer", () => {
     const errors: any[] = []
     const document = parse(text, errors, { allowTrailingComma: true }) as Record<string, any>
     expect(errors).toEqual([])
-    expect(document.subagent_depth).toBe(3)
-    expect(document.experimental).toEqual({ keep: true, continue_loop_on_deny: true, batch_tool: true })
-    expect(Object.hasOwn(document.experimental, "subagent_depth")).toBe(false)
+    expect(document.experimental).toEqual({ keep: true, subagent_depth: 3 })
+    expect(Object.hasOwn(document, "subagent_depth")).toBe(false)
   })
 
   test("installer-written host keys stay within the verified schema snapshot (pin-drift guard)", () => {
-    // G4/A17: verified against the live host schema on 2026-09-15
-    // (https://opencode.ai/config.json). `subagent_depth` is a top-level
-    // Config property; `experimental` has `additionalProperties: false` and
-    // defines `continue_loop_on_deny` and `batch_tool` but no `subagent_depth`.
-    // This snapshot is deliberately offline (refreshed by hand on pin bumps) so
-    // the suite never depends on the network.
+    // G4/A17 re-verified against the installed 2.0.11 server normalization on
+    // 2026-09-22: a top-level `subagent_depth` is unsupported legacy config and
+    // is dropped at startup, while `experimental.subagent_depth` is the live
+    // spelling (native default 1). `experimental.continue_loop_on_deny` and
+    // `experimental.batch_tool` are dropped as unsupported legacy settings, so
+    // the installer no longer writes them. This snapshot is deliberately
+    // offline (refreshed by hand on pin bumps) so the suite never depends on
+    // the network.
     const schemaSnapshot = {
-      topLevel: ["subagent_depth"],
-      experimental: ["continue_loop_on_deny", "batch_tool"],
+      unsupportedTopLevel: ["subagent_depth"],
+      experimental: ["subagent_depth"],
     } as const
 
     const freshDirectory = mkdtempSync(join(tmpdir(), "orchestrator-snapshot-"))
@@ -898,15 +868,14 @@ describe("installer", () => {
     installConfig(freshPath, {})
     const fresh = JSON.parse(readFileSync(freshPath, "utf8")) as Record<string, any>
 
-    // The top-level key the guard covers is present exactly once, and the dead
-    // nested spelling never appears in installer output.
-    for (const key of schemaSnapshot.topLevel) {
-      expect(Object.hasOwn(fresh, key), key).toBe(true)
-      expect(Object.hasOwn(fresh.experimental, key), key).toBe(false)
+    // The unsupported top-level spelling never appears in installer output, and
+    // a fresh install creates `experimental` with exactly the snapshot's keys —
+    // no installer-added experimental key can drift unnoticed.
+    for (const key of schemaSnapshot.unsupportedTopLevel) {
+      expect(Object.hasOwn(fresh, key), key).toBe(false)
     }
-    // A fresh install creates `experimental`, so its keys are exactly the
-    // snapshot's — no installer-added experimental key can drift unnoticed.
     expect(Object.keys(fresh.experimental).sort()).toEqual([...schemaSnapshot.experimental].sort())
+    expect(fresh.experimental.subagent_depth).toBe(3)
 
     // On a user-authored config the installer only adds snapshot keys.
     const userDirectory = mkdtempSync(join(tmpdir(), "orchestrator-snapshot-"))
@@ -927,11 +896,11 @@ describe("installer", () => {
     const errors: any[] = []
     const document = parse(template, errors, { allowTrailingComma: true }) as Record<string, any>
     expect(errors).toEqual([])
-    // Template and installer agree on the top-level depth key, the absent
-    // legacy nested spelling, and the recommended experimental keys.
-    expect(document.subagent_depth).toBe(3)
-    expect(Object.hasOwn(document.experimental, "subagent_depth")).toBe(false)
-    expect(Object.keys(document.experimental).sort()).toEqual(["batch_tool", "continue_loop_on_deny"])
+    // Template and installer agree on the nested depth key and the absent
+    // unsupported top-level spelling.
+    expect(document.experimental.subagent_depth).toBe(3)
+    expect(Object.hasOwn(document, "subagent_depth")).toBe(false)
+    expect(Object.keys(document.experimental).sort()).toEqual(["subagent_depth"])
   })
 
   test("installs the observability permission: allowed for the orchestrator, denied to every worker", () => {

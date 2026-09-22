@@ -61,6 +61,16 @@ import { listVerificationReceipts } from "../verification/state.js"
 
 type ToolResult = { content: string }
 
+export type ReadyTaskDispatchInput = {
+  sessionID: string
+  taskID: string
+  expectedVersion: number
+}
+
+export type ReadyTaskDispatchResult =
+  | { status: "dispatched"; taskID?: string; stepIndex?: number }
+  | { status: "refused"; reason: string; message: string }
+
 type SessionLike = {
   get(input: { sessionID: string }): Promise<unknown>
 }
@@ -82,6 +92,8 @@ export type OrchestrationToolsDeps = {
   pathExists?: (absolutePath: string) => Promise<boolean>
   realpath?: (directory: string) => Promise<string | undefined>
   redact?: (text: string) => string
+  /** Lead-owned nudge into the normal continuation reservation/delivery path. */
+  dispatchReadyTask?: (input: ReadyTaskDispatchInput) => Promise<ReadyTaskDispatchResult>
 }
 
 export function addOrchestrationTools(draft: ToolDraftLike, deps: OrchestrationToolsDeps): void {
@@ -115,7 +127,7 @@ export function addOrchestrationTools(draft: ToolDraftLike, deps: OrchestrationT
   draft.add({
     name: "board_action",
     description:
-      "Apply one canonical lead-board action: init, create-task, assign-task, transition, or complete. Transition intent start-task safely moves planned to ready for recovery; report-task and validate-task record the required evidence. Each mutation requires its exact expected revision/version and the plugin computes the legal transition.",
+      "Apply one canonical lead-board action: init, create-task, assign-task, transition, or complete. Transition intent start-task safely moves planned to ready for recovery; dispatch-task invokes normal reservation/delivery for an exact ready task without writing a shortcut status; report-task and validate-task record the required evidence. Each mutation requires its exact expected revision/version and the plugin computes the legal transition.",
     input: boardActionInput,
     options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
     execute: async (input, tool) => {
@@ -127,6 +139,9 @@ export function addOrchestrationTools(draft: ToolDraftLike, deps: OrchestrationT
       if (action === "complete") return resultContent(JSON.stringify(await completeLeadBoardTool(deps, validationDeps, tool.sessionID, input)))
       if (action === "transition") {
         const intent = stringField(input, "intent")
+        if (intent === "dispatch-task") {
+          return resultContent(JSON.stringify(await dispatchReadyLeadBoardTaskTool(deps, tool.sessionID, input)))
+        }
         const transitionInput = { ...(recordField(input) ?? {}), action: intent }
         return resultContent(JSON.stringify(await transitionLeadBoardTool(deps, validationDeps, tool.sessionID, transitionInput)))
       }
@@ -260,6 +275,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const BOARD_INTENT_ACTIONS = [
   "start-task",
+  "dispatch-task",
   "report-task",
   "validate-task",
   "request-rework",
@@ -288,7 +304,7 @@ const BOARD_LEGACY_ACTIONS: readonly LeadTransitionAction[] = [
   "record-replay",
 ]
 
-const BOARD_INTENT_TO_TRANSITION: Readonly<Record<Exclude<BoardIntentAction, "record-replay">, LeadTransitionAction>> = {
+const BOARD_INTENT_TO_TRANSITION: Readonly<Record<Exclude<BoardIntentAction, "record-replay" | "dispatch-task">, LeadTransitionAction>> = {
   "start-task": "ready",
   "report-task": "report",
   "validate-task": "validate",
@@ -302,7 +318,7 @@ const BOARD_INTENT_TO_TRANSITION: Readonly<Record<Exclude<BoardIntentAction, "re
 function normalizeBoardAction(value: string): LeadTransitionAction | undefined {
   if ((BOARD_LEGACY_ACTIONS as readonly string[]).includes(value)) return value as LeadTransitionAction
   if (value === "record-replay") return "record-replay"
-  return BOARD_INTENT_TO_TRANSITION[value as Exclude<BoardIntentAction, "record-replay">]
+  return BOARD_INTENT_TO_TRANSITION[value as Exclude<BoardIntentAction, "record-replay" | "dispatch-task">]
 }
 
 type BoardRead =
@@ -620,6 +636,62 @@ async function transitionLeadBoardTool(
       limitations: LEAD_BOARD_LIMITATIONS,
     }
   })
+}
+
+/**
+ * Request normal continuation admission for one exact ready task. This action
+ * deliberately does not call a lifecycle transition: the continuation runtime
+ * owns reservation, step receipts, prompt delivery, and the reserved ->
+ * in-progress edge. That keeps a lead recovery action from manufacturing an
+ * in-progress, validation, or review claim in durable state.
+ */
+async function dispatchReadyLeadBoardTaskTool(
+  deps: OrchestrationToolsDeps,
+  sessionID: string,
+  input: unknown,
+): Promise<Record<string, unknown>> {
+  const taskID = stringField(input, "taskID")
+  const expectedVersion = numberField(input, "expectedVersion")
+  if (!taskID || expectedVersion === undefined) {
+    return boardRefusal("invalid-input", "dispatch-task requires taskID and expectedVersion")
+  }
+  const read = await readBoard(deps, sessionID)
+  if (read.status !== "ok") return boardRefusal(read.status, `no usable board: ${read.status}`)
+  if (sessionID !== read.board.leadSessionID) return boardRefusal("actor-mismatch", "only the board's lead session may dispatch a task")
+  if (read.board.status !== "active") return boardRefusal("board-not-active", `the board is ${read.board.status}`)
+  const task = read.board.tasks.find((candidate) => candidate.taskID === taskID)
+  if (!task) return boardRefusal("task-missing", `no task ${taskID} exists on this board`)
+  if (task.lifecycleVersion !== expectedVersion) {
+    return boardRefusal("version-mismatch", `task ${taskID} is at lifecycle version ${task.lifecycleVersion}, not ${expectedVersion}; re-read and retry`)
+  }
+  if (task.status !== "ready") {
+    return boardRefusal("invalid-transition", `task ${taskID} cannot dispatch from ${task.status}; dispatch-task only admits ready tasks`)
+  }
+  if (!deps.dispatchReadyTask) {
+    return boardRefusal("dispatch-unavailable", "the normal continuation dispatch path is unavailable; retry after plugin startup completes")
+  }
+
+  let dispatched: ReadyTaskDispatchResult
+  try {
+    dispatched = await deps.dispatchReadyTask({ sessionID, taskID, expectedVersion })
+  } catch {
+    return boardRefusal("dispatch-failed", "the normal continuation dispatch path failed; inspect the board before retrying")
+  }
+  if (dispatched.status === "refused") return boardRefusal(dispatched.reason, dispatched.message)
+  if (dispatched.taskID !== undefined && dispatched.taskID !== taskID) {
+    return boardRefusal("dispatch-mismatch", "the continuation dispatched a different task; inspect the board before retrying")
+  }
+
+  const latest = await readBoard(deps, sessionID)
+  return {
+    status: "dispatched",
+    taskID,
+    ...(dispatched.stepIndex !== undefined ? { stepIndex: dispatched.stepIndex } : {}),
+    ...(latest.status === "ok"
+      ? { board: projectLeadBoardV2(latest.board) }
+      : { boardStatus: latest.status, boardWarning: latest.status === "unavailable" ? latest.warning : undefined }),
+    limitations: LEAD_BOARD_LIMITATIONS,
+  }
 }
 
 async function runBoardValidateTool(

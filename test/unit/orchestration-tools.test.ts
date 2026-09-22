@@ -1173,6 +1173,62 @@ describe("lead board tools", () => {
     expect(stale.reason).toBe("version-mismatch")
   })
 
+  test("board_action dispatch-task delegates ready work to normal continuation and cannot bypass reporting", async () => {
+    const values = new Map<string, unknown>()
+    seedBoard(values, { tasks: [boardTask({ status: "ready", lifecycleVersion: 2 })] as never })
+    const requests: Array<{ sessionID: string; taskID: string; expectedVersion: number }> = []
+    const tools = collect({
+      storage: memStorage(values),
+      dispatchReadyTask: async (input) => {
+        requests.push(input)
+        return { status: "dispatched" as const, taskID: input.taskID, stepIndex: 1 }
+      },
+    })
+    const orchestrator = toolContext("session-1", "orchestrator")
+
+    const dispatched = JSON.parse(
+      (
+        await tools.get("board_action")!.execute(
+          { action: "transition", intent: "dispatch-task", taskID: "t1", expectedVersion: 2 },
+          orchestrator,
+        )
+      ).content,
+    ) as Record<string, unknown>
+    expect(dispatched.status).toBe("dispatched")
+    expect(requests).toEqual([{ sessionID: "session-1", taskID: "t1", expectedVersion: 2 }])
+    // The tool itself does not manufacture the lifecycle edge; the continuation
+    // callback owns the reservation, receipt, delivery, and in-progress write.
+    expect(readStoredBoard(values).tasks[0]!.status).toBe("ready")
+
+    const stale = JSON.parse(
+      (
+        await tools.get("board_action")!.execute(
+          { action: "transition", intent: "dispatch-task", taskID: "t1", expectedVersion: 1 },
+          orchestrator,
+        )
+      ).content,
+    ) as Record<string, unknown>
+    expect(stale.reason).toBe("version-mismatch")
+    expect(requests).toHaveLength(1)
+
+    const reportBypass = JSON.parse(
+      (
+        await tools.get("board_action")!.execute(
+          {
+            action: "transition",
+            intent: "report-task",
+            taskID: "t1",
+            expectedVersion: 2,
+            evidence: [{ kind: "command", reference: "bun test", description: "claimed complete" }],
+          },
+          orchestrator,
+        )
+      ).content,
+    ) as Record<string, unknown>
+    expect(reportBypass.reason).toBe("invalid-transition")
+    expect(readStoredBoard(values).tasks[0]!.status).toBe("ready")
+  })
+
   test("board_action transition validate runs the unchanged D2 validator and refuses non-pass results", async () => {
     const values = new Map<string, unknown>()
     seedBoard(values, { tasks: [boardTask({ status: "awaiting-validation", lifecycleVersion: 5 })] as never })

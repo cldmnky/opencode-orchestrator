@@ -123,6 +123,8 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
       : undefined
     if (authority) registrations.push({ dispose: () => authority.dispose() })
 
+    const continuation = startGoalContinuation(ctx, options, controlGate, options.goal.auto_continue)
+
     try {
       registrations.push(
         await startVerificationRuntime({
@@ -194,6 +196,7 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
             storage: ctx.storage,
             session: ctx.session,
             vcs: ctx.vcs,
+            dispatchReadyTask: continuation.dispatchReadyTask,
           })
           addVerificationTools(trackedDraft, { options, storage: ctx.storage, location: ctx.location, session: ctx.session })
           addAuthorityTools(trackedDraft, { options, storage: ctx.storage, location: ctx.location })
@@ -291,7 +294,7 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
               "Separate established facts from assumptions.",
               "Use orchestrator_goal with get, set, pause, resume, complete, or clear actions for session goal state.",
               "Use orchestrator_board_get and orchestrator_board_action for the durable lead board. Use action variants init, create-task, assign-task, transition, or complete; a delivered prompt never completes a task.",
-               "If recovery leaves a task in planned, use board_action transition with intent start-task and its current expectedVersion; this only moves planned to ready so normal continuation can dispatch it. Never use it to skip validation or review.",
+               "If recovery leaves a task in planned, use board_action transition with intent start-task and its current expectedVersion; this only moves planned to ready. If a ready task has no pending idle edge, use transition intent dispatch-task with its current expectedVersion once to request normal reservation/delivery. Neither action skips validation or review.",
               "Use orchestrator_status with mode single and sessionID for one-session detail, or mode list for a bounded same-project session list.",
               ...(options.review.mode === "bounded"
                 ? ["After plugin-observed validation, start review directly with orchestrator_review_start; review start and submit apply the legal board state internally."]
@@ -392,15 +395,15 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
         },
       })
 
-      const stopContinuation = options.goal.auto_continue ? startGoalContinuation(ctx, options, controlGate) : undefined
       return async () => {
-        await stopContinuation?.()
+        await continuation()
         await lateAgentSetup?.stop()
         const lateRegistration = await lateAgentSetup?.registration
         if (lateRegistration) await lateRegistration.dispose()
         for (const registration of [...registrations].reverse()) await registration.dispose()
       }
     } catch (error) {
+      await continuation()
       await lateAgentSetup?.stop()
       const lateRegistration = await lateAgentSetup?.registration
       if (lateRegistration) await lateRegistration.dispose()

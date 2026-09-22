@@ -281,9 +281,12 @@ completion. Inspect it with `orchestrator_board_get` and mutate it with
 After operator recovery, a root task may be `planned` while the goal is paused.
 Resume the goal, or use the orchestrator-only board action
 `transition`/`start-task` with the task's current `expectedVersion` to move it
-to `ready`; normal continuation then dispatches it. This does not create
-verification or review proof. Do not call `orchestrator_review_start` until the
-task is `awaiting-review` with fresh lead validation at the exact head/base.
+to `ready`. If the session has no pending idle edge, use
+`transition`/`dispatch-task` once with that task's current `expectedVersion`;
+this invokes the normal reservation and prompt-delivery path without writing a
+shortcut lifecycle status. Neither recovery action creates verification or
+review proof. Do not call `orchestrator_review_start` until the task is
+`awaiting-review` with fresh lead validation at the exact head/base.
 
 The board is durable but not a transaction, cross-process scheduler, or
 filesystem sandbox. Missing or malformed state remains visible as unknown and

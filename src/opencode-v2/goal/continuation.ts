@@ -60,14 +60,36 @@ export type ContinuationContext = {
   }
 }
 
+/**
+ * A lead-owned request to kick the normal continuation reservation/delivery
+ * path for one exact ready task. The request is intentionally not a lifecycle
+ * transition: reservation, receipts, delivery, and the in-progress edge all
+ * remain owned by the continuation runtime.
+ */
+export type ContinuationDispatchRequest = {
+  sessionID: string
+  taskID: string
+  expectedVersion: number
+}
+
+export type ContinuationDispatchResult =
+  | { status: "dispatched"; taskID?: string; stepIndex?: number }
+  | { status: "refused"; reason: string; message: string }
+
+export type GoalContinuationHandle = (() => Promise<void>) & {
+  dispatchReadyTask(input: ContinuationDispatchRequest): Promise<ContinuationDispatchResult>
+}
+
 export function startGoalContinuation(
   context: ContinuationContext,
   options: OrchestratorOptions,
   gate?: DispatchGate,
-): () => Promise<void> {
+  listenForIdle = true,
+): GoalContinuationHandle {
   const controller = new AbortController()
-  const iterable = context.event.subscribe({ signal: controller.signal })
-  const iterator = iterable[Symbol.asyncIterator]()
+  const iterator = listenForIdle
+    ? context.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]()
+    : undefined
   const inFlight = new Set<string>()
   const lastEvent = new Map<string, string>()
   // Index of the most recently delivered continuation step per session, kept in
@@ -77,17 +99,22 @@ export function startGoalContinuation(
   const lastDispatched = new Map<string, number>()
   let finished!: Promise<void>
 
-  finished = consumeEvents().catch((error) => {
-    if (!controller.signal.aborted) console.error("opencode-orchestrator goal event stream stopped", error)
-  })
+  finished = listenForIdle
+    ? consumeEvents().catch((error) => {
+        if (!controller.signal.aborted) console.error("opencode-orchestrator goal event stream stopped", error)
+      })
+    : Promise.resolve()
 
-  return async () => {
+  const stop = (async () => {
     controller.abort()
-    await iterator.return?.()
+    await iterator?.return?.()
     await finished
-  }
+  }) as GoalContinuationHandle
+  stop.dispatchReadyTask = (input) => requestReadyDispatch(input)
+  return stop
 
   async function consumeEvents(): Promise<void> {
+    if (!iterator) return
     while (!controller.signal.aborted) {
       const next = await iterator.next()
       if (next.done) return
@@ -127,22 +154,53 @@ export function startGoalContinuation(
     const marker = event.id ?? `${event.type}:${sessionID}:${event.created ?? ""}`
     if (lastEvent.get(sessionID) === marker) return
     lastEvent.set(sessionID, marker)
-    if (event.type !== "session.idle" || inFlight.has(sessionID)) return
+    if (event.type !== "session.idle") return
+
+    // A new idle edge means the previously delivered turn is over: record its
+    // receipt as `completed` before this edge can reserve a new step. The mark
+    // is best-effort and serialized under the session lock; it never changes
+    // the admission decision below.
+    await runAdmission(sessionID, undefined, true)
+  }
+
+  async function requestReadyDispatch(input: ContinuationDispatchRequest): Promise<ContinuationDispatchResult> {
+    return runAdmission(input.sessionID, { taskID: input.taskID, expectedVersion: input.expectedVersion }, false)
+  }
+
+  async function runAdmission(
+    sessionID: string,
+    requested: { taskID: string; expectedVersion: number } | undefined,
+    settle: boolean,
+  ): Promise<ContinuationDispatchResult> {
+    if (controller.signal.aborted) return refusedDispatch("stopped", "continuation is stopped")
+    if (inFlight.has(sessionID)) return refusedDispatch("dispatch-in-flight", "a continuation admission is already in flight for this session")
+    // An explicit lead request is only a recovery/nudge path. It must not
+    // overlap a prompt already delivered by the continuation runtime, because
+    // the next idle edge is the only observation that can settle that step.
+    if (requested && lastDispatched.has(sessionID)) {
+      return refusedDispatch("previous-step-active", "the previously dispatched continuation has not reached an idle edge")
+    }
 
     inFlight.add(sessionID)
     try {
-      // A new idle edge means the previously delivered turn is over: record its
-      // receipt as `completed` before this edge can reserve a new step. The
-      // mark is best-effort and serialized under the session lock; it never
-      // changes the admission decision below (a refused admission still leaves
-      // the prior step truthfully completed).
-      await settlePreviousStep(sessionID)
-      await admitContinuation(sessionID)
+      if (settle) await settlePreviousStep(sessionID)
+      const reserved = await admitContinuation(sessionID, requested)
+      if (!reserved) return refusedDispatch("not-admitted", "continuation admission did not produce a reservation; re-read the goal and board")
+      return {
+        status: "dispatched",
+        ...(reserved.kind === "board" ? { taskID: reserved.taskID } : {}),
+        stepIndex: reserved.stepIndex,
+      }
     } catch (error) {
       if (!controller.signal.aborted) console.error(`opencode-orchestrator continuation failed for ${sessionID}`, error)
+      return refusedDispatch("admission-error", "continuation admission failed; inspect the goal and board before retrying")
     } finally {
       inFlight.delete(sessionID)
     }
+  }
+
+  function refusedDispatch(reason: string, message: string): ContinuationDispatchResult {
+    return { status: "refused", reason, message }
   }
 
   // Marks the last delivered step's receipt `completed`, best-effort: the write
@@ -165,7 +223,10 @@ export function startGoalContinuation(
     }
   }
 
-  async function admitContinuation(sessionID: string): Promise<void> {
+  async function admitContinuation(
+    sessionID: string,
+    requested?: { taskID: string; expectedVersion: number },
+  ): Promise<Reservation | undefined> {
     // Goal/run/halt records stay anchored to the session's stable origin
     // project across session moves, so admit resolves the same project.
     const keyedLocation = { ...context.location, project: { id: await stableProjectID(context.storage, context.location, sessionID) } }
@@ -220,6 +281,7 @@ export function startGoalContinuation(
         return undefined
       }
       if (hydration.status === "missing") {
+        if (requested) return undefined
         // Legacy goal without an enrolled board: keep the goal-only
         // continuation path exactly as before (board-missing is not an error).
         const next: GoalRecord = {
@@ -265,7 +327,15 @@ export function startGoalContinuation(
         }
       }
 
-      const selection = reserveNextLeadTaskV2(working, { stepIndex: goal.continuationCount + 1, now })
+      if (requested) {
+        const target = working.tasks.find((task) => task.taskID === requested.taskID)
+        if (!target || target.status !== "ready" || target.lifecycleVersion !== requested.expectedVersion) return undefined
+      }
+      const selection = reserveNextLeadTaskV2(working, {
+        stepIndex: goal.continuationCount + 1,
+        now,
+        ...(requested ? { taskID: requested.taskID } : {}),
+      })
       if (!selection.reservation) {
         if (selection.board !== working) {
           try {
@@ -415,6 +485,7 @@ export function startGoalContinuation(
     // update above: the completion mark targets the logical step, and a failed
     // dispatched write must not erase it.
     lastDispatched.set(sessionID, reserved.stepIndex)
+    return reserved
   }
 
   // Reads the exact linked step receipt for every claim-holding task and

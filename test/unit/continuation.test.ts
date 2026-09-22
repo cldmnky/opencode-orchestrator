@@ -1148,6 +1148,37 @@ describe("goal continuation", () => {
     stop()
   })
 
+  test("explicitly dispatches a ready task through the normal path without an idle edge", async () => {
+    const location = { directory: "/workspace", project: { id: "board-explicit-dispatch" } }
+    const key = goalStorageKey(location, "session")
+    const values = new Map<string, unknown>([[key, newGoal("session", "ship the change", 1)]])
+    const board = leadBoardFixture(location, "session", "ship the change", 1, [
+      leadTask({ taskID: "other", status: "ready" }),
+      leadTask({ taskID: "root", status: "ready", lifecycleVersion: 2 }),
+    ])
+    values.set(leadBoardStorageKey(location, "session"), board)
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(
+      fixture(location, values, prompts, stream),
+      parseOptions({ goal: { auto_continue: false, cooldown_ms: 0, max_continuations: 2 } }),
+      undefined,
+      false,
+    )
+
+    const result = await stop.dispatchReadyTask({ sessionID: "session", taskID: "root", expectedVersion: 2 })
+    expect(result).toMatchObject({ status: "dispatched", taskID: "root", stepIndex: 1 })
+    await waitFor(() => prompts.length === 1)
+    expect(prompts[0]!.text).toContain("Task: root at lifecycle version 3")
+    const stored = parseLeadBoard(values.get(leadBoardStorageKey(location, "session")))!
+    expect(stored.tasks.find((task) => task.taskID === "other")!.status).toBe("ready")
+    expect(stored.tasks.find((task) => task.taskID === "root")!.status).toBe("in-progress")
+    expect(stored.tasks.find((task) => task.taskID === "root")!.stepIndex).toBe(1)
+    expect(parseStepRecord(values.get(stepStorageKey(location, "session", 1)))?.status).toBe("dispatched")
+    expect((values.get(key) as { continuationCount: number }).continuationCount).toBe(1)
+    await stop()
+  })
+
   test("does not queue a board prompt when a reservation write fails", async () => {
     const location = { directory: "/workspace", project: { id: "board-write-fail" } }
     const key = goalStorageKey(location, "session")

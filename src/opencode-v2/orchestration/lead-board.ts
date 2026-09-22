@@ -1080,20 +1080,23 @@ export type LeadReserveResult = {
 /**
  * Deterministic reservation pass: promotes `planned` tasks whose dependencies
  * are complete to `ready`, then reserves the first `ready` task with a
- * conflict-free scope. A scope conflict leaves the task `ready` and the pass
- * continues with the next candidate; all-conflict is waiting, not failed.
+ * conflict-free scope. A supplied task ID narrows the pass to that exact
+ * candidate for an explicit lead dispatch request. A scope conflict leaves
+ * the task `ready` and the pass continues with the next candidate;
+ * all-conflict is waiting, not failed.
  * Callers persist the returned board and the pending step receipt under the
  * same process-local session lock before queueing a prompt.
  */
 export function reserveNextLeadTask(
   board: LeadBoard,
-  input: { stepIndex: number; now?: number },
+  input: { stepIndex: number; taskID?: string; now?: number },
 ): LeadReserveResult {
   if (board.status !== "active") return { board, reason: "no-ready-task" }
   const now = input.now ?? Date.now()
   let working = board
   let sawConflict = false
   for (const taskID of board.tasks.map((task) => task.taskID)) {
+    if (input.taskID !== undefined && taskID !== input.taskID) continue
     const current = working.tasks.find((task) => task.taskID === taskID)
     if (!current) continue
     if (current.status === "planned") {

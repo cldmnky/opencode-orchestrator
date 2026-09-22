@@ -465,6 +465,11 @@ describe("prompts", () => {
     expect(system).toContain("Bounded review mode is configured")
     expect(system).toContain("orchestrator_review_start")
     expect(system).toContain("orchestrator_review_submit")
+    // The lead must thread the submit context into the reviewer child's task
+    // contract; the reviewer cannot derive the lead session ID or round and
+    // must never guess them.
+    expect(system).toContain("Put your session ID, the round, the taskId, the runId, and the exact head and base SHAs in its task contract")
+    expect(system).toContain("a handoff verdict alone is never review proof")
     expect(system).toContain("no separate admission transition call is required")
     expect(system).toContain("stop-between-steps budget mode is configured")
     expect(system).toContain("in-flight provider and tool calls are never interrupted")
@@ -1038,6 +1043,12 @@ describe("nested delegation policy", () => {
     // The methodology block stays tool-free; only the bounded submit block names the tool.
     expect(REVIEW_METHOD_GUIDANCE).not.toContain("orchestrator_review_submit")
     expect(REVIEWER_SUBMIT_GUIDANCE).toContain("orchestrator_review_submit")
+    // Submit inputs come from the task contract, never from guessing, and a
+    // missing contract stops the submission honestly instead of fabricating it.
+    expect(REVIEWER_SUBMIT_GUIDANCE).toContain("Take the lead session ID and round from your task contract")
+    expect(REVIEWER_SUBMIT_GUIDANCE).toContain("never guess or invent them")
+    expect(REVIEWER_SUBMIT_GUIDANCE).toContain("report that the review was not submitted")
+    expect(REVIEWER_SUBMIT_GUIDANCE).toContain("A handoff verdict alone never records the review decision")
   })
 
   test("security guidance is embedded in the orchestrator system only", () => {

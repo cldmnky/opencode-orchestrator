@@ -420,7 +420,9 @@ export const BOUNDED_REVIEW_GUIDANCE = [
   "Bounded review mode is configured: run the explicit provenance-bound maker-checker flow.",
   "Validate the maker handoff with orchestrator_handoff_validate before review.",
   "Start V2 with orchestrator_review_start from the lead session using taskId, runId, and the exact head/base SHAs.",
-  "Delegate the configured reviewer child, then have that child call orchestrator_review_submit with its lead session, round, and one fixed decision.",
+  "Delegate the configured reviewer child to decide; that child must call orchestrator_review_submit itself.",
+  "Put your session ID, the round, the taskId, the runId, and the exact head and base SHAs in its task contract.",
+  "Make the expected outcome the submit decision plus the handoff; a handoff verdict alone is never review proof.",
   "The submit tool derives reviewer agent/session identity from ToolContext and refuses orchestrator self-approval or unrelated sessions.",
   "V1 records are readable as legacy-unproven status only and never authorize publication or completion.",
   "Review start and submit apply the legal board intent transition internally; no separate admission transition call is required.",
@@ -469,12 +471,15 @@ export const REVIEW_METHOD_GUIDANCE = [
 export const REVIEWER_SUBMIT_GUIDANCE = [
   "Bounded review submit (when delegated a review task):",
   "Call orchestrator_review_submit exactly once with one fixed decision.",
-  "Choose approve, request-changes, or block; the tool derives your identity itself.",
+  "Take the lead session ID and round from your task contract; never guess or invent them.",
+  "The tool derives your reviewer identity itself; you supply only the decision inputs.",
   "Approve only when the diff, scope, and verification checks are all actually true.",
   "Use request-changes with concrete, fixable findings.",
   "Use block for provenance or policy violations, such as an unverifiable claim or a scope bypass.",
   "Inspect the evidence yourself; never treat the maker's verification claims as your own check.",
   "Never approve work you made yourself.",
+  "If your task contract lacks the lead session ID or round, say so and stop; report that the review was not submitted.",
+  "A handoff verdict alone never records the review decision.",
 ].join("\n")
 
 /**

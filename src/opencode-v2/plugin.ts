@@ -346,7 +346,8 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
               ...(options.review.mode === "bounded"
                 ? [
                     "Bounded review is enabled.",
-                    "Use orchestrator_review_get and orchestrator_review_start from the lead; delegate the configured reviewer child and have it call orchestrator_review_submit.",
+                    "Use orchestrator_review_get and orchestrator_review_start from the lead; delegate the configured reviewer child to call orchestrator_review_submit.",
+                    "Give that child your session ID, the round, the taskId, the runId, and the exact head and base SHAs in its task contract.",
                     "Review start and submit apply legal board state internally; no separate transition call is required for the review flow.",
                     "V2 submit derives reviewer agent/session identity from ToolContext; V1 records are legacy-unproven and never publication or completion proof.",
                     "Stop when the record is blocked or tripped.",

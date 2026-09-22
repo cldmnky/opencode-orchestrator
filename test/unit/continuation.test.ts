@@ -63,6 +63,7 @@ describe("goal continuation", () => {
     stream.push({ id: "idle-1", type: "session.idle", data: { sessionID: "session" } })
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.delivery).toBe("steer")
 
     stream.push({ id: "idle-2", type: "session.idle", data: { sessionID: "session" } })
     await waitFor(() => prompts.length === 2)

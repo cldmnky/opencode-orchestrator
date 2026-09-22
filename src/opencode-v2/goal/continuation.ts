@@ -54,7 +54,7 @@ export type ContinuationContext = {
     prompt(input: {
       sessionID: string
       text: string
-      delivery: "queue"
+      delivery: "steer"
       metadata?: { [key: string]: AuthorityMetadataValue }
     }): Promise<unknown>
   }
@@ -349,7 +349,7 @@ export function startGoalContinuation(
       const selectionTask = selection.board.tasks.find((task) => task.taskID === selection.reservation!.taskID)
       if (!selectionTask) return undefined
 
-      // Persist reservation + step identity + pending receipt BEFORE queueing
+      // Persist reservation + step identity + pending receipt BEFORE delivery
       // the prompt. Order: step, board, goal. Any failure aborts delivery and
       // compensates what was already written, so a failed write is a safety
       // outcome that is never guessed around.
@@ -402,7 +402,7 @@ export function startGoalContinuation(
     if (!reserved || controller.signal.aborted) return
 
     // Admission gate, checked after the lock is released: the session prompt
-    // must never be queued while holding the lock, but we still re-read the
+    // must never be delivered while holding the lock, but we still re-read the
     // goal, halt flag, plan run, and (for board reservations) the board so a
     // pause, completion, replacement, or /halt that raced the reservation
     // fails closed. Only the exact records we reserved may be admitted.
@@ -438,7 +438,12 @@ export function startGoalContinuation(
           reserved.run?.plan,
           reserved.kind === "board" ? reserved.packet : undefined,
         ),
-        delivery: "queue",
+        // An idle edge means the previous turn completed. Use OpenCode's
+        // default delivery mode to begin the next goal step immediately rather
+        // than leaving a visible queued continuation behind. The reservation
+        // and re-checks above still fail closed if state changed before this
+        // prompt is admitted.
+        delivery: "steer",
         // Phase A N1: a plugin-created goal continuation carries the bounded
         // authority marker only in enforce mode, so the admission hook can
         // re-consult the dispatch gate at admission time.

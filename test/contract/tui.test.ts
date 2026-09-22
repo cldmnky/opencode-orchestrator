@@ -248,16 +248,11 @@ describe("TUI plugin contract", () => {
     const cleanup = await tuiPlugin.setup(context)
     await cleanup?.()
 
-    // Execution workflows are slash-only. The group header still identifies
-    // the owner, so the slash command title carries no redundant prefix.
+    // Execution workflows are owned by the server command transform, which
+    // supplies native slash completion. The CLI keymap must not mirror them.
     const slashCommands = commands.filter((command) => command.slash)
-    expect(slashCommands.map((command) => command.slash?.name).sort()).toEqual(slashSpecs.map((spec) => spec.name).sort())
-    for (const command of slashCommands) {
-      expect(command.title).toBe(`/${command.slash?.name}`)
-      expect(command.group).toBe("OpenCode Orchestrator")
-      expect(command.palette).toBeUndefined()
-      expect(command.slash?.name).toBeTruthy()
-    }
+    expect(slashCommands).toEqual([])
+    expect(slashSpecs.map((spec) => spec.name)).toEqual(["orchestrate", "goal", "run-plan", "halt", "handover"])
 
     // Configuration/operator controls are palette-only. They deliberately do
     // not create slash completion entries or execution-looking `/name` titles.

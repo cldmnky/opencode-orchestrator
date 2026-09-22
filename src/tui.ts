@@ -1,6 +1,6 @@
 import type { Definition } from "@opencode/plugin/tui/plugin"
 import type { Context, KeymapCommand } from "@opencode/plugin/tui/context"
-import { commandDefinitions, tuiCommandSurface, type CommandName, type TuiCommandSurface } from "./opencode-v2/commands/index.js"
+import { commandDefinitions, tuiCommandSurface, type CommandName } from "./opencode-v2/commands/index.js"
 import { gatesRpcDefinition, parseGatesView } from "./opencode-v2/gates/rpc.js"
 import type { GateStatus } from "./opencode-v2/gates/state.js"
 import { parseOptions, type OrchestratorOptions } from "./core/config.js"
@@ -50,8 +50,10 @@ export const tuiPlugin = {
             priority: 20,
             commands: [
               ...commandDefinitions(options)
-                .filter((spec) => available.get(spec.name) === spec.description)
-                .map((spec) => tuiCommand(context, spec.name, spec.description, tuiCommandSurface(spec.name))),
+                .filter(
+                  (spec) => available.get(spec.name) === spec.description && tuiCommandSurface(spec.name) === "palette",
+                )
+                .map((spec) => tuiCommand(context, spec.name, spec.description)),
               progressCommand(context, progress),
             ],
           }
@@ -268,17 +270,17 @@ function registerSidebar(context: Context, options: OrchestratorOptions, progres
   }
 }
 
-function tuiCommand(context: Context, name: CommandName, description: string, surface: TuiCommandSurface): KeymapCommand {
+function tuiCommand(context: Context, name: CommandName, description: string): KeymapCommand {
   return {
     id: `${RUNTIME_PLUGIN_ID}.${name}`,
-    title: surface === "slash" ? `/${name}` : name,
+    title: name,
     description,
     group: "OpenCode Orchestrator",
-    // Execution workflows are prompt slash commands. Configuration and
-    // operator controls are palette-only actions; keeping the two surfaces
-    // exclusive prevents the command popup from becoming a second execution
-    // menu.
-    ...(surface === "slash" ? { slash: { name, arguments: true } } : { palette: true }),
+    // Execution workflows are registered by the server command transform and
+    // already appear in native slash completion. Only add palette controls to
+    // the CLI keymap; mirroring server commands with a keymap `slash` entry
+    // creates duplicate `/name` rows in the TUI.
+    palette: true,
     enabled: () => activeSessionID(context) !== undefined,
     run: async (input) => {
       const sessionID = activeSessionID(context)

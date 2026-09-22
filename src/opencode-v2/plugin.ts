@@ -96,6 +96,7 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
     if (observability) registrations.push({ dispose: () => observability.dispose() })
     const controlGate = createDispatchGate({ options, storage: ctx.storage, location: ctx.location, runtime: observability })
     const moveCoordinator = createSessionMoveCoordinator()
+    let continuation: ReturnType<typeof startGoalContinuation> | undefined
 
     // N5 bounded retry policy (opt-in): when `retry.mode: "bounded"` is
     // configured, one session retry hook is registered below and filtered to
@@ -122,8 +123,6 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
         })
       : undefined
     if (authority) registrations.push({ dispose: () => authority.dispose() })
-
-    const continuation = startGoalContinuation(ctx, options, controlGate, options.goal.auto_continue)
 
     try {
       registrations.push(
@@ -196,7 +195,13 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
             storage: ctx.storage,
             session: ctx.session,
             vcs: ctx.vcs,
-            dispatchReadyTask: continuation.dispatchReadyTask,
+            dispatchReadyTask: (input) =>
+              continuation?.dispatchReadyTask(input) ??
+              Promise.resolve({
+                status: "refused" as const,
+                reason: "dispatch-unavailable",
+                message: "the normal continuation dispatch path is unavailable; retry after plugin startup completes",
+              }),
           })
           addVerificationTools(trackedDraft, { options, storage: ctx.storage, location: ctx.location, session: ctx.session })
           addAuthorityTools(trackedDraft, { options, storage: ctx.storage, location: ctx.location })
@@ -395,15 +400,16 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
         },
       })
 
+      continuation = startGoalContinuation(ctx, options, controlGate, options.goal.auto_continue)
       return async () => {
-        await continuation()
+        await continuation?.()
         await lateAgentSetup?.stop()
         const lateRegistration = await lateAgentSetup?.registration
         if (lateRegistration) await lateRegistration.dispose()
         for (const registration of [...registrations].reverse()) await registration.dispose()
       }
     } catch (error) {
-      await continuation()
+      await continuation?.()
       await lateAgentSetup?.stop()
       const lateRegistration = await lateAgentSetup?.registration
       if (lateRegistration) await lateRegistration.dispose()

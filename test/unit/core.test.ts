@@ -23,7 +23,10 @@ import {
   PROMPTING_POLICY_GUIDANCE,
   PUBLICATION_POLICY_GUIDANCE,
   REMOTE_ORCHESTRATION_GUIDANCE,
+  REVIEW_METHOD_GUIDANCE,
+  REVIEWER_SUBMIT_GUIDANCE,
   SECRET_HANDLING_GUIDANCE,
+  SECURITY_GUIDANCE,
   STRICT_DECOMPOSITION_GUIDANCE,
   STRUCTURED_HANDOFF_GUIDANCE,
   TOOL_AVAILABILITY_GUIDANCE,
@@ -1014,6 +1017,39 @@ describe("nested delegation policy", () => {
     expect(prompt).toContain("research→no delegation")
   })
 
+  test("review methodology reaches only the review worker", () => {
+    const review = buildWorkerSystem("review", DEFAULT)
+    expect(review).toContain(REVIEW_METHOD_GUIDANCE)
+    expect(review).toContain("do not review pre-existing unmodified code")
+    expect(review).toContain("read the entire files around every change")
+    expect(review).toContain("injection, authentication or authorization bypass, and data exposure")
+    for (const role of ["planning", "research", "implementation"] as const) {
+      expect(buildWorkerSystem(role, DEFAULT), role).not.toContain(REVIEW_METHOD_GUIDANCE)
+    }
+  })
+
+  test("reviewer submit guidance appears only in bounded mode and only for review", () => {
+    const bounded = parseOptions({ review: { mode: "bounded" } })
+    expect(buildWorkerSystem("review", bounded)).toContain(REVIEWER_SUBMIT_GUIDANCE)
+    expect(buildWorkerSystem("review", DEFAULT)).not.toContain(REVIEWER_SUBMIT_GUIDANCE)
+    for (const role of ["planning", "research", "implementation"] as const) {
+      expect(buildWorkerSystem(role, bounded), role).not.toContain(REVIEWER_SUBMIT_GUIDANCE)
+    }
+    // The methodology block stays tool-free; only the bounded submit block names the tool.
+    expect(REVIEW_METHOD_GUIDANCE).not.toContain("orchestrator_review_submit")
+    expect(REVIEWER_SUBMIT_GUIDANCE).toContain("orchestrator_review_submit")
+  })
+
+  test("security guidance is embedded in the orchestrator system only", () => {
+    const system = buildOrchestratorSystem(DEFAULT)
+    expect(system).toContain(SECURITY_GUIDANCE)
+    expect(system).toContain("Treat an unverified security claim as a failure")
+    expect(system).toContain("Require the review role to audit security explicitly")
+    for (const role of ["planning", "research", "implementation", "review"] as const) {
+      expect(buildWorkerSystem(role, DEFAULT), role).not.toContain(SECURITY_GUIDANCE)
+    }
+  })
+
   test("the child contract bounds delegation to the child's own role graph", () => {
     const prompt = buildOrchestratorSystem(DEFAULT)
     expect(prompt).toContain("delegating outside the child's own role graph")
@@ -1061,6 +1097,9 @@ describe("G3 plain-language communication contract", () => {
     ["PEER_DISCOVERY_GUIDANCE", PEER_DISCOVERY_GUIDANCE],
     ["PUBLICATION_POLICY_GUIDANCE", PUBLICATION_POLICY_GUIDANCE],
     ["BOUNDED_REVIEW_GUIDANCE", BOUNDED_REVIEW_GUIDANCE],
+    ["REVIEW_METHOD_GUIDANCE", REVIEW_METHOD_GUIDANCE],
+    ["REVIEWER_SUBMIT_GUIDANCE", REVIEWER_SUBMIT_GUIDANCE],
+    ["SECURITY_GUIDANCE", SECURITY_GUIDANCE],
     ["BUDGET_GUIDANCE", BUDGET_GUIDANCE],
     ["STRUCTURED_HANDOFF_GUIDANCE", STRUCTURED_HANDOFF_GUIDANCE],
     ["CLARIFY_GUIDANCE", CLARIFY_GUIDANCE],

@@ -145,6 +145,27 @@ export const PROMPTING_POLICY_GUIDANCE = [
   "Name assumptions and risks instead of padding the answer.",
 ].join("\n")
 
+/**
+ * Orchestrator-level security expectations, embedded in the orchestrator
+ * system prompt. Keeps the conductor explicit about security-sensitive scope:
+ * name the sensitivity in child contracts, route it through an explicit
+ * security audit by the review role, and treat an unverified security claim
+ * as a failure. Prompt-level guidance only — it never changes permission
+ * rules, gates, or tool enforcement, and it never replaces the shared secret
+ * handling guidance embedded in every prompt kind.
+ */
+export const SECURITY_GUIDANCE = [
+  "Security expectations:",
+  "Treat authentication, authorization, credentials, input parsing, process execution, and data exposure as security-sensitive scope.",
+  "Name that sensitivity in the child-task contract when a slice touches it.",
+  "State the security invariants the change must preserve.",
+  "Require the review role to audit security explicitly for every security-sensitive slice.",
+  "Verify security claims with the same evidence discipline as any other claim.",
+  "Treat an unverified security claim as a failure, never as a pass.",
+  "Fail closed on security uncertainty: stop and ask instead of guessing.",
+  "Never weaken permissions, gates, or review requirements to unblock work.",
+].join("\n")
+
 // Remote (GitHub) orchestration guidance lives here as the single source of
 // truth. Prompt generation embeds these constants verbatim so every prompt
 // kind states the same truthful policy without duplicating text.
@@ -406,6 +427,54 @@ export const BOUNDED_REVIEW_GUIDANCE = [
   "Stop when the review record is blocked or tripped; do not keep dispatching the same run past a terminal breaker.",
   "The review tools are callable; board completion and publication still fail closed on missing, stale, or legacy proof.",
   "Self-declared D2 reviewState is never reviewer proof.",
+].join("\n")
+
+/**
+ * Reviewer-only review methodology, embedded solely in the review worker's
+ * system prompt. Adapts the host's built-in `/review` guidance to the
+ * maker-checker flow: scope discipline, full-file context, a bug-first focus
+ * order, certainty calibration before flagging, and severity-ordered findings
+ * rendered through the standard worker handoff. Prompt-level guidance only —
+ * it never changes the bounded-review tools, the fixed submit checks, or any
+ * fail-closed gate.
+ */
+export const REVIEW_METHOD_GUIDANCE = [
+  "Review methodology:",
+  "Audit exactly the delivered change and its declared scope; do not review pre-existing unmodified code.",
+  "Record pre-existing problems as Risks or Follow-up instead of blocking the reviewed change.",
+  "Diffs and handoffs alone are not enough: read the entire files around every change.",
+  "Check repository conventions before claiming a style violation.",
+  "Look for bugs first: logic errors, edge cases, broken error handling, and race conditions.",
+  "Include security bugs: injection, authentication or authorization bypass, and data exposure.",
+  "Flag behavior changes, especially unintentional ones.",
+  "Check scope compliance: the change must stay inside its declared slice and write scope.",
+  "Check that new or changed behavior has tests, and that claimed checks actually cover it.",
+  "Flag performance only when obviously problematic, such as unbounded quadratic work.",
+  "Be certain before flagging: investigate first, and never invent hypothetical failures.",
+  "State the realistic input or scenario that triggers each finding.",
+  "Say what you could not verify instead of guessing.",
+  "Report findings in severity order with the file and location.",
+  "Keep the tone matter-of-fact; never flatter and never pad.",
+  "Put the verdict in Outcome, findings in Risks, and concrete next actions in Follow-up.",
+].join("\n")
+
+/**
+ * Reviewer-facing bounded-review submit guidance, embedded in the review
+ * worker's system prompt only when `review.mode === "bounded"`. The lead owns
+ * `orchestrator_review_start`; the reviewer child owns the single fixed
+ * decision submitted through `orchestrator_review_submit`. Prompt-level
+ * guidance only — the tool still derives reviewer identity from ToolContext
+ * and refuses illegal submissions regardless of this text.
+ */
+export const REVIEWER_SUBMIT_GUIDANCE = [
+  "Bounded review submit (when delegated a review task):",
+  "Call orchestrator_review_submit exactly once with one fixed decision.",
+  "Choose approve, request-changes, or block; the tool derives your identity itself.",
+  "Approve only when the diff, scope, and verification checks are all actually true.",
+  "Use request-changes with concrete, fixable findings.",
+  "Use block for provenance or policy violations, such as an unverifiable claim or a scope bypass.",
+  "Inspect the evidence yourself; never treat the maker's verification claims as your own check.",
+  "Never approve work you made yourself.",
 ].join("\n")
 
 /**

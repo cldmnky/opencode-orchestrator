@@ -12,6 +12,9 @@ import {
   PROMPTING_POLICY_GUIDANCE,
   PUBLICATION_POLICY_GUIDANCE,
   REMOTE_ORCHESTRATION_GUIDANCE,
+  REVIEW_METHOD_GUIDANCE,
+  REVIEWER_SUBMIT_GUIDANCE,
+  SECURITY_GUIDANCE,
   STRUCTURED_HANDOFF_GUIDANCE,
   WORKTREE_LIFECYCLE_GUIDANCE,
   orchestrationCapabilities,
@@ -82,6 +85,8 @@ export function buildOrchestratorSystem(options: OrchestratorOptions): string {
     "",
     ORCHESTRATOR_SUMMARY_GUIDANCE,
     "",
+    SECURITY_GUIDANCE,
+    "",
     orchestrationRules(options.max_parallel, options.require_review, orchestrationCapabilities(options), options.decomposition.strategy),
     "",
     STRUCTURED_HANDOFF_GUIDANCE,
@@ -102,6 +107,12 @@ export function buildWorkerSystem(role: keyof typeof ROLE_GUIDANCE, options?: Or
     "",
     verticalSliceGuidance(options?.decomposition?.strategy),
     CAPABILITY_BOUNDARY_GUIDANCE,
+    // Review-methodology guidance is review-role-only: it adapts the host's
+    // built-in /review discipline to the maker-checker flow. The submit block
+    // additionally appears only when the bounded review tools are enabled,
+    // so the default prompt mode stays unchanged.
+    ...(role === "review" ? ["", REVIEW_METHOD_GUIDANCE] : []),
+    ...(role === "review" && options?.review?.mode === "bounded" ? ["", REVIEWER_SUBMIT_GUIDANCE] : []),
     "",
     CHILD_TASK_CONTRACT,
     REMOTE_ORCHESTRATION_GUIDANCE,

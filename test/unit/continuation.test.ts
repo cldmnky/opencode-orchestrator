@@ -1130,6 +1130,11 @@ describe("goal continuation", () => {
     expect(text).toContain("report-task")
     expect(text).toContain("never completes a task")
     expect(text).toContain("approved exact-revision review")
+    // Proof ordering: record validation and review before the terminal chain
+    // moves the revision, and recover by re-proving at the new head — never by
+    // asking an operator to force the board closed.
+    expect(text).toContain("before push or merge moves the revision")
+    expect(text).toContain("never request a forced board close")
     expect(text.split("Board task packet").length - 1).toBe(1)
     // No D2 drift: the packet section never embeds or reshapes the D2 skeleton
     // (the generic D2 guidance below it is unchanged and pre-existing).

@@ -432,6 +432,9 @@ describe("server plugin contract", () => {
     // universal context regardless of feature flags.
     expect(disabledContext.join("\n")).toContain("orchestrator_gates_get")
     expect(disabledContext.join("\n")).toContain("A gate disabled for this session is final")
+    // Board proof ordering is universal context: proofs are recorded before
+    // the revision moves, and a moved revision is re-proven, never forced.
+    expect(disabledContext.join("\n")).toContain("never force a board close")
 
     await cleanup?.()
     // Disposal order is reverse registration order: the worktree sync (inline

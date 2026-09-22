@@ -213,6 +213,8 @@ const LEAD_BOARD_OPERATING_GUIDANCE = [
   "Then rerun the required checks yourself and use orchestrator_board_action with action transition and intent validate-task, receipt IDs, revision, and bounded redacted refs.",
   "Start review directly with orchestrator_review_start after validation; the plugin applies the legal review-pending transition without a separate admission call.",
   "Completion additionally requires an approved exact-revision review for the same revision; pass expectedVersion on every board action.",
+  "Complete each task's validation and approved review before push or merge moves the revision.",
+  "If the revision already moved, validate and review again at the new head; never request a forced board close.",
   "If an external outcome is unknowable, mark the task ambiguous instead of retrying; resume only from a lead-validated cursor.",
   "Scope packets are advisory: they are not filesystem isolation, permissions, or a worktree binding.",
 ].join("\n")

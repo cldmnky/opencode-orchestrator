@@ -115,7 +115,7 @@ export function addOrchestrationTools(draft: ToolDraftLike, deps: OrchestrationT
   draft.add({
     name: "board_action",
     description:
-      "Apply one canonical lead-board action: init, create-task, assign-task, transition, or complete. Each mutation requires its exact expected revision/version and the plugin computes the legal transition.",
+      "Apply one canonical lead-board action: init, create-task, assign-task, transition, or complete. Transition intent start-task safely moves planned to ready for recovery; report-task and validate-task record the required evidence. Each mutation requires its exact expected revision/version and the plugin computes the legal transition.",
     input: boardActionInput,
     options: { namespace: "orchestrator", permission: ORCHESTRATION_TOOL_PERMISSION },
     execute: async (input, tool) => {
@@ -259,6 +259,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /* ------------------------------------------------------------------ */
 
 const BOARD_INTENT_ACTIONS = [
+  "start-task",
   "report-task",
   "validate-task",
   "request-rework",
@@ -288,6 +289,7 @@ const BOARD_LEGACY_ACTIONS: readonly LeadTransitionAction[] = [
 ]
 
 const BOARD_INTENT_TO_TRANSITION: Readonly<Record<Exclude<BoardIntentAction, "record-replay">, LeadTransitionAction>> = {
+  "start-task": "ready",
   "report-task": "report",
   "validate-task": "validate",
   "request-rework": "request-changes",

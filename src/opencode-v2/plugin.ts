@@ -291,6 +291,7 @@ export const orchestratorPlugin = defineTuiAwarePlugin({
               "Separate established facts from assumptions.",
               "Use orchestrator_goal with get, set, pause, resume, complete, or clear actions for session goal state.",
               "Use orchestrator_board_get and orchestrator_board_action for the durable lead board. Use action variants init, create-task, assign-task, transition, or complete; a delivered prompt never completes a task.",
+               "If recovery leaves a task in planned, use board_action transition with intent start-task and its current expectedVersion; this only moves planned to ready so normal continuation can dispatch it. Never use it to skip validation or review.",
               "Use orchestrator_status with mode single and sessionID for one-session detail, or mode list for a bounded same-project session list.",
               ...(options.review.mode === "bounded"
                 ? ["After plugin-observed validation, start review directly with orchestrator_review_start; review start and submit apply the legal board state internally."]

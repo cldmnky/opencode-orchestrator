@@ -89,6 +89,7 @@
       "model": "opencode/big-pickle",
       "permissions": [
         { "action": "*", "resource": "*", "effect": "deny" },
+        { "action": "question", "resource": "*", "effect": "allow" },
         { "action": "orchestrator_goal", "resource": "*", "effect": "allow" },
         { "action": "orchestrator_gh", "resource": "*", "effect": "allow" },
         { "action": "orchestrator_worktree", "resource": "*", "effect": "allow" },

@@ -393,6 +393,24 @@ describe("installer", () => {
     expect(goalIndex).toBeGreaterThan(denyAllIndex)
   })
 
+  test("allows the native question tool only for the orchestrator", () => {
+    const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
+    const path = join(directory, "opencode.jsonc")
+    installConfig(path, {})
+    const document = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>
+    const effective = (rules: Rule[], action: string): string | undefined =>
+      [...rules].reverse().find((rule) => rule.action === action || rule.action === "*")?.effect
+
+    const orchestrator = document.agents.orchestrator.permissions as Rule[]
+    const worker = document.agents.explore.permissions as Rule[]
+    expect(orchestrator.filter((rule) => rule.action === "question")).toEqual([
+      { action: "question", resource: "*", effect: "allow" },
+    ])
+    expect(effective(orchestrator, "question")).toBe("allow")
+    expect(worker.filter((rule) => rule.action === "question")).toEqual([])
+    expect(effective(worker, "question")).toBe("deny")
+  })
+
   test("denies the shared goal-tool permission to every worker", () => {
     const directory = mkdtempSync(join(tmpdir(), "orchestrator-install-"))
     const path = join(directory, "opencode.jsonc")

@@ -112,6 +112,21 @@ describe("goal tools", () => {
     expect(values.has(stopKey)).toBe(false)
   })
 
+  test("goal tool pause and resume keep an enrolled board in sync", async () => {
+    const sessionID = "board-pause-session"
+    const { tools, values } = collectTools()
+    const boardKey = leadBoardStorageKey(location, sessionID)
+
+    await tools.get("goal")!.execute({ action: "set", objective: "ship the change" }, toolContext(sessionID, "orchestrator"))
+    expect(parseLeadBoard(values.get(boardKey))?.status).toBe("active")
+
+    await tools.get("goal")!.execute({ action: "pause" }, toolContext(sessionID, "orchestrator"))
+    expect(parseLeadBoard(values.get(boardKey))?.status).toBe("paused")
+
+    await tools.get("goal")!.execute({ action: "resume" }, toolContext(sessionID, "orchestrator"))
+    expect(parseLeadBoard(values.get(boardKey))?.status).toBe("active")
+  })
+
   test("goal action reports when no goal exists", async () => {
     const { tools } = collectTools()
     const output = await tools.get("goal")!.execute({ action: "pause" }, toolContext("missing-session", "orchestrator"))

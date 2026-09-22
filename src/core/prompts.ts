@@ -196,6 +196,7 @@ export function buildCommandPrompt(name: string, argumentsText: string, options?
  */
 const LEAD_BOARD_OPERATING_GUIDANCE = [
   "The lead board is the durable task ledger for this goal generation.",
+  "If recovery leaves the packet's task in planned, use orchestrator_board_action with action transition and intent start-task once; this only moves planned to ready, after which normal goal continuation dispatches the task. Do not use it to skip work, lead validation, or review.",
   "Work the task in the packet above, then use orchestrator_board_action with action transition and intent report-task; a delivered prompt never completes a task.",
   "A worker handoff is a report until you validate it: call orchestrator_handoff_validate on the unchanged D2 envelope first.",
   "Then rerun the required checks yourself and use orchestrator_board_action with action transition and intent validate-task, receipt IDs, revision, and bounded redacted refs.",

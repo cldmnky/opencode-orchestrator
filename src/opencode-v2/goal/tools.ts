@@ -11,7 +11,17 @@ import {
   type StorageLike,
   type GoalRecord,
 } from "./state.js"
-import { createLeadBoardV2, hydrateLeadBoardV2, removeLeadBoardV2, writeLeadBoardV2 } from "../orchestration/lead-board-v2.js"
+import {
+  createLeadBoardV2,
+  hydrateLeadBoardV2,
+  parseLeadBoardV2,
+  pauseLeadBoardV2,
+  removeLeadBoardV2,
+  resumeLeadBoardV2,
+  leadBoardV2KeyedLocation,
+  leadBoardV2StorageKey,
+  writeLeadBoardV2,
+} from "../orchestration/lead-board-v2.js"
 import type { ToolDraftLike } from "../compat.js"
 
 type ToolResult = { content: string }
@@ -119,6 +129,7 @@ export function addGoalTools(
         }
         await storage.set(key, updated)
         if (status === "active") await storage.remove(stopStorageKey(stableLocation, tool.sessionID))
+        await setBoardPaused(storage, stableLocation, tool.sessionID, status === "paused")
         return result(JSON.stringify(updated))
       })
     },
@@ -134,6 +145,19 @@ async function goalKey(storage: StorageLike, location: LocationLike, sessionID: 
 
 function stableLocationFor(projectID: string, location: LocationLike): LocationLike {
   return { ...location, project: { id: projectID } }
+}
+
+async function setBoardPaused(storage: StorageLike, location: LocationLike, sessionID: string, paused: boolean): Promise<void> {
+  try {
+    const keyedLocation = await leadBoardV2KeyedLocation(storage, location, sessionID)
+    const key = leadBoardV2StorageKey(keyedLocation, sessionID)
+    const board = parseLeadBoardV2(await storage.get(key))
+    if (!board || board.status === "complete") return
+    const next = paused ? pauseLeadBoardV2(board) : resumeLeadBoardV2(board)
+    if (next !== board) await writeLeadBoardV2(storage, keyedLocation, next)
+  } catch (error) {
+    console.warn(`opencode-orchestrator could not update the lead board pause state for ${sessionID}`, error)
+  }
 }
 
 function requireOrchestrator(agent: string, options: OrchestratorOptions): void {

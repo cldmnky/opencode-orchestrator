@@ -572,6 +572,9 @@ function sameJson(left: unknown, right: unknown): boolean {
 function orchestratorPermissions(options: OrchestratorOptions): Array<Record<string, string>> {
   return [
     { action: "*", resource: "*", effect: "deny" },
+    // The orchestrator owns clarification and may use the native question
+    // tool; workers remain covered by their deny-all policy.
+    { action: "question", resource: "*", effect: "allow" },
     // Keep the goal tools visible and callable despite the deny-all above.
     // They share one explicit permission action declared on each tool.
     { action: GOAL_TOOL_PERMISSION, resource: "*", effect: "allow" },

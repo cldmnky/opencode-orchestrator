@@ -1155,6 +1155,24 @@ describe("lead board tools", () => {
     expect(["missing", "unavailable"]).toContain(foreign.reason as string)
   })
 
+  test("board_action start-task safely promotes a planned task to ready", async () => {
+    const values = new Map<string, unknown>()
+    seedBoard(values, { tasks: [boardTask()] as never })
+    const tools = collect({ storage: memStorage(values) })
+    const orchestrator = toolContext("session-1", "orchestrator")
+
+    const started = JSON.parse(
+      (await tools.get("board_action")!.execute({ action: "transition", intent: "start-task", taskID: "t1", expectedVersion: 1 }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(started.status).toBe("applied")
+    expect((readStoredBoard(values).tasks[0] as { status: string; lifecycleVersion: number })).toMatchObject({ status: "ready", lifecycleVersion: 2 })
+
+    const stale = JSON.parse(
+      (await tools.get("board_action")!.execute({ action: "transition", intent: "start-task", taskID: "t1", expectedVersion: 1 }, orchestrator)).content,
+    ) as Record<string, unknown>
+    expect(stale.reason).toBe("version-mismatch")
+  })
+
   test("board_action transition validate runs the unchanged D2 validator and refuses non-pass results", async () => {
     const values = new Map<string, unknown>()
     seedBoard(values, { tasks: [boardTask({ status: "awaiting-validation", lifecycleVersion: 5 })] as never })

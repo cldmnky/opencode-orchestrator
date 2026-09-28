@@ -22,6 +22,9 @@ import {
   usageTokensTotal,
 } from "../../src/opencode-v2/observability/trace.js"
 import {
+  TRACE_FLUSH_INTERVAL_MS,
+  TRACE_MAX_SESSIONS,
+  TRACE_MAX_EVENT_MARKERS,
   createDispatchGate,
   shouldStartObservability,
   startObservability,
@@ -103,6 +106,11 @@ function hookFixture(stream: AsyncIterable<unknown>) {
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 15))
+/**
+ * Snapshot trace writes are coalesced over TRACE_FLUSH_INTERVAL_MS, so tests
+ * that assert on the durable record wait out one flush window plus a margin.
+ */
+const flushTrace = () => new Promise((resolve) => setTimeout(resolve, TRACE_FLUSH_INTERVAL_MS + 40))
 
 describe("S3/V1 strict configuration", () => {
   test("defaults preserve previous behavior: trace off, budget advisory, review prompt with 2 rounds, retry off", () => {
@@ -365,7 +373,7 @@ describe("observability runtime hooks and events", () => {
       input: { command: "echo SECRET_VALUE=abc123" },
       error: { message: "raw failure transcript 9f8e7d6c5b4a" },
     })
-    await tick()
+    await flushTrace()
 
     const record = storage.values.get(traceStorageKey(location, "s1"))
     expect(record).toBeDefined()
@@ -436,7 +444,7 @@ describe("observability runtime hooks and events", () => {
 
     await fixture.before[0]({ id: "call-x", sessionID: "s1", tool: "bash", input: { command: "true" } })
     await fixture.after[0]({ id: "call-x", sessionID: "s1", tool: "bash", status: "completed", input: { command: "true" } })
-    await tick()
+    await flushTrace()
     expect(storage.values.has(traceStorageKey(location, "s1"))).toBe(true)
 
     stream.push({ id: "deleted-1", type: "session.deleted", data: { sessionID: "s1" } })
@@ -445,6 +453,171 @@ describe("observability runtime hooks and events", () => {
     expect(storage.values.has(traceStorageKey(location, "s1"))).toBe(false)
     expect(await runtime.summary("s1")).toBeUndefined()
 
+    await runtime.dispose()
+  })
+
+  test("coalesces a tool-call burst into far fewer snapshot writes than events", async () => {
+    const stream = createStream()
+    const fixture = hookFixture(stream)
+    const values = new Map<string, unknown>()
+    let writes = 0
+    const storage = {
+      values,
+      get: async (key: string) => values.get(key),
+      set: async (key: string, value: unknown) => {
+        writes += 1
+        values.set(key, value)
+      },
+      remove: async (key: string) => void values.delete(key),
+    }
+    fixture.deps.storage = storage
+    fixture.deps.options = parseOptions({ trace: { mode: "snapshot" } })
+    const runtime = await startObservability(fixture.deps)
+
+    const calls = 25
+    for (let index = 0; index < calls; index += 1) {
+      await fixture.before[0]({ id: `call-${index}`, sessionID: "s1", tool: "bash", input: { command: "true" } })
+      await fixture.after[0]({ id: `call-${index}`, sessionID: "s1", tool: "bash", status: "completed", input: { command: "true" } })
+    }
+    // 50 events, but the flush window has not elapsed yet: no write so far.
+    expect(writes).toBe(0)
+
+    await flushTrace()
+    // One coalesced write carries the whole burst.
+    expect(writes).toBe(1)
+
+    const summary = await runtime.summary("s1")
+    expect(summary?.completedCalls).toBe(calls)
+    const persisted = parseTraceSummary(values.get(traceStorageKey(location, "s1")))
+    expect(persisted?.completedCalls).toBe(calls)
+
+    await runtime.dispose()
+  })
+
+  test("dispose flushes a pending snapshot write", async () => {
+    const stream = createStream()
+    const fixture = hookFixture(stream)
+    const values = new Map<string, unknown>()
+    let writes = 0
+    fixture.deps.storage = {
+      get: async (key: string) => values.get(key),
+      set: async (key: string, value: unknown) => {
+        writes += 1
+        values.set(key, value)
+      },
+      remove: async (key: string) => void values.delete(key),
+    }
+    fixture.deps.options = parseOptions({ trace: { mode: "snapshot" } })
+    const runtime = await startObservability(fixture.deps)
+
+    await fixture.before[0]({ id: "call-pending", sessionID: "s1", tool: "bash", input: { command: "true" } })
+    expect(writes).toBe(0)
+    await runtime.dispose()
+    expect(writes).toBe(1)
+    expect(parseTraceSummary(values.get(traceStorageKey(location, "s1")))?.pending).toBe(1)
+  })
+
+  test("dispose joins an already-running flush and persists updates made during it", async () => {
+    const stream = createStream()
+    const fixture = hookFixture(stream)
+    const values = new Map<string, unknown>()
+    let release!: () => void
+    const firstWrite = new Promise<void>((resolve) => { release = resolve })
+    let started!: () => void
+    const writing = new Promise<void>((resolve) => { started = resolve })
+    let writes = 0
+    fixture.deps.storage = {
+      get: async (key) => values.get(key),
+      set: async (key, value) => {
+        writes += 1
+        if (writes === 1) { started(); await firstWrite }
+        values.set(key, value)
+      },
+      remove: async (key) => void values.delete(key),
+    }
+    const runtime = await startObservability(fixture.deps)
+    await fixture.before[0]({ id: "call-running-flush", sessionID: "s1" })
+    await writing
+    await fixture.after[0]({ id: "call-running-flush", sessionID: "s1", tool: "bash", status: "completed" })
+    let disposed = false
+    const closing = runtime.dispose().then(() => { disposed = true })
+    await tick()
+    expect(disposed).toBe(false)
+    release()
+    await closing
+    expect(parseTraceSummary(values.get(traceStorageKey(location, "s1")))?.completedCalls).toBe(1)
+    expect(writes).toBeGreaterThanOrEqual(2)
+  })
+
+  test("snapshot cache eviction hydrates prior counters before the next bump", async () => {
+    const stream = createStream()
+    const fixture = hookFixture(stream)
+    const runtime = await startObservability(fixture.deps)
+    await fixture.before[0]({ id: "first", sessionID: "s0" })
+    await fixture.after[0]({ id: "first", sessionID: "s0", tool: "bash", status: "completed" })
+    await flushTrace()
+    for (let i = 1; i <= TRACE_MAX_SESSIONS; i += 1) {
+      await fixture.before[0]({ id: `call-${i}`, sessionID: `s${i}` })
+      await fixture.after[0]({ id: `call-${i}`, sessionID: `s${i}`, tool: "bash", status: "completed" })
+    }
+    await fixture.before[0]({ id: "again", sessionID: "s0" })
+    await fixture.after[0]({ id: "again", sessionID: "s0", tool: "bash", status: "completed" })
+    expect((await runtime.summary("s0"))?.completedCalls).toBe(2)
+    await runtime.dispose()
+    expect(parseTraceSummary(fixture.deps.storage && await fixture.deps.storage.get(traceStorageKey(location, "s0")))?.completedCalls).toBe(2)
+  })
+
+  test("budget counters survive exceeding the summary cache cap in memory mode", async () => {
+    const stream = createStream()
+    const fixture = hookFixture(stream)
+    fixture.deps.options = parseOptions({ trace: { mode: "memory" }, budget: { mode: "stop-between-steps", max_steps: 1 } })
+    const runtime = await startObservability(fixture.deps)
+    stream.push({ id: "s0-step-1", type: "session.step.started", data: { sessionID: "s0" } })
+    stream.push({ id: "s0-step-2", type: "session.step.started", data: { sessionID: "s0" } })
+    await tick()
+    for (let i = 1; i <= TRACE_MAX_SESSIONS; i += 1) {
+      await fixture.before[0]({ id: `call-${i}`, sessionID: `s${i}` })
+      await fixture.after[0]({ id: `call-${i}`, sessionID: `s${i}`, tool: "bash", status: "completed" })
+    }
+    expect((await runtime.summary("s0"))?.steps).toBe(2)
+    expect((await runtime.gate.allowDispatch("s0", "auto")).allow).toBe(false)
+    await runtime.dispose()
+  })
+
+  test("an evicted usage marker cannot replay an older snapshot into a lower budget", async () => {
+    const stream = createStream()
+    const fixture = hookFixture(stream)
+    fixture.deps.options = parseOptions({ trace: { mode: "memory" }, budget: { mode: "stop-between-steps", max_tokens: 5 } })
+    const runtime = await startObservability(fixture.deps)
+    const usage = (sessionID: string, tokens: number) => ({
+      sessionID, cost: 0, tokens: { input: tokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    })
+    stream.push({ id: "first", type: "session.usage.updated", data: usage("s0", 10) })
+    for (let i = 1; i <= TRACE_MAX_EVENT_MARKERS; i += 1) {
+      stream.push({ id: `usage-${i}`, type: "session.usage.updated", data: usage(`s${i}`, 0) })
+    }
+    for (let attempt = 0; attempt < 100 && !(await runtime.summary(`s${TRACE_MAX_EVENT_MARKERS}`))?.usage; attempt += 1) await tick()
+    stream.push({ id: "first", type: "session.usage.updated", data: usage("s0", 0) })
+    await tick()
+    expect((await runtime.summary("s0"))?.usage?.tokensInput).toBe(10)
+    expect((await runtime.gate.allowDispatch("s0", "auto")).allow).toBe(false)
+    await runtime.dispose()
+  })
+
+  test("session.deleted cancels a queued write instead of resurrecting the record", async () => {
+    const stream = createStream()
+    const fixture = hookFixture(stream)
+    const storage = memStorage()
+    fixture.deps.storage = storage
+    fixture.deps.options = parseOptions({ trace: { mode: "snapshot" } })
+    const runtime = await startObservability(fixture.deps)
+
+    await fixture.before[0]({ id: "call-doomed", sessionID: "s1", tool: "bash", input: { command: "true" } })
+    stream.push({ id: "deleted-queued", type: "session.deleted", data: { sessionID: "s1" } })
+    await tick()
+    await flushTrace()
+
+    expect(storage.values.has(traceStorageKey(location, "s1"))).toBe(false)
     await runtime.dispose()
   })
 
@@ -527,6 +700,7 @@ describe("dispatch gate", () => {
       expect(blocked.allow).toBe(false)
       expect(blocked.reviewBreaker).toContain("review circuit is open")
       expect(blocked.reason).toContain("review circuit is open")
+      expect(blocked.reason).toContain("A new goal alone does not clear")
       const command = await gate.allowDispatch(`s-${state}`, "command")
       expect(command.allow).toBe(true)
     }

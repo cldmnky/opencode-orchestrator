@@ -22,7 +22,7 @@ import { redact as defaultRedact } from "../process/redact.js"
  *   C6 semantics, C7 redaction) and maps the verdict to worker-failed /
  *   blocked-unknown / worker-passed.
  * - `orchestrator` independently repeats the worker checks, then adds the
- *   honest parent checks (O2 VCS comparison, O3 plugin-observed command receipt
+  *   honest parent checks (O2 working-tree or exact committed-revision comparison, O3 plugin-observed command receipt
  *   limitation, O4 local evidence file existence, O5 foreign-file attribution,
  *   O6-O9 typed-authority unavailability) and maps the verdict to
  *   orchestrator-failed / blocked-unknown / review-pending / admitted.
@@ -32,7 +32,7 @@ import { redact as defaultRedact } from "../process/redact.js"
  * completion gate. It never runs a shell, never persists state, and never
  * accepts typed EvidenceRecord input in this version.
  *
- * All filesystem/VCS access is injected (`sessionLocation`, `vcsStatus`,
+ * All filesystem/VCS access is injected (`sessionLocation`, `vcsStatus`, `vcsCommittedFiles`,
  * `pathExists`, `realpath`) so unit tests are deterministic; the plugin wiring
  * supplies defaults built on context.session/context.vcs and node fs. Containment
  * is canonical (realpath) so symlink escape is rejected.
@@ -73,6 +73,7 @@ export const HANDOFF_VALIDATION_INPUT_SCHEMA = z
     contract: HANDOFF_CONTRACT_SCHEMA,
     receiptIDs: z.array(z.string().min(1).max(128)).max(64).optional(),
     revision: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).optional(),
+    baseRevision: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).optional(),
     minimumCompletedAt: z.number().finite().nonnegative().optional(),
   })
   .strict()
@@ -104,6 +105,8 @@ export type ValidationDeps = {
   sessionLocation: (sessionID: string) => Promise<SessionLocation | undefined>
   /** Observed changed files in a directory; `undefined` means VCS status is unavailable. */
   vcsStatus: (directory: string, workspaceID: string | undefined) => Promise<ReadonlyArray<VcsObservedFile> | undefined>
+  /** Files changed from an explicitly verified base (or HEAD's parent/root) to exact HEAD; undefined when unverified. */
+  vcsCommittedFiles?: (directory: string, revision: string, baseRevision?: string) => Promise<ReadonlyArray<VcsObservedFile> | undefined>
   /** True when the absolute path exists (file or directory). */
   pathExists: (absolutePath: string) => Promise<boolean>
   /** Canonicalize an absolute path (realpath, nearest-existing-ancestor fallback); `undefined` when unresolvable. */
@@ -114,6 +117,11 @@ export type ValidationDeps = {
   verificationReceipts?: (rootSessionID: string, receiptIDs?: readonly string[]) => Promise<readonly VerificationReceiptCandidate[]>
   /** Configured orchestrator agent identity used for receipt provenance. */
   orchestratorAgentID?: string
+  /**
+    * Write scopes of OTHER board tasks for diagnostics only. A declared scope
+    * cannot prove who changed a file, so foreign files still block admission.
+   */
+  siblingWriteScopes?: (sessionID: string, taskId: string) => Promise<readonly string[] | undefined>
 }
 
 export const HANDOFF_CHECK_IDS = {
@@ -493,11 +501,13 @@ async function checkEvidenceFiles(
   return pass(HANDOFF_CHECK_IDS.o4EvidenceFiles, "every local evidence file ref resolves inside the session project and exists")
 }
 
-function checkForeignFiles(
+async function checkForeignFiles(
   contract: HandoffContract,
   observed: ReadonlyArray<VcsObservedFile> | undefined,
   session: SessionLocation | undefined,
-): HandoffCheck {
+  deps: ValidationDeps,
+  sessionID: string,
+): Promise<HandoffCheck> {
   if (!session) {
     return blocked(HANDOFF_CHECK_IDS.o5Foreign, "the current session directory is unavailable; foreign changed files could not be attributed")
   }
@@ -507,13 +517,39 @@ function checkForeignFiles(
   const scopes = dedupe(contract.writeScope.map(normalizeScope))
   const observedFiles = dedupe(observed.map((status) => normalizeScope(status.file)).filter(Boolean))
   const foreign = observedFiles.filter((path) => !scopes.some((scope) => isWithinScope(scope, path)))
-  if (foreign.length > 0) {
+  if (foreign.length === 0) {
+    return pass(HANDOFF_CHECK_IDS.o5Foreign, "no observed changed files outside the receipt's write scope; validation covers a single receipt only")
+  }
+   // Sibling scopes help explain the conflict but cannot establish provenance:
+   // a foreign file may have been written by this task or by another actor.
+  const siblings = await siblingScopesFor(deps, sessionID, contract.taskId)
+  if (siblings !== undefined) {
+    const siblingScopes = dedupe(siblings.map(normalizeScope).filter(Boolean))
+    const unattributed = foreign.filter((path) => !siblingScopes.some((scope) => isWithinScope(scope, path)))
+    if (unattributed.length === 0) return blocked(HANDOFF_CHECK_IDS.o5Foreign, "foreign changed files fall inside other board task scopes, but declared scope does not prove authorship; isolate or supply independently attributable evidence")
     return blocked(
       HANDOFF_CHECK_IDS.o5Foreign,
-      "observed changed files outside the declared write scope cannot be attributed to this receipt; cross-task dependency/receipt attribution is unavailable",
+      `${unattributed.length} observed changed file(s) fall outside this receipt's write scope and every other board task scope; they cannot be attributed to a known task`,
     )
   }
-  return pass(HANDOFF_CHECK_IDS.o5Foreign, "no observed changed files outside the receipt's write scope; validation covers a single receipt only")
+  return blocked(
+    HANDOFF_CHECK_IDS.o5Foreign,
+    "observed changed files outside the declared write scope cannot be attributed to this receipt; cross-task dependency/receipt attribution is unavailable",
+  )
+}
+
+/** Sibling board scopes, or undefined when the board cannot answer. */
+async function siblingScopesFor(
+  deps: ValidationDeps,
+  sessionID: string,
+  taskId: string,
+): Promise<readonly string[] | undefined> {
+  if (!deps.siblingWriteScopes) return undefined
+  try {
+    return await deps.siblingWriteScopes(sessionID, taskId)
+  } catch {
+    return undefined
+  }
 }
 
 function checkAuthority(handoff: D2Handoff, evidenceFilesVerdict: HandoffCheckVerdict): HandoffCheck {
@@ -579,7 +615,7 @@ export async function validateHandoff(
     }
   }
 
-  const { level, handoff, contract, receiptIDs, revision, minimumCompletedAt } = parsedInput.data
+  const { level, handoff, contract, receiptIDs, revision, baseRevision, minimumCompletedAt } = parsedInput.data
   const checks: HandoffCheck[] = []
   const limitations: string[] = [
     "raw-transcript authenticity cannot be detected generically from D2 content; a passing result never proves a worker's transcript was honest",
@@ -626,16 +662,33 @@ export async function validateHandoff(
   // Orchestrator level: independent repeat of the worker checks above plus the
   // honest parent checks below. VCS is read once and shared by O2 and O5.
   observed = session ? await deps.vcsStatus(session.directory, session.workspaceID) : undefined
-  checks.push(checkVcsMatch(d2, contract, observed, session))
+  // A revision claim must be checked against the exact HEAD commit range, not
+  // against status (which cannot bind changes to a SHA). Even a dirty tree with
+  // matching paths is unproven; do not silently switch validation modes.
+  const dirtyRevision = Boolean(revision && observed && observed.length > 0)
+  if (revision) {
+    if (session && observed?.length === 0 && deps.vcsCommittedFiles) {
+      const committed = await deps.vcsCommittedFiles(session.directory, revision, baseRevision)
+      const current = await deps.vcsStatus(session.directory, session.workspaceID)
+      observed = current?.length === 0 ? committed : undefined
+    } else {
+      observed = undefined
+    }
+  }
+  checks.push(dirtyRevision
+    ? blocked(HANDOFF_CHECK_IDS.o2Vcs, "revision-bound validation requires a clean worktree; commit or isolate pending changes before comparing the exact HEAD/base range")
+    : revision && session && !observed
+      ? blocked(HANDOFF_CHECK_IDS.o2Vcs, "the clean worktree and exact HEAD/base commit range could not both be verified; check the revision and baseRevision")
+      : checkVcsMatch(d2, contract, observed, session))
   checks.push(checkRerun(contract, commandCheck))
   const evidenceFilesCheck = await checkEvidenceFiles(d2, deps, session)
   checks.push(evidenceFilesCheck)
-  checks.push(checkForeignFiles(contract, observed, session))
+  checks.push(await checkForeignFiles(contract, observed, session, deps, sessionID))
   checks.push(checkAuthority(d2, evidenceFilesCheck.verdict))
 
   if (contract.requiredCommands.length > 0) limitations.push("lead validation accepts only plugin-observed shell receipts matched to the exact revision; caller-supplied command checks remain diagnostic")
   limitations.push(
-    "cross-task dependency/receipt attribution is unavailable; validation covers only this single receipt",
+    "other board task write scopes are diagnostic, not proof of foreign-file authorship; isolate changes before admitting a receipt",
   )
   limitations.push(
     "typed EvidenceRecord input is not accepted in this version; caller-supplied marker text (e.g. EVIDENCE_LIVE in a string) is never treated as proof, and local file ref freshness is not verified",

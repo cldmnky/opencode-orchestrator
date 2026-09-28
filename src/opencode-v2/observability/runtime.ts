@@ -17,9 +17,15 @@
  * nothing persisted ever carries them. Persistence (snapshot mode) writes one
  * bounded current record per session under a versioned stable project/session
  * key, serialized through the existing process-local withSessionLock; there is
- * no CAS or cross-process guarantee.
+ * no CAS or cross-process guarantee. Snapshot writes are COALESCED: an event
+ * marks the session dirty and one bounded flush writes the latest summary, so
+ * a burst of tool calls costs one write per session per interval instead of two
+ * writes per call. Budget-enforcing sessions are retained in memory until
+ * deletion: a bounded cache cannot discard decision-critical counters without
+ * an authoritative durable replacement in memory/off trace modes.
  */
 import type { OrchestratorOptions } from "../../core/config.js"
+import { BoundedMap } from "../bounded-map.js"
 import { evaluateBudget, type BudgetEvaluation, type BudgetObservation } from "./budget.js"
 import {
   TRACE_MAX_PENDING_CALLS,
@@ -82,6 +88,20 @@ export type ObservabilityRuntime = {
 
 type PendingCall = { sessionID: string; startedAt: number }
 
+/**
+ * Snapshot trace writes are coalesced over this window. When a stop-between-
+ * steps budget is enabled the in-memory summary remains authoritative during
+ * this window; after a crash, persisted counts may lag by one window. A burst
+ * costs one write per session instead of two per call on the same session lock
+ * the board uses.
+ */
+export const TRACE_FLUSH_INTERVAL_MS = 250
+
+/** Target cache size for disposable trace summaries; protected entries may exceed it. */
+export const TRACE_MAX_SESSIONS = 512
+/** Retained event-dedup markers before the oldest is dropped. */
+export const TRACE_MAX_EVENT_MARKERS = 1024
+
 type UsageUpdatedEvent = {
   id?: string
   created?: number
@@ -106,20 +126,33 @@ export async function startObservability(deps: ObservabilityDeps): Promise<Obser
   const controller = new AbortController()
   const iterable = deps.event.subscribe({ signal: controller.signal })
   const iterator = iterable[Symbol.asyncIterator]()
-  const summaryBySession = new Map<string, TraceSummary>()
+  // Only clean snapshot summaries or non-budget memory summaries may be
+  // evicted. A pending write or enforced-budget summary is not disposable.
   const pendingByID = new Map<string, PendingCall>()
-  const lastEvent = new Map<string, string>()
+  const pendingBySession = new Map<string, Set<string>>()
+  const dirtyTraceSessions = new Set<string>()
+  const summaryBySession = new BoundedMap<string, TraceSummary>(TRACE_MAX_SESSIONS, (sessionID) =>
+    !pendingBySession.has(sessionID) && !dirtyTraceSessions.has(sessionID) && deps.options.budget.mode !== "stop-between-steps",
+  )
+  // In enforcing mode an evicted marker could replay an older usage snapshot
+  // (and lower observed cost/tokens). Keep markers until session deletion.
+  const lastEvent = new BoundedMap<string, string>(TRACE_MAX_EVENT_MARKERS, () => deps.options.budget.mode !== "stop-between-steps")
+  const hydration = new Map<string, Promise<void>>()
+  const snapshotVersions = new Map<string, number>()
   const hookRegistrations: Array<{ dispose(): Promise<void> }> = []
+  let flushTimer: ReturnType<typeof setTimeout> | undefined
+  let activeFlush: Promise<void> | undefined
+  let disposing = false
   let finished!: Promise<void>
 
   hookRegistrations.push(
     await deps.tool.hook("execute.before", (event) => {
-      void observeBefore(event).catch((error) => console.warn("opencode-orchestrator execute.before observation failed", error))
+      return observeBefore(event).catch((error) => console.warn("opencode-orchestrator execute.before observation failed", error))
     }),
   )
   hookRegistrations.push(
     await deps.tool.hook("execute.after", (event) => {
-      void observeAfter(event).catch((error) => console.warn("opencode-orchestrator execute.after observation failed", error))
+      return observeAfter(event).catch((error) => console.warn("opencode-orchestrator execute.after observation failed", error))
     }),
   )
 
@@ -141,7 +174,7 @@ export async function startObservability(deps: ObservabilityDeps): Promise<Obser
       if (deps.options.review.mode === "bounded" && check === "auto") {
         const record = await readCurrentReviewStatus(sessionID)
         if (record && (record.state === "blocked" || record.state === "tripped")) {
-          reviewBreaker = `review circuit is open: ${record.state} for task ${record.taskId} (run ${record.runId}); a human decision is required`
+          reviewBreaker = reviewBreakerReason(record)
         }
       }
       const evaluationResult = await evaluation(sessionID)
@@ -166,10 +199,19 @@ export async function startObservability(deps: ObservabilityDeps): Promise<Obser
   }
 
   async function dispose(): Promise<void> {
+    disposing = true
     controller.abort()
+    if (flushTimer !== undefined) {
+      clearTimeout(flushTimer)
+      flushTimer = undefined
+    }
     await iterator.return?.()
     await finished
     for (const registration of hookRegistrations) await registration.dispose()
+    // A timer may already have taken ownership of the dirty set; join that
+    // write before returning, then persist any updates made during it.
+    await activeFlush
+    await flushDirtyTraces()
   }
 
   async function summary(sessionID: string): Promise<TraceSummary | undefined> {
@@ -194,7 +236,7 @@ export async function startObservability(deps: ObservabilityDeps): Promise<Obser
     const sessionID = before.sessionID
     if (typeof sessionID !== "string") return
     const now = Date.now()
-    bump(sessionID, (summary) => applyToolCallStart(summary, now))
+    await bump(sessionID, (summary) => applyToolCallStart(summary, now))
     if (pendingByID.size >= TRACE_MAX_PENDING_CALLS) {
       // The cap evicts the oldest tracked start. The dropped-unmatched counter
       // belongs to the EVICTED call's session (its start is the one that will
@@ -202,21 +244,20 @@ export async function startObservability(deps: ObservabilityDeps): Promise<Obser
       // eviction.
       const oldestID = pendingByID.keys().next().value
       if (oldestID !== undefined) {
-        const evicted = pendingByID.get(oldestID)
-        pendingByID.delete(oldestID)
+        const evicted = untrackPending(oldestID)
         if (evicted) {
           // The evicted start will never be paired: pending drops for the
           // evicted session and the dropped-unmatched counter records it.
-          bump(evicted.sessionID, (summary) => ({
+          await bump(evicted.sessionID, (summary) => ({
             ...applyToolCallEnd(summary, now),
             droppedUnmatched: summary.droppedUnmatched + 1,
           }))
-          await persistSnapshot(evicted.sessionID)
+          markTraceDirty(evicted.sessionID)
         }
       }
     }
-    pendingByID.set(before.id, { sessionID, startedAt: now })
-    await persistSnapshot(sessionID)
+    trackPending(before.id, { sessionID, startedAt: now })
+    markTraceDirty(sessionID)
   }
 
   async function observeAfter(event: unknown): Promise<void> {
@@ -225,19 +266,18 @@ export async function startObservability(deps: ObservabilityDeps): Promise<Obser
     const sessionID = after.sessionID
     if (typeof sessionID !== "string") return
     const now = Date.now()
-    const paired = pendingByID.get(after.id)
+    const paired = untrackPending(after.id)
     if (paired) {
-      pendingByID.delete(after.id)
-      bump(sessionID, (summary) => applyToolCallEnd(summary, now))
-      bump(sessionID, (summary) =>
+      await bump(sessionID, (summary) => applyToolCallEnd(summary, now))
+      await bump(sessionID, (summary) =>
         applyToolCallOutcome(summary, { tool: after.tool, failed: after.status === "error", durationMs: Math.max(0, now - paired.startedAt) }, now),
       )
     } else {
       // The before start was dropped or missed (subscription gap): record the
       // outcome metadata without a duration rather than fabricating anything.
-      bump(sessionID, (summary) => applyToolCallOutcome(summary, { tool: after.tool, failed: after.status === "error" }, now))
+      await bump(sessionID, (summary) => applyToolCallOutcome(summary, { tool: after.tool, failed: after.status === "error" }, now))
     }
-    await persistSnapshot(sessionID)
+    markTraceDirty(sessionID)
   }
 
   async function consumeEvents(): Promise<void> {
@@ -270,14 +310,14 @@ export async function startObservability(deps: ObservabilityDeps): Promise<Obser
       }
       if (scoped.type === "session.step.started") {
         const now = Date.now()
-        bump(sessionID, (current) => recordStep(current, now))
-        await persistSnapshot(sessionID)
+        await bump(sessionID, (current) => recordStep(current, now))
+        markTraceDirty(sessionID)
         return
       }
       if (scoped.type === "session.retry.scheduled") {
         const now = Date.now()
-        bump(sessionID, (current) => recordRetry(current, now))
-        await persistSnapshot(sessionID)
+        await bump(sessionID, (current) => recordRetry(current, now))
+        markTraceDirty(sessionID)
         return
       }
     } catch (error) {
@@ -290,16 +330,19 @@ export async function startObservability(deps: ObservabilityDeps): Promise<Obser
     const usage = parseUsageSnapshot(event.data)
     if (!usage) return
     const now = Date.now()
-    bump(sessionID, (current) => recordUsageSnapshot(current, usage, now))
-    await persistSnapshot(sessionID)
+    await bump(sessionID, (current) => recordUsageSnapshot(current, usage, now))
+    markTraceDirty(sessionID)
   }
 
   async function onSessionDeleted(sessionID: string): Promise<void> {
     summaryBySession.delete(sessionID)
-    for (const [callID, call] of pendingByID) {
-      if (call.sessionID === sessionID) pendingByID.delete(callID)
-    }
+    hydration.delete(sessionID)
+    snapshotVersions.delete(sessionID)
+    untrackSessionPending(sessionID)
     lastEvent.delete(sessionID)
+    // Drop any queued write for this session first: the summary is already
+    // gone, so a late flush is a no-op instead of resurrecting the record.
+    dirtyTraceSessions.delete(sessionID)
     if (deps.options.trace.mode === "snapshot") {
       await withSessionLock(deps.location, sessionID, async () => {
         const keyed = await keyedLocation(sessionID)
@@ -308,10 +351,115 @@ export async function startObservability(deps: ObservabilityDeps): Promise<Obser
     }
   }
 
-  function bump(sessionID: string, update: (summary: TraceSummary) => TraceSummary): void {
+  /* ------------------------------------------------------------------ */
+  /* Pending-call index and coalesced snapshot writes                    */
+  /* ------------------------------------------------------------------ */
+
+  function trackPending(callID: string, call: PendingCall): void {
+    pendingByID.set(callID, call)
+    let ids = pendingBySession.get(call.sessionID)
+    if (!ids) {
+      ids = new Set()
+      pendingBySession.set(call.sessionID, ids)
+    }
+    ids.add(callID)
+  }
+
+  function untrackPending(callID: string): PendingCall | undefined {
+    const call = pendingByID.get(callID)
+    if (!call) return undefined
+    pendingByID.delete(callID)
+    const ids = pendingBySession.get(call.sessionID)
+    if (ids) {
+      ids.delete(callID)
+      if (ids.size === 0) pendingBySession.delete(call.sessionID)
+    }
+    return call
+  }
+
+  /** O(this session's in-flight calls) instead of O(all pending calls). */
+  function untrackSessionPending(sessionID: string): void {
+    const ids = pendingBySession.get(sessionID)
+    if (!ids) return
+    for (const callID of ids) pendingByID.delete(callID)
+    pendingBySession.delete(sessionID)
+  }
+
+  /**
+   * Mark the session's persisted summary stale. One bounded flush later writes
+   * the latest summary, so a burst of tool calls coalesces into a single write
+   * instead of one write per event on the shared session lock.
+   */
+  function markTraceDirty(sessionID: string): void {
+    if (deps.options.trace.mode !== "snapshot") return
+    dirtyTraceSessions.add(sessionID)
+    scheduleFlush()
+  }
+
+  function scheduleFlush(): void {
+    if (flushTimer !== undefined || disposing) return
+    flushTimer = setTimeout(() => {
+      flushTimer = undefined
+      void flushDirtyTraces()
+    }, TRACE_FLUSH_INTERVAL_MS)
+    if (typeof (flushTimer as { unref?: () => void }).unref === "function") (flushTimer as { unref: () => void }).unref()
+  }
+
+  async function flushDirtyTraces(): Promise<void> {
+    if (activeFlush) {
+      await activeFlush
+      if (!disposing && dirtyTraceSessions.size > 0) markTraceDirty([...dirtyTraceSessions][0]!)
+      return
+    }
+    if (dirtyTraceSessions.size === 0) return
+    const pending = [...dirtyTraceSessions]
+    const versionsAtStart = new Map(pending.map((sessionID) => [sessionID, snapshotVersions.get(sessionID)]))
+    const flushing = (async () => {
+      for (const sessionID of pending) {
+        try {
+          await persistSnapshot(sessionID)
+          // A newer bump may have happened during the storage write. Persist
+          // again next window rather than losing that update on eviction.
+          if (snapshotVersions.get(sessionID) === versionsAtStart.get(sessionID)) {
+            dirtyTraceSessions.delete(sessionID)
+            snapshotVersions.delete(sessionID)
+          }
+        } catch (error) {
+          console.warn(`opencode-orchestrator trace snapshot write failed for ${sessionID}`, error)
+        }
+      }
+    })()
+    activeFlush = flushing
+    await flushing.finally(() => { if (activeFlush === flushing) activeFlush = undefined })
+    if (!disposing && dirtyTraceSessions.size > 0) scheduleFlush()
+  }
+
+  async function bump(sessionID: string, update: (summary: TraceSummary) => TraceSummary): Promise<void> {
+    // Protect a missing snapshot while it is being hydrated: if every old
+    // entry is dirty, an unprotected insertion could evict itself before bump.
+    if (deps.options.trace.mode === "snapshot") dirtyTraceSessions.add(sessionID)
+    await ensureSummary(sessionID)
     const now = Date.now()
     const current = summaryBySession.get(sessionID) ?? newTraceSummary(sessionID, deps.options.trace.mode, now)
+    // Protect from eviction before insertion. A flush will release protection.
+    markTraceDirty(sessionID)
+    snapshotVersions.set(sessionID, (snapshotVersions.get(sessionID) ?? 0) + 1)
     summaryBySession.set(sessionID, { ...update(current), updatedAt: now })
+  }
+
+  async function ensureSummary(sessionID: string): Promise<void> {
+    if (summaryBySession.has(sessionID) || deps.options.trace.mode !== "snapshot") return
+    let pending = hydration.get(sessionID)
+    if (!pending) {
+      pending = (async () => {
+        const keyed = await keyedLocation(sessionID)
+        const stored = parseTraceSummary(await deps.storage.get(traceStorageKey(keyed, sessionID)))
+        if (stored?.sessionID === sessionID && !summaryBySession.has(sessionID)) summaryBySession.set(sessionID, stored)
+      })()
+      hydration.set(sessionID, pending)
+      void pending.finally(() => { if (hydration.get(sessionID) === pending) hydration.delete(sessionID) }).catch(() => undefined)
+    }
+    await pending
   }
 
   async function persistSnapshot(sessionID: string): Promise<void> {
@@ -359,7 +507,7 @@ export function createDispatchGate(input: {
           parseReviewV2Record(await input.storage.get(reviewV2StorageKey(keyed, sessionID))) ??
           parseReviewRecord(await input.storage.get(reviewStorageKey(keyed, sessionID)))
         if (record && (record.state === "blocked" || record.state === "tripped")) {
-          reviewBreaker = `review circuit is open: ${record.state} for task ${record.taskId} (run ${record.runId}); a human decision is required`
+          reviewBreaker = reviewBreakerReason(record)
         }
       }
       const evaluationResult = input.runtime
@@ -427,6 +575,10 @@ function budgetObservation(summary: TraceSummary | undefined): BudgetObservation
     retries: summary.retries,
     startedAt: summary.firstAt,
   }
+}
+
+function reviewBreakerReason(record: { state: string; taskId: string; runId: string }): string {
+  return `review circuit is open: ${record.state} for task ${record.taskId} (run ${record.runId}); automatic dispatch stays closed until an operator inspects and archives/resets the session review state via opencode-orchestrator.state. A new goal alone does not clear the session-keyed review record`
 }
 
 function budgetReason(evaluation: BudgetEvaluation): string {

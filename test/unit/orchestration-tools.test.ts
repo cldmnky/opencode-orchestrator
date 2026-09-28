@@ -20,6 +20,7 @@ import {
 } from "../../src/opencode-v2/orchestration/lead-board-v2.js"
 import { reviewV2StorageKey, type ReviewV2Record } from "../../src/opencode-v2/observability/review-v2.js"
 import { goalStorageKey } from "../../src/opencode-v2/goal/state.js"
+import { newPendingStepRecord, stepStorageKey } from "../../src/opencode-v2/orchestration/step-state.js"
 import { verificationCommandDigest } from "../../src/core/verification.js"
 import { verificationStorageKey } from "../../src/opencode-v2/verification/state.js"
 
@@ -132,6 +133,17 @@ function vcsReturning(files: VcsResult): OrchestrationToolsDeps["vcs"] {
   return {
     status: async () => files,
   }
+}
+
+function gitHistory(head: string, files: string[], root = false): NonNullable<OrchestrationToolsDeps["gitRunner"]> {
+  return { run: async (_cmd, args) => ({
+    exitCode: 0,
+    stdout: args[0] === "rev-parse" ? `${head}\n`
+      : args[0] === "rev-list" ? root ? `${head}\n` : `${head} ${"b".repeat(40)}\n`
+      : args[0] === "merge-base" ? ""
+      : `${files.join("\0")}${files.length ? "\0" : ""}`,
+    stderr: "",
+  }) }
 }
 
 function parseResult(content: string): HandoffValidationResult {
@@ -732,6 +744,108 @@ describe("handoff_validate orchestrator level", () => {
     expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o2Vcs)?.verdict).toBe("fail")
   })
 
+  test("checks an exact committed HEAD when the working tree is clean", async () => {
+    const sha = "a".repeat(40)
+    const calls: string[][] = []
+    const tools = collect({
+      vcs: vcsReturning([]),
+      gitRunner: {
+        run: async (_cmd, args) => {
+          calls.push([...args])
+          return { exitCode: 0, stdout: args[0] === "rev-parse" ? `${sha}\n` : args[0] === "rev-list" ? `${sha} ${"b".repeat(40)}\n` : "src/a.ts\0", stderr: "" }
+        },
+      },
+    })
+    const result = parseResult((await tools.get("handoff_validate")!.execute({
+      level: "orchestrator",
+      handoff: handoff({ filesChanged: [{ path: "src/a.ts", scope: "edited" }] }),
+      contract: contract(), revision: sha,
+    }, toolContext("session-1", "orchestrator"))).content)
+    expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o2Vcs)?.verdict).toBe("pass")
+    expect(calls).toEqual([["rev-parse", "HEAD"], ["rev-list", "--parents", "-n", "1", sha], ["diff", "--name-only", "-z", `${sha}^`, sha, "--"], ["rev-parse", "HEAD"]])
+  })
+
+  test("never accepts a caller revision that is not the current HEAD", async () => {
+    let diffCalled = false
+    const tools = collect({
+      vcs: vcsReturning([]),
+      gitRunner: { run: async (_cmd, args) => {
+        if (args[0] === "diff") diffCalled = true
+        return { exitCode: 0, stdout: `${"b".repeat(40)}\n`, stderr: "" }
+      } },
+    })
+    const result = parseResult((await tools.get("handoff_validate")!.execute({
+      level: "orchestrator",
+      handoff: handoff({ filesChanged: [{ path: "src/a.ts", scope: "edited" }] }),
+      contract: contract(), revision: "a".repeat(40),
+    }, toolContext("session-1", "orchestrator"))).content)
+    expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o2Vcs)?.verdict).toBe("blocked-unknown")
+    expect(diffCalled).toBe(false)
+  })
+
+  test("a supplied revision never passes from dirty status, even when the paths match", async () => {
+    let gitCalls = 0
+    const tools = collect({
+      vcs: vcsReturning([{ file: "src/a.ts" }]),
+      gitRunner: { run: async () => { gitCalls += 1; return { exitCode: 0, stdout: "", stderr: "" } } },
+    })
+    const result = parseResult((await tools.get("handoff_validate")!.execute({
+      level: "orchestrator",
+      handoff: handoff({ filesChanged: [{ path: "src/a.ts", scope: "edited" }] }),
+      contract: contract(), revision: "a".repeat(40),
+    }, toolContext("session-1", "orchestrator"))).content)
+    expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o2Vcs)?.verdict).toBe("blocked-unknown")
+    expect(result.verdict).toBe("blocked-unknown")
+    expect(gitCalls).toBe(0)
+  })
+
+  test("malformed VCS status is unknown, not a clean tree", async () => {
+    const tools = collect({ vcs: { status: async () => ({ data: null }) }, gitRunner: gitHistory("a".repeat(40), ["src/a.ts"]) })
+    const result = parseResult((await tools.get("handoff_validate")!.execute({
+      level: "orchestrator", handoff: handoff({ filesChanged: [{ path: "src/a.ts", scope: "edited" }] }),
+      contract: contract(), revision: "a".repeat(40),
+    }, toolContext("session-1", "orchestrator"))).content)
+    expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o2Vcs)?.verdict).toBe("blocked-unknown")
+  })
+
+  test("compares multi-commit handoffs against a verified explicit base", async () => {
+    const head = "a".repeat(40)
+    const base = "c".repeat(40)
+    const calls: string[][] = []
+    const tools = collect({ vcs: vcsReturning([]), gitRunner: { run: async (_cmd, args) => {
+      calls.push([...args])
+      return { exitCode: 0, stdout: args[0] === "rev-parse" ? `${head}\n` : args[0] === "diff" ? "src/a.ts\0" : "", stderr: "" }
+    } } })
+    const result = parseResult((await tools.get("handoff_validate")!.execute({
+      level: "orchestrator", handoff: handoff({ filesChanged: [{ path: "src/a.ts", scope: "edited" }] }),
+      contract: contract(), revision: head, baseRevision: base,
+    }, toolContext("session-1", "orchestrator"))).content)
+    expect(result.verdict).toBe("pass")
+    expect(calls).toContainEqual(["merge-base", "--is-ancestor", base, head])
+    expect(calls).toContainEqual(["diff", "--name-only", "-z", base, head, "--"])
+    expect(calls.some((args) => args[0] === "rev-list")).toBe(false)
+  })
+
+  test("refuses an unrelated base and verifies root commits with diff-tree --root", async () => {
+    const head = "a".repeat(40)
+    const base = "c".repeat(40)
+    const unrelated = collect({ vcs: vcsReturning([]), gitRunner: { run: async (_cmd, args) => ({
+      exitCode: args[0] === "merge-base" ? 1 : 0, stdout: args[0] === "rev-parse" ? `${head}\n` : "src/a.ts\0", stderr: "",
+    }) } })
+    const request = { level: "orchestrator", handoff: handoff({ filesChanged: [{ path: "src/a.ts", scope: "edited" }] }), contract: contract(), revision: head }
+    const blocked = parseResult((await unrelated.get("handoff_validate")!.execute({ ...request, baseRevision: base }, toolContext("session-1", "orchestrator"))).content)
+    expect(blocked.verdict).toBe("blocked-unknown")
+
+    const calls: string[][] = []
+    const root = collect({ vcs: vcsReturning([]), gitRunner: { run: async (_cmd, args) => {
+      calls.push([...args])
+      return gitHistory(head, ["src/a.ts"], true).run(_cmd, args)
+    } } })
+    const passed = parseResult((await root.get("handoff_validate")!.execute(request, toolContext("session-1", "orchestrator"))).content)
+    expect(passed.verdict).toBe("pass")
+    expect(calls).toContainEqual(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", head, "--"])
+  })
+
   test("fails when observed in-scope files were not declared (extra changed file)", async () => {
     const tools = collect({ vcs: vcsReturning([{ file: "src/a.ts" }, { file: "src/a2.ts" }]) })
     const output = await tools
@@ -767,7 +881,7 @@ describe("handoff_validate orchestrator level", () => {
     expect(result.verdict).toBe("blocked-unknown")
     expect(result.admissionState).toBe("blocked-unknown")
     expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o2Vcs)?.verdict).toBe("blocked-unknown")
-    expect(result.limitations.some((limit) => limit.includes("single receipt"))).toBe(true)
+    expect(result.limitations.some((limit) => limit.includes("foreign-file authorship"))).toBe(true)
   })
 
   test("blocks foreign changed files outside the write scope instead of ignoring them", async () => {
@@ -786,6 +900,68 @@ describe("handoff_validate orchestrator level", () => {
     expect(result.verdict).toBe("blocked-unknown")
     expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o5Foreign)?.verdict).toBe("blocked-unknown")
     expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o5Foreign)?.detail).toContain("cross-task")
+  })
+
+  test("sibling scopes diagnose but never prove foreign-file authorship", async () => {
+    const tools = collect({
+      vcs: vcsReturning([{ file: "src/a.ts" }, { file: "otherapp/unrelated.ts" }]),
+      siblingWriteScopes: async () => ["otherapp"],
+    })
+    const output = await tools
+      .get("handoff_validate")!
+      .execute(
+        {
+          level: "orchestrator",
+          handoff: handoff({ filesChanged: [{ path: "src/a.ts", scope: "edited" }] }),
+          contract: contract(),
+        },
+        toolContext("session-1", "orchestrator"),
+      )
+    const result = parseResult(output.content)
+    expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o5Foreign)?.verdict).toBe("blocked-unknown")
+    expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o5Foreign)?.detail).toContain("declared scope does not prove authorship")
+  })
+
+  test("still blocks a foreign file no sibling board task claims", async () => {
+    const tools = collect({
+      vcs: vcsReturning([{ file: "src/a.ts" }, { file: "otherapp/unrelated.ts" }]),
+      siblingWriteScopes: async () => ["somewhere-else"],
+    })
+    const output = await tools
+      .get("handoff_validate")!
+      .execute(
+        {
+          level: "orchestrator",
+          handoff: handoff({ filesChanged: [{ path: "src/a.ts", scope: "edited" }] }),
+          contract: contract(),
+        },
+        toolContext("session-1", "orchestrator"),
+      )
+    const result = parseResult(output.content)
+    const foreign = result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o5Foreign)
+    expect(foreign?.verdict).toBe("blocked-unknown")
+    expect(foreign?.detail).toContain("known task")
+  })
+
+  test("stays blocked when the sibling scope source fails", async () => {
+    const tools = collect({
+      vcs: vcsReturning([{ file: "src/a.ts" }, { file: "otherapp/unrelated.ts" }]),
+      siblingWriteScopes: async () => {
+        throw new Error("board unreadable")
+      },
+    })
+    const output = await tools
+      .get("handoff_validate")!
+      .execute(
+        {
+          level: "orchestrator",
+          handoff: handoff({ filesChanged: [{ path: "src/a.ts", scope: "edited" }] }),
+          contract: contract(),
+        },
+        toolContext("session-1", "orchestrator"),
+      )
+    const result = parseResult(output.content)
+    expect(result.checks.find((check) => check.id === HANDOFF_CHECK_IDS.o5Foreign)?.verdict).toBe("blocked-unknown")
   })
 
   test("blocks when required commands have no plugin-observed receipt", async () => {
@@ -831,7 +1007,7 @@ describe("handoff_validate orchestrator level", () => {
       completedAt: now,
       repository: { rootDigest: "c".repeat(64), headSha: "a".repeat(40) },
     })
-    const tools = collect({ storage: memStorage(values), vcs: vcsReturning([{ file: "src/a.ts" }]) })
+    const tools = collect({ storage: memStorage(values), vcs: vcsReturning([]), gitRunner: gitHistory("a".repeat(40), ["src/a.ts"]) })
     const output = await tools
       .get("handoff_validate")!
       .execute(
@@ -1006,6 +1182,11 @@ function readStoredBoard(values: Map<string, unknown>): LeadBoard {
   return board!
 }
 
+/** Board id of the seeded board, used to build matching step idempotency keys. */
+function boardIDOf(values: Map<string, unknown>): string {
+  return readStoredBoard(values).boardID
+}
+
 describe("lead board tools", () => {
   test("rejects a worker agent for the canonical board tools", async () => {
     const tools = collect()
@@ -1038,6 +1219,67 @@ describe("lead board tools", () => {
     expect(ok.board.counts.planned).toBe(1)
     expect(ok.board.tasks[0]!.evidence).toBeUndefined()
     expect(ok.board.tasks[0]!.replay).toEqual({ kind: "none" })
+  })
+
+  test("board_get surfaces claim-holding step state so a refusal explains itself", async () => {
+    const values = new Map<string, unknown>()
+    seedGoal(values)
+    seedBoard(values, {
+      tasks: [
+        boardTask({ status: "in-progress", lifecycleVersion: 3, stepIndex: 7 }),
+        boardTask({ taskID: "t2", status: "ready", lifecycleVersion: 2 }),
+      ] as never,
+    })
+    const tools = collect({ storage: memStorage(values) })
+    const orchestrator = toolContext("session-1", "orchestrator")
+
+    // No receipt yet: the step is reported missing, and a ready task adds none.
+    const missing = JSON.parse((await tools.get("board_get")!.execute({}, orchestrator)).content) as {
+      steps?: Array<{ taskID: string; stepIndex: number; status: string }>
+    }
+    expect(missing.steps).toEqual([{ taskID: "t1", stepIndex: 7, status: "missing" }])
+
+    const receipt = newPendingStepRecord({
+      sessionID: "session-1",
+      stepIndex: 7,
+      idempotencyKey: leadTaskStepIdempotencyKey(boardIDOf(values), "t1", 1),
+    })
+    values.set(stepStorageKey(boardLocation, "session-1", 7), { ...receipt, status: "dispatched" })
+    const present = JSON.parse((await tools.get("board_get")!.execute({}, orchestrator)).content) as {
+      steps?: Array<{ taskID: string; stepIndex: number; status: string }>
+    }
+    expect(present.steps).toEqual([{ taskID: "t1", stepIndex: 7, status: "dispatched" }])
+  })
+
+  test("board_action complete derives the aggregate write scope from the board when omitted", async () => {
+    const values = new Map<string, unknown>()
+    seedGoal(values)
+    seedReview(values)
+    const board = seedBoard(values, {
+      tasks: [
+        boardTask({
+          status: "completed",
+          lifecycleVersion: 5,
+          validation: { actorSessionID: "session-1", validatedAt: 3, revision: HEAD_SHA, checkIDs: ["c1-structure:pass"], receiptIDs: [] },
+          review: { reference: "review/v2/t1/r1", revision: HEAD_SHA, baseRevision: BASE_SHA, approvedAt: 4, reviewVersion: 2 },
+        }),
+      ] as never,
+    })
+    const tools = collect({
+      storage: memStorage(values),
+      vcs: vcsReturning([]),
+      gitRunner: gitHistory(HEAD_SHA, ["src/a.ts"]),
+    })
+    const response = JSON.parse((await tools.get("board_action")!.execute({
+      action: "complete",
+      expectedBoardRevision: board.boardRevision,
+      revision: HEAD_SHA,
+      // Declares the board task's file, which an empty aggregate scope would reject.
+      handoff: handoff({ taskId: board.boardID, filesChanged: [{ path: "src/a.ts", scope: "edited" }] }),
+      contract: contract({ taskId: board.boardID, writeScope: [], requiredCommands: [], reviewRequired: true }),
+      checks: [],
+    }, toolContext("session-1", "orchestrator"))).content) as Record<string, unknown>
+    expect(response.status).toBe("complete")
   })
 
   test("board_action init requires a goal, creates once, and replaces only on a new generation", async () => {
@@ -1232,7 +1474,7 @@ describe("lead board tools", () => {
   test("board_action transition validate runs the unchanged D2 validator and refuses non-pass results", async () => {
     const values = new Map<string, unknown>()
     seedBoard(values, { tasks: [boardTask({ status: "awaiting-validation", lifecycleVersion: 5 })] as never })
-    const tools = collect({ storage: memStorage(values), vcs: vcsReturning([{ file: "src/a.ts" }]) })
+    const tools = collect({ storage: memStorage(values), vcs: vcsReturning([]), gitRunner: gitHistory(HEAD_SHA, ["src/a.ts"]) })
     const orchestrator = toolContext("session-1", "orchestrator")
     const validateRequest = {
       taskID: "t1",
@@ -1268,6 +1510,12 @@ describe("lead board tools", () => {
     const noVcs = collect({ storage: memStorage(values) })
     const blocked = JSON.parse((await noVcs.get("board_action")!.execute(validateRequest, orchestrator)).content) as Record<string, unknown>
     expect(blocked.reason).toBe("validation-failed")
+
+    const dirty = collect({ storage: memStorage(values), vcs: vcsReturning([{ file: "src/a.ts" }]), gitRunner: gitHistory(HEAD_SHA, ["src/a.ts"]) })
+    const dirtyResult = JSON.parse((await dirty.get("board_action")!.execute(validateRequest, orchestrator)).content) as Record<string, unknown>
+    expect(dirtyResult.reason).toBe("validation-failed")
+    expect(dirtyResult.guidance).toContain("clean")
+    expect(readStoredBoard(values).tasks[0]!.validation).toBeUndefined()
 
     const applied = JSON.parse((await tools.get("board_action")!.execute(validateRequest, orchestrator)).content) as {
       status: string
@@ -1328,7 +1576,9 @@ describe("lead board tools", () => {
     seedGoal(values)
     seedReview(values)
     const board = seedBoard(values)
-    const tools = collect({ storage: memStorage(values), vcs: vcsReturning([]) })
+    const tools = collect({ storage: memStorage(values), vcs: vcsReturning([]), gitRunner: {
+      run: async (_cmd, args) => ({ exitCode: 0, stdout: args[0] === "rev-parse" ? `${HEAD_SHA}\n` : "", stderr: "" }),
+    } })
     const orchestrator = toolContext("session-1", "orchestrator")
     const request = {
       action: "complete",
@@ -1396,7 +1646,9 @@ describe("lead board tools", () => {
         }),
       ] as never,
     })
-    const pausedTools = collect({ storage: memStorage(pausedValues), vcs: vcsReturning([]) })
+    const pausedTools = collect({ storage: memStorage(pausedValues), vcs: vcsReturning([]), gitRunner: {
+      run: async (_cmd, args) => ({ exitCode: 0, stdout: args[0] === "rev-parse" ? `${HEAD_SHA}\n` : "", stderr: "" }),
+    } })
     const paused = JSON.parse(
       (await pausedTools.get("board_action")!.execute({ ...request, expectedBoardRevision: pausedBoard.boardRevision }, orchestrator)).content,
     ) as Record<string, unknown>

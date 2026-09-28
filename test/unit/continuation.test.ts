@@ -16,7 +16,7 @@ import {
   stepPrefix,
   stepStorageKey,
 } from "../../src/opencode-v2/orchestration/step-state.js"
-import { startGoalContinuation } from "../../src/opencode-v2/goal/continuation.js"
+import { CONTINUATION_MAX_TRACKED_STEPS, startGoalContinuation } from "../../src/opencode-v2/goal/continuation.js"
 import {
   createLeadBoardV2 as createLeadBoard,
   leadBoardV2StorageKey as leadBoardStorageKey,
@@ -1185,6 +1185,33 @@ describe("goal continuation", () => {
     await stop()
   })
 
+  test("recovers a missed idle edge only when the host idle time follows the dispatched receipt", async () => {
+    const location = { directory: "/workspace", project: { id: "board-idle-recovery" } }
+    const values = new Map<string, unknown>([[goalStorageKey(location, "session"), newGoal("session", "ship", 1)]])
+    values.set(leadBoardStorageKey(location, "session"), leadBoardFixture(location, "session", "ship", 1, [
+      leadTask({ taskID: "first", status: "ready" }),
+      leadTask({ taskID: "second", status: "ready" }),
+    ]))
+    const prompts: Array<{ text: string }> = []
+    let idle: number | undefined
+    const fixtureContext = fixture(location, values, prompts, createStream())
+    const stop = startGoalContinuation({
+      ...fixtureContext,
+      session: { ...fixtureContext.session, get: async () => ({ time: { idle } }) },
+    }, parseOptions({ goal: { auto_continue: false, cooldown_ms: 0, max_continuations: 3 } }), undefined, false)
+    const firstVersion = parseLeadBoard(values.get(leadBoardStorageKey(location, "session")))!.tasks.find((task) => task.taskID === "first")!.lifecycleVersion
+    expect((await stop.dispatchReadyTask({ sessionID: "session", taskID: "first", expectedVersion: firstVersion })).status).toBe("dispatched")
+    const receipt = parseStepRecord(values.get(stepStorageKey(location, "session", 1)))!
+    const secondVersion = parseLeadBoard(values.get(leadBoardStorageKey(location, "session")))!.tasks.find((task) => task.taskID === "second")!.lifecycleVersion
+    const retry = () => stop.dispatchReadyTask({ sessionID: "session", taskID: "second", expectedVersion: secondVersion })
+    idle = receipt.dispatchedAt
+    expect(await retry()).toMatchObject({ status: "refused", reason: "previous-step-active" })
+    idle = receipt.dispatchedAt! + 1
+    expect((await retry() as { reason?: string }).reason).not.toBe("previous-step-active")
+    expect(parseStepRecord(values.get(stepStorageKey(location, "session", 1)))?.status).toBe("completed")
+    await stop()
+  })
+
   test("does not queue a board prompt when a reservation write fails", async () => {
     const location = { directory: "/workspace", project: { id: "board-write-fail" } }
     const key = goalStorageKey(location, "session")
@@ -1432,6 +1459,165 @@ describe("goal continuation", () => {
     await waitFor(() => prompts.length === 1)
     expect(prompts[0]?.text).toContain(buildContinuationPrompt("ship the change", 1, CONTINUATION_OPTIONS))
     stop()
+  })
+
+  test("closes the restart gap: a dispatched receipt whose turn ended reconciles to awaiting-validation", async () => {
+    // Simulates a plugin restart mid-step: the in-memory delivered-step index is
+    // gone, but the durable receipt says `dispatched`. The host's idle timestamp
+    // is the evidence that the turn ended, so the task advances instead of being
+    // parked as ambiguous.
+    for (const [label, idleOffset, expected] of [
+      ["turn ended", 100, "awaiting-validation"],
+      ["turn still running", -100, "ambiguous"],
+    ] as const) {
+      const location = { directory: "/workspace", project: { id: `project-restart-${idleOffset}` } }
+      const values = new Map<string, unknown>([[goalStorageKey(location, "session"), newGoal("session", "ship", 1)]])
+      const board = leadBoardFixture(location, "session", "ship", 1, [
+        leadTask({ taskID: "root", status: "in-progress", lifecycleVersion: 3, stepIndex: 1 }),
+      ])
+      values.set(leadBoardStorageKey(location, "session"), board)
+      const dispatchedAt = 5_000
+      values.set(stepStorageKey(location, "session", 1), {
+        ...newPendingStepRecord({
+          sessionID: "session",
+          stepIndex: 1,
+          idempotencyKey: leadTaskStepIdempotencyKey(board.boardID, "root", 1),
+          now: dispatchedAt,
+        }),
+        status: "dispatched",
+        dispatchedAt,
+      })
+
+      const fixtureContext = fixture(location, values, [], createStream())
+      const stop = startGoalContinuation(
+        {
+          ...fixtureContext,
+          session: { get: async () => ({ time: { idle: dispatchedAt + idleOffset } }), prompt: fixtureContext.session.prompt },
+        },
+        parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }),
+      )
+
+      // A fresh instance has no tracked step, so the durable receipt is the only
+      // input; the idle comparison decides.
+      expect(parseLeadBoard(values.get(leadBoardStorageKey(location, "session")))!.tasks[0]!.status).toBe("in-progress")
+      await stop.dispatchReadyTask({ sessionID: "session", taskID: "root", expectedVersion: 3 })
+      expect(parseLeadBoard(values.get(leadBoardStorageKey(location, "session")))!.tasks[0]!.status, label).toBe(expected)
+      await stop()
+    }
+  })
+
+  test("an explicit dispatch refusal reports the real reason, not a generic one", async () => {
+    const cases: Array<[
+      string,
+      (location: { directory: string; project: { id: string } }) => Map<string, unknown>,
+      string,
+      number,
+    ]> = [
+      [
+        "paused goal",
+        (location) => {
+          const values = new Map<string, unknown>([[goalStorageKey(location, "session"), { ...newGoal("session", "ship", 1), status: "paused" }]])
+          values.set(leadBoardStorageKey(location, "session"), leadBoardFixture(location, "session", "ship", 1, [leadTask({ status: "ready", lifecycleVersion: 2 })]))
+          return values
+        },
+        "goal-not-active",
+        2,
+      ],
+      [
+        "halted automation",
+        (location) => {
+          const values = new Map<string, unknown>([[goalStorageKey(location, "session"), newGoal("session", "ship", 1)]])
+          values.set(leadBoardStorageKey(location, "session"), leadBoardFixture(location, "session", "ship", 1, [leadTask({ status: "ready", lifecycleVersion: 2 })]))
+          values.set(stopStorageKey(location, "session"), { version: 1, sessionID: "session", stoppedAt: 1 })
+          return values
+        },
+        "halted",
+        2,
+      ],
+      [
+        "requested task is not ready",
+        (location) => {
+          const values = new Map<string, unknown>([[goalStorageKey(location, "session"), newGoal("session", "ship", 1)]])
+          values.set(leadBoardStorageKey(location, "session"), leadBoardFixture(location, "session", "ship", 1, [leadTask({ status: "planned" })]))
+          return values
+        },
+        "task-not-dispatchable",
+        2,
+      ],
+      [
+        "stale expected version",
+        (location) => {
+          const values = new Map<string, unknown>([[goalStorageKey(location, "session"), newGoal("session", "ship", 1)]])
+          values.set(leadBoardStorageKey(location, "session"), leadBoardFixture(location, "session", "ship", 1, [leadTask({ status: "ready", lifecycleVersion: 2 })]))
+          return values
+        },
+        "version-mismatch",
+        7,
+      ],
+    ]
+    for (const [label, seed, expectedReason, expectedVersion] of cases) {
+      const caseLocation = { directory: "/workspace", project: { id: `refusal-${expectedReason}` } }
+      const values = seed(caseLocation)
+      const stop = startGoalContinuation(fixture(caseLocation, values, [], createStream()), parseOptions({ goal: { auto_continue: true, cooldown_ms: 0, max_continuations: 2 } }), undefined, false)
+      const result = await stop.dispatchReadyTask({ sessionID: "session", taskID: "root", expectedVersion })
+      expect(result.status, label).toBe("refused")
+      expect(result.status === "refused" ? result.reason : undefined, label).toBe(expectedReason)
+      await stop()
+    }
+  })
+
+  test("a deletion failure cannot terminate the idle-event stream for other sessions", async () => {
+    const location = { directory: "/workspace", project: { id: "delete-error-stream" } }
+    const values = new Map<string, unknown>([[goalStorageKey(location, "next"), newGoal("next", "ship", 1)]])
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const storage: StorageLike = {
+      ...scanningStorage(values),
+      remove: async (key) => { if (key === goalStorageKey(location, "broken")) throw new Error("locked cleanup"); values.delete(key) },
+    }
+    const stop = startGoalContinuation(fixture(location, values, prompts, stream, storage), CONTINUATION_OPTIONS)
+    stream.push({ id: "delete-broken", type: "session.deleted", data: { sessionID: "broken" } })
+    stream.push({ id: "idle-next", type: "session.idle", data: { sessionID: "next" } })
+    await waitFor(() => prompts.length === 1)
+    expect(prompts[0]?.text).toContain("ship")
+    await stop()
+  })
+
+  test("concurrent admissions keep refusal reasons local to each session", async () => {
+    const location = { directory: "/workspace", project: { id: "refusal-isolation" } }
+    const values = new Map<string, unknown>([
+      [goalStorageKey(location, "halted"), newGoal("halted", "ship", 1)],
+      [stopStorageKey(location, "halted"), { version: 1, sessionID: "halted", stoppedAt: 1 }],
+    ])
+    const stop = startGoalContinuation(fixture(location, values, [], createStream()), CONTINUATION_OPTIONS, undefined, false)
+    const [missing, halted] = await Promise.all([
+      stop.dispatchReadyTask({ sessionID: "missing", taskID: "root", expectedVersion: 2 }),
+      stop.dispatchReadyTask({ sessionID: "halted", taskID: "root", expectedVersion: 2 }),
+    ])
+    expect(missing).toMatchObject({ status: "refused", reason: "goal-not-active" })
+    expect(halted).toMatchObject({ status: "refused", reason: "halted" })
+    await stop()
+  })
+
+  test("live dispatched-step guards never evict an active session on cache overflow", async () => {
+    const location = { directory: "/workspace", project: { id: "active-steps" } }
+    const values = new Map<string, unknown>()
+    for (let index = 0; index <= CONTINUATION_MAX_TRACKED_STEPS; index += 1) {
+      values.set(goalStorageKey(location, `s${index}`), newGoal(`s${index}`, "ship", 1))
+    }
+    const prompts: Array<{ text: string }> = []
+    const stream = createStream()
+    const stop = startGoalContinuation(fixture(location, values, prompts, stream), CONTINUATION_OPTIONS)
+    for (let index = 0; index <= CONTINUATION_MAX_TRACKED_STEPS; index += 1) {
+      stream.push({ id: `idle-${index}`, type: "session.idle", data: { sessionID: `s${index}` } })
+    }
+    await waitFor(() => prompts.length === CONTINUATION_MAX_TRACKED_STEPS + 1, 10_000)
+    const result = await stop.dispatchReadyTask({ sessionID: "s0", taskID: "root", expectedVersion: 2 })
+    expect(result).toMatchObject({ status: "refused", reason: "previous-step-active" })
+    stream.push({ id: "idle-0", type: "session.idle", data: { sessionID: "s0" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(prompts).toHaveLength(CONTINUATION_MAX_TRACKED_STEPS + 1)
+    await stop()
   })
 })
 

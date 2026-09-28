@@ -160,7 +160,32 @@ export function stopStorageKey(location: LocationLike, sessionID: string): strin
 
 const sessionLocks = new Map<string, Promise<void>>()
 
-export async function withSessionLock<T>(location: LocationLike, sessionID: string, action: () => Promise<T>): Promise<T> {
+/**
+ * Bound on how long one operation waits for a session's process-local lock.
+ * The lock serializes reservations, board mutations, review writes, and step
+ * receipts for one session; a holder that never returns would otherwise queue
+ * every later operation forever with no diagnostic. Exceeding the bound is a
+ * refusal, never a silent parallel run: the timed-out caller joins the end of
+ * the queue so mutual exclusion is preserved for whoever holds the lock next.
+ */
+export const SESSION_LOCK_TIMEOUT_MS = 30_000
+
+export class SessionLockTimeoutError extends Error {
+  readonly sessionID: string
+
+  constructor(sessionID: string, timeoutMs: number) {
+    super(`session lock wait exceeded ${timeoutMs}ms for ${sessionID}; the holding operation did not finish`)
+    this.name = "SessionLockTimeoutError"
+    this.sessionID = sessionID
+  }
+}
+
+export async function withSessionLock<T>(
+  location: LocationLike,
+  sessionID: string,
+  action: () => Promise<T>,
+  timeoutMs: number = SESSION_LOCK_TIMEOUT_MS,
+): Promise<T> {
   const key = `${location.project.id}:${sessionID}`
   const previous = sessionLocks.get(key) ?? Promise.resolve()
   let release!: () => void
@@ -169,13 +194,44 @@ export async function withSessionLock<T>(location: LocationLike, sessionID: stri
   })
   const tail = previous.then(() => current)
   sessionLocks.set(key, tail)
-  await previous
+  // Cleanup is attached to the chain itself rather than to the caller, so a
+  // timed-out waiter still removes its slot once the chain drains.
+  void tail
+    .then(() => {
+      if (sessionLocks.get(key) === tail) sessionLocks.delete(key)
+    })
+    .catch(() => undefined)
+
+  if (!(await acquireWithin(previous, timeoutMs))) {
+    // Never run the action without the lock. Releasing our slot keeps the
+    // queue draining for everyone already waiting behind us.
+    release()
+    throw new SessionLockTimeoutError(sessionID, timeoutMs)
+  }
   try {
     return await action()
   } finally {
     release()
-    if (sessionLocks.get(key) === tail) sessionLocks.delete(key)
   }
+}
+
+/** Resolves true once `previous` settles, false when the bound elapses first. */
+function acquireWithin(previous: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      resolve(false)
+    }, timeoutMs)
+    if (typeof (timer as { unref?: () => void }).unref === "function") (timer as { unref: () => void }).unref()
+    void previous.then(() => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(true)
+    })
+  })
 }
 
 export async function readGoal(storage: StorageLike, key: string): Promise<GoalRecord | undefined> {

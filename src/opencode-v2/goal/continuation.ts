@@ -72,6 +72,11 @@ export type ContinuationDispatchRequest = {
   expectedVersion: number
 }
 
+/** Historical cache target; live idle-event deduplication cannot be evicted. */
+export const CONTINUATION_MAX_EVENT_MARKERS = 1024
+/** Historical cache target; active delivered-step guards are never evicted. */
+export const CONTINUATION_MAX_TRACKED_STEPS = 1024
+
 export type ContinuationDispatchResult =
   | { status: "dispatched"; taskID?: string; stepIndex?: number }
   | { status: "refused"; reason: string; message: string }
@@ -91,11 +96,15 @@ export function startGoalContinuation(
     ? context.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]()
     : undefined
   const inFlight = new Set<string>()
+  // An evicted event marker would let an old duplicate idle edge settle an
+  // active turn and admit another prompt. Retain one per session until delete.
   const lastEvent = new Map<string, string>()
   // Index of the most recently delivered continuation step per session, kept in
   // memory only: the next idle edge marks that receipt `completed` before any
-  // new admission is attempted. A restart simply loses the observation; it
-  // never replays or resumes anything.
+  // new admission is attempted. A restart simply loses the observation; the
+  // durable receipt plus the host's idle time is the recovery path.
+  // An active delivery is a safety guard, not an LRU cache: never evict it to
+  // admit another prompt into the same live turn. Idle/deletion removes it.
   const lastDispatched = new Map<string, number>()
   let finished!: Promise<void>
 
@@ -120,7 +129,13 @@ export function startGoalContinuation(
       if (next.done) return
       const event = next.value
       if (controller.signal.aborted) return
-      await handleEvent(event)
+      try {
+        await handleEvent(event)
+      } catch (error) {
+        // A session lock timeout (including during deletion) must not kill the
+        // stream for every other session. The next edge can retry recovery.
+        console.warn("opencode-orchestrator goal event ignored; continuation stream remains active", error)
+      }
     }
   }
 
@@ -177,15 +192,27 @@ export function startGoalContinuation(
     // An explicit lead request is only a recovery/nudge path. It must not
     // overlap a prompt already delivered by the continuation runtime, because
     // the next idle edge is the only observation that can settle that step.
-    if (requested && lastDispatched.has(sessionID)) {
-      return refusedDispatch("previous-step-active", "the previously dispatched continuation has not reached an idle edge")
-    }
-
     inFlight.add(sessionID)
     try {
+      if (requested && lastDispatched.has(sessionID)) {
+        await recoverMissedIdle(sessionID)
+        if (lastDispatched.has(sessionID)) {
+          return refusedDispatch(
+            "previous-step-active",
+            "the previously dispatched continuation has not reached an idle edge; wait for the turn to finish, or recover the task from the board if the turn already ended",
+          )
+        }
+      }
       if (settle) await settlePreviousStep(sessionID)
-      const reserved = await admitContinuation(sessionID, requested)
-      if (!reserved) return refusedDispatch("not-admitted", "continuation admission did not produce a reservation; re-read the goal and board")
+      const admission = await admitContinuation(sessionID, requested)
+      if (!admission.reserved) {
+        const refusal = admission.refusal
+        return refusedDispatch(
+          refusal?.reason ?? "not-admitted",
+          refusal?.message ?? "continuation admission did not produce a reservation; re-read the goal and board",
+        )
+      }
+      const reserved = admission.reserved
       return {
         status: "dispatched",
         ...(reserved.kind === "board" ? { taskID: reserved.taskID } : {}),
@@ -201,6 +228,37 @@ export function startGoalContinuation(
 
   function refusedDispatch(reason: string, message: string): ContinuationDispatchResult {
     return { status: "refused", reason, message }
+  }
+
+  // Location moves can cause an idle event to miss this plugin instance's
+  // subscription. Recover only from the host's observed idle timestamp and
+  // the exact durable dispatched receipt, never from elapsed wall-clock time.
+  async function recoverMissedIdle(sessionID: string): Promise<void> {
+    const stepIndex = lastDispatched.get(sessionID)
+    if (stepIndex === undefined) return
+    try {
+      const keyedLocation = { ...context.location, project: { id: await stableProjectID(context.storage, context.location, sessionID) } }
+      const receipt = parseStepRecord(await context.storage.get(stepStorageKey(keyedLocation, sessionID, stepIndex)))
+      if (receipt?.status !== "dispatched" || receipt.sessionID !== sessionID || receipt.dispatchedAt === undefined) return
+      const idle = await readHostIdle(sessionID)
+      if (idle !== undefined && idle > receipt.dispatchedAt) await settlePreviousStep(sessionID)
+    } catch {
+      // Unknown is not idle; retain the refusal and wait for a fresh edge.
+    }
+  }
+
+  /**
+   * The host's last observed idle timestamp for a session, or undefined when
+   * it is unavailable. This is the only clock the runtime trusts for "the turn
+   * is over": never elapsed wall-clock time.
+   */
+  async function readHostIdle(sessionID: string): Promise<number | undefined> {
+    const session = await context.session.get({ sessionID })
+    if (!session || typeof session !== "object" || !("time" in session)) return undefined
+    const time = session.time
+    if (!time || typeof time !== "object" || !("idle" in time)) return undefined
+    const idle = time.idle
+    return typeof idle === "number" && Number.isFinite(idle) ? idle : undefined
   }
 
   // Marks the last delivered step's receipt `completed`, best-effort: the write
@@ -223,10 +281,23 @@ export function startGoalContinuation(
     }
   }
 
+  /**
+   * Record why admission produced no reservation. The continuation returns
+   * only `undefined` internally; keeping the reason turns an opaque
+   * "not-admitted" refusal into an actionable one for the lead's dispatch
+   * request. Purely diagnostic: it never changes an admission decision.
+   */
   async function admitContinuation(
     sessionID: string,
     requested?: { taskID: string; expectedVersion: number },
-  ): Promise<Reservation | undefined> {
+  ): Promise<{ reserved?: Reservation; refusal?: { reason: string; message: string } }> {
+    // Keep refusal diagnostics local to this admission; different sessions
+    // hold different locks and can reach an await point concurrently.
+    let refusal: { reason: string; message: string } | undefined
+    function refuse(reason: string, message: string): undefined {
+      refusal = { reason, message }
+      return undefined
+    }
     // Goal/run/halt records stay anchored to the session's stable origin
     // project across session moves, so admit resolves the same project.
     const keyedLocation = { ...context.location, project: { id: await stableProjectID(context.storage, context.location, sessionID) } }
@@ -246,22 +317,25 @@ export function startGoalContinuation(
     //   best-effort pending receipt exactly like before.
     const reserved = await withSessionLock(context.location, sessionID, async (): Promise<Reservation | undefined> => {
       const goal = await readGoal(context.storage, key)
-      if (!goal || goal.status !== "active") return undefined
+      if (!goal || goal.status !== "active") return refuse("goal-not-active", goal ? `the goal is ${goal.status}` : "no goal exists for this session")
       if (goal.continuationCount >= options.goal.max_continuations) {
         console.warn(`opencode-orchestrator continuation ceiling reached for ${sessionID}`)
-        return undefined
+        return refuse("continuation-ceiling", `the goal reached max_continuations (${options.goal.max_continuations}); set a new goal generation or raise the limit`)
       }
-      if (controller.signal.aborted || (await readAutomationStop(context.storage, stopKey))) return undefined
+      if (controller.signal.aborted) return refuse("stopped", "continuation is stopped")
+      if (await readAutomationStop(context.storage, stopKey)) return refuse("halted", "automation is halted for this session; resume the goal to continue")
       if (gate) {
         const decision = await gate.allowDispatch(sessionID, "auto")
         if (!decision.allow) {
           console.warn(`opencode-orchestrator continuation stopped by controls for ${sessionID}: ${decision.reason}`)
-          return undefined
+          return refuse("dispatch-gate", decision.reason ?? "the dispatch gate refused automatic continuation")
         }
       }
 
       const now = Date.now()
-      if (goal.lastContinuationAt !== undefined && now - goal.lastContinuationAt < options.goal.cooldown_ms) return undefined
+      if (goal.lastContinuationAt !== undefined && now - goal.lastContinuationAt < options.goal.cooldown_ms) {
+        return refuse("cooldown", `the goal cooldown has not elapsed (${options.goal.cooldown_ms}ms); retry shortly`)
+      }
 
       // A plan run that exists but is not active has no unfinished ledger item
       // to advance: a paused run (halt) and a completed run (no items left)
@@ -270,7 +344,7 @@ export function startGoalContinuation(
       const run = await readPlanRun(context.storage, runKey)
       if (run && run.status !== "active") {
         console.warn(`opencode-orchestrator continuation stopped by plan run state for ${sessionID}: ${run.status}`)
-        return undefined
+        return refuse("plan-run-stopped", `the plan run is ${run.status}; there is no unfinished ledger item to advance`)
       }
 
       const hydration = await hydrateLeadBoardV2(context.storage, context.location, sessionID, { goalGeneration: goal.createdAt })
@@ -278,10 +352,13 @@ export function startGoalContinuation(
         // Malformed or identity-mismatched board: never overwrite, never
         // dispatch. Recovery requires explicit lead/goal action.
         console.warn(`opencode-orchestrator lead board unavailable for ${sessionID}: ${hydration.warning ?? "unknown"}`)
-        return undefined
+        return refuse(
+          hydration.status === "legacy" ? "board-legacy" : "board-unavailable",
+          `${hydration.warning ?? "the lead board is unavailable"}; repair or re-init the board before dispatching`,
+        )
       }
       if (hydration.status === "missing") {
-        if (requested) return undefined
+        if (requested) return refuse("board-missing", "no board exists for this goal generation; run board_action init or goal set first")
         // Legacy goal without an enrolled board: keep the goal-only
         // continuation path exactly as before (board-missing is not an error).
         const next: GoalRecord = {
@@ -309,7 +386,7 @@ export function startGoalContinuation(
       }
 
       const board = hydration.board
-      if (!board || board.status !== "active") return undefined
+      if (!board || board.status !== "active") return refuse("board-not-active", board ? `the board is ${board.status}` : "the lead board could not be read")
 
       // Deterministic restart recovery: rebuild observations for claim-holding
       // tasks from their exact linked step receipts, then reconcile
@@ -323,13 +400,25 @@ export function startGoalContinuation(
           working = await writeLeadBoardV2(context.storage, keyedLocation, working)
         } catch (error) {
           console.warn(`opencode-orchestrator lead board recovery write failed for ${sessionID}`, error)
-          return undefined
+          return refuse("board-write-failed", "lead board recovery could not be persisted; inspect the board before retrying")
         }
       }
 
       if (requested) {
         const target = working.tasks.find((task) => task.taskID === requested.taskID)
-        if (!target || target.status !== "ready" || target.lifecycleVersion !== requested.expectedVersion) return undefined
+        if (!target) return refuse("task-missing", `no task ${requested.taskID} exists on this board`)
+        if (target.status !== "ready") {
+          return refuse(
+            "task-not-dispatchable",
+            `task ${requested.taskID} is ${target.status}, not ready; recover it with reconcile-ambiguous/requeue or report it`,
+          )
+        }
+        if (target.lifecycleVersion !== requested.expectedVersion) {
+          return refuse(
+            "version-mismatch",
+            `task ${requested.taskID} is at lifecycle version ${target.lifecycleVersion}, not ${requested.expectedVersion}; re-read the board and retry`,
+          )
+        }
       }
       const selection = reserveNextLeadTaskV2(working, {
         stepIndex: goal.continuationCount + 1,
@@ -344,10 +433,15 @@ export function startGoalContinuation(
             console.warn(`opencode-orchestrator lead board promotion write failed for ${sessionID}`, error)
           }
         }
-        return undefined
+        return refuse(
+          selection.reason === "scope-conflict" ? "scope-conflict" : "no-ready-task",
+          selection.reason === "scope-conflict"
+            ? "every ready task's write scope conflicts with an in-flight task; wait for the active step or narrow a scope"
+            : "no ready task is available; promote a planned task or recover a blocked/ambiguous one",
+        )
       }
       const selectionTask = selection.board.tasks.find((task) => task.taskID === selection.reservation!.taskID)
-      if (!selectionTask) return undefined
+      if (!selectionTask) return refuse("task-missing", "the reserved task disappeared from the board; inspect the board before retrying")
 
       // Persist reservation + step identity + pending receipt BEFORE delivery
       // the prompt. Order: step, board, goal. Any failure aborts delivery and
@@ -365,14 +459,14 @@ export function startGoalContinuation(
         await writeStepRecord(context.storage, keyedLocation, pending)
       } catch (error) {
         console.warn(`opencode-orchestrator lead board step receipt write failed for ${sessionID}`, error)
-        return undefined
+        return refuse("step-write-failed", "the step receipt could not be persisted; delivery was aborted")
       }
       try {
         await writeLeadBoardV2(context.storage, keyedLocation, selection.board)
       } catch (error) {
         console.warn(`opencode-orchestrator lead board reservation write failed for ${sessionID}`, error)
         await removeStepRecord(context.storage, keyedLocation, sessionID, selection.reservation.stepIndex).catch(() => undefined)
-        return undefined
+        return refuse("board-write-failed", "the board reservation could not be persisted; delivery was aborted")
       }
       const nextGoal: GoalRecord = {
         ...goal,
@@ -386,7 +480,7 @@ export function startGoalContinuation(
         console.warn(`opencode-orchestrator goal reservation write failed for ${sessionID}`, error)
         await writeLeadBoardV2(context.storage, keyedLocation, working).catch(() => undefined)
         await removeStepRecord(context.storage, keyedLocation, sessionID, selection.reservation.stepIndex).catch(() => undefined)
-        return undefined
+        return refuse("goal-write-failed", "the goal reservation could not be persisted; delivery was aborted")
       }
       return {
         kind: "board",
@@ -399,21 +493,21 @@ export function startGoalContinuation(
         packet: leadTaskPacketTextV2(selectionTask),
       }
     })
-    if (!reserved || controller.signal.aborted) return
+    if (!reserved || controller.signal.aborted) return { refusal }
 
     // Admission gate, checked after the lock is released: the session prompt
     // must never be delivered while holding the lock, but we still re-read the
     // goal, halt flag, plan run, and (for board reservations) the board so a
     // pause, completion, replacement, or /halt that raced the reservation
     // fails closed. Only the exact records we reserved may be admitted.
-    if (await readAutomationStop(context.storage, stopKey)) return
+    if (await readAutomationStop(context.storage, stopKey)) return { refusal: { reason: "halted", message: "automation was halted before delivery" } }
     const current = await readGoal(context.storage, key)
-    if (!current || current.status !== "active") return
-    if (!isSameReservation(current, reserved.goal)) return
+    if (!current || current.status !== "active") return { refusal: { reason: "goal-not-active", message: "the goal changed before delivery" } }
+    if (!isSameReservation(current, reserved.goal)) return { refusal: { reason: "reservation-stale", message: "the goal reservation changed before delivery" } }
     const currentRun = await readPlanRun(context.storage, runKey)
-    if (!isSamePlanRun(currentRun, reserved.run)) return
+    if (!isSamePlanRun(currentRun, reserved.run)) return { refusal: { reason: "plan-run-stopped", message: "the plan run changed before delivery" } }
     if (reserved.kind === "board" && !(await boardReservationStillCurrent(reserved, keyedLocation, sessionID))) {
-      return
+      return { refusal: { reason: "reservation-stale", message: "the board reservation changed before delivery" } }
     }
     if (gate) {
       // Re-check immediately before delivery: budget observations and the
@@ -424,7 +518,7 @@ export function startGoalContinuation(
         if (reserved.kind === "board") {
           await releaseStaleBoardReservation(reserved, keyedLocation, sessionID, "dispatch gate closed before delivery")
         }
-        return
+        return { refusal: { reason: "dispatch-gate", message: decision.reason ?? "the dispatch gate closed before delivery" } }
       }
     }
 
@@ -490,21 +584,31 @@ export function startGoalContinuation(
     // update above: the completion mark targets the logical step, and a failed
     // dispatched write must not erase it.
     lastDispatched.set(sessionID, reserved.stepIndex)
-    return reserved
+    return { reserved }
   }
 
   // Reads the exact linked step receipt for every claim-holding task and
   // reconciles it conservatively. The step this process just delivered is
-  // skipped so a live turn is never mistaken for a crashed one.
+  // skipped so a live turn is never mistaken for a crashed one. The host's
+  // idle timestamp is read once and closes the restart gap: a `dispatched`
+  // receipt whose turn already ended reconciles as completed exactly like the
+  // live idle edge would have recorded it.
   async function reconcileHydratedBoard(
     board: LeadBoard,
     sessionID: string,
     keyedLocation: LocationLike,
   ): Promise<{ board: LeadBoard; changed: boolean }> {
     const observations = new Map<string, LeadStepObservation>()
-    for (const task of board.tasks) {
-      if ((task.status !== "reserved" && task.status !== "in-progress") || task.stepIndex === undefined) continue
-      observations.set(task.taskID, await observeTaskStep(board, task.taskID, task.attempt, task.stepIndex, sessionID, keyedLocation))
+    const claimHolding = board.tasks.filter(
+      (task) => (task.status === "reserved" || task.status === "in-progress") && task.stepIndex !== undefined,
+    )
+    const idleAt = claimHolding.length > 0 ? await readHostIdle(sessionID).catch(() => undefined) : undefined
+    for (const task of claimHolding) {
+      if (task.stepIndex === undefined) continue
+      observations.set(
+        task.taskID,
+        await observeTaskStep(board, task.taskID, task.attempt, task.stepIndex, sessionID, keyedLocation, idleAt),
+      )
     }
     const liveStepIndex = lastDispatched.get(sessionID)
     const result = reconcileLeadBoardV2(board, {
@@ -518,6 +622,11 @@ export function startGoalContinuation(
   // mismatched identity all reconcile the same way (never replay, never infer
   // success). The step receipt is observability, so a read failure is an
   // observation, not an error.
+  //
+  // A `dispatched` receipt is only upgraded to `completed` when the host's own
+  // idle timestamp is later than the delivery: that is the same evidence the
+  // live idle edge records, and it is unavailable while a turn is still
+  // running. Unknown stays conservative (ambiguous), never a replay.
   async function observeTaskStep(
     board: LeadBoard,
     taskID: string,
@@ -525,6 +634,7 @@ export function startGoalContinuation(
     stepIndex: number,
     sessionID: string,
     keyedLocation: LocationLike,
+    idleAt: number | undefined,
   ): Promise<LeadStepObservation> {
     try {
       const value = await context.storage.get(stepStorageKey(keyedLocation, sessionID, stepIndex))
@@ -532,8 +642,15 @@ export function startGoalContinuation(
       const record = parseStepRecord(value)
       if (!record || record.sessionID !== sessionID || record.stepIndex !== stepIndex) return { state: "malformed" }
       if (record.idempotencyKey !== leadTaskStepIdempotencyKey(board.boardID, taskID, attempt)) return { state: "malformed" }
+      const state =
+        record.status === "dispatched" &&
+        idleAt !== undefined &&
+        record.dispatchedAt !== undefined &&
+        idleAt > record.dispatchedAt
+          ? "completed"
+          : record.status
       return {
-        state: record.status,
+        state,
         stepIndex: record.stepIndex,
         idempotencyKey: record.idempotencyKey,
       }

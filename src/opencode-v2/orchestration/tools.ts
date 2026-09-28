@@ -4,6 +4,7 @@ import { ORCHESTRATION_TOOL_PERMISSION } from "../../core/permissions.js"
 import { D2_LIMITS, RELATIVE_REPO_PATH_PATTERN } from "../../core/contracts.js"
 import type { ToolDraftLike } from "../compat.js"
 import { resolveRealpath } from "../worktree/git.js"
+import { SpawnRunner, type ProcessRunner } from "../process/runner.js"
 import { HANDOFF_CONTRACT_SCHEMA, validateHandoff, type HandoffContract, type SessionLocation, type ValidationDeps } from "./validation.js"
 import {
   LEAD_BOARD_LIMITATIONS,
@@ -37,6 +38,7 @@ import {
   type LeadTransitionAction,
 } from "./lead-board-v2.js"
 import { goalStorageKey, readGoal, withSessionLock, type LocationLike, type StorageLike } from "../goal/state.js"
+import { parseStepRecord, stepStorageKey } from "./step-state.js"
 import { readReviewRecord, readReviewRecordV2 } from "../observability/runtime.js"
 import { validateApprovedReviewV2Revision } from "../observability/review-v2.js"
 import { listVerificationReceipts } from "../verification/state.js"
@@ -89,6 +91,10 @@ export type OrchestrationToolsDeps = {
   session?: SessionLike
   /** Default VCS source for handoff_validate; plugin wiring passes context.vcs. */
   vcs?: VcsLike
+  /** Read-only git inspection for committed handoffs; injectable for tests. */
+  gitRunner?: ProcessRunner
+  /** Sibling board write scopes for cross-task attribution; injectable for tests. */
+  siblingWriteScopes?: (sessionID: string, taskId: string) => Promise<readonly string[] | undefined>
   pathExists?: (absolutePath: string) => Promise<boolean>
   realpath?: (directory: string) => Promise<string | undefined>
   redact?: (text: string) => string
@@ -165,6 +171,9 @@ function resultContent(content: string): ToolResult {
 /* ------------------------------------------------------------------ */
 
 function resolveValidationDeps(deps: OrchestrationToolsDeps): ValidationDeps {
+  // One runner for the life of the tool registration: SpawnRunner is stateless,
+  // so a per-call instance only adds allocation.
+  const gitRunner = deps.gitRunner ?? new SpawnRunner()
   return {
     sessionLocation: async (sessionID) => {
       if (!deps.session) {
@@ -184,14 +193,48 @@ function resolveValidationDeps(deps: OrchestrationToolsDeps): ValidationDeps {
             ...(workspaceID !== undefined ? { workspace: workspaceID } : {}),
           },
         })
-        return arrayData(output)
-          .filter(isRecord)
-          .map((value) => ({ file: typeof value.file === "string" ? value.file : "" }))
-          .filter((entry) => entry.file.length > 0)
+        const rows = arrayData(output)
+        if (!rows || rows.some((value) => !isRecord(value) || typeof value.file !== "string" || value.file.length === 0)) return undefined
+        return rows.map((value) => ({ file: (value as { file: string }).file }))
       } catch {
         return undefined
       }
     },
+    vcsCommittedFiles: async (directory, revision, baseRevision) => {
+      try {
+        const head = await gitRunner.run("git", ["rev-parse", "HEAD"], { cwd: directory })
+        if (head.exitCode !== 0 || head.truncated || head.stdout.trim() !== revision) return undefined
+        // Explicit bases cover multi-commit handoffs; verify ancestry so an
+        // unrelated caller-provided SHA cannot manufacture a comparison.
+        if (baseRevision) {
+          const ancestor = await gitRunner.run("git", ["merge-base", "--is-ancestor", baseRevision, revision], { cwd: directory })
+          if (ancestor.exitCode !== 0 || ancestor.truncated) return undefined
+        }
+        const parents = baseRevision ? undefined : await gitRunner.run("git", ["rev-list", "--parents", "-n", "1", revision], { cwd: directory })
+        if (parents && (parents.exitCode !== 0 || parents.truncated || parents.stdout.trim().split(/\s+/)[0] !== revision)) return undefined
+        const args = !baseRevision && parents?.stdout.trim().split(/\s+/).length === 1
+          ? ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", revision, "--"]
+          : ["diff", "--name-only", "-z", baseRevision ?? `${revision}^`, revision, "--"]
+        const diff = await gitRunner.run("git", args, { cwd: directory })
+        if (diff.exitCode !== 0 || diff.truncated) return undefined
+        const stillHead = await gitRunner.run("git", ["rev-parse", "HEAD"], { cwd: directory })
+        if (stillHead.exitCode !== 0 || stillHead.truncated || stillHead.stdout.trim() !== revision) return undefined
+        return diff.stdout.split("\0").filter(Boolean).map((file) => ({ file }))
+      } catch {
+        return undefined
+      }
+    },
+    siblingWriteScopes: deps.siblingWriteScopes ?? (async (sessionID, taskId) => {
+      try {
+        const hydration = await hydrateLeadBoardV2(deps.storage, deps.location, sessionID)
+        if (hydration.status !== "ok" || !hydration.board) return undefined
+        return hydration.board.tasks
+          .filter((task) => task.taskID !== taskId)
+          .flatMap((task) => task.scope.writePaths)
+      } catch {
+        return undefined
+      }
+    }),
     pathExists: deps.pathExists ?? defaultPathExists,
     realpath: deps.realpath ?? resolveRealpath,
     redactFn: deps.redact,
@@ -257,12 +300,12 @@ async function defaultPathExists(absolutePath: string): Promise<boolean> {
   }
 }
 
-function arrayData(value: unknown): unknown[] {
+function arrayData(value: unknown): unknown[] | undefined {
   if (Array.isArray(value)) return value
   if (value && typeof value === "object" && Array.isArray((value as { data?: unknown }).data)) {
     return (value as { data: unknown[] }).data
   }
-  return []
+  return undefined
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -368,12 +411,53 @@ async function boardProjection(deps: OrchestrationToolsDeps, sessionID: string):
       limitations: LEAD_BOARD_LIMITATIONS,
     }
   }
+  // Diagnostic step state for claim-holding tasks: this is what explains a
+  // `previous-step-active` dispatch refusal without guessing. It is read-only
+  // and never feeds a decision.
+  const steps = await taskStepStates(deps, sessionID, read.keyedLocation, read.board)
   return {
     status: "ok",
     key: leadBoardV2StorageKey(read.keyedLocation, sessionID),
     board: projectLeadBoardV2(read.board),
+    ...(steps.length > 0 ? { steps } : {}),
     limitations: LEAD_BOARD_LIMITATIONS,
   }
+}
+
+type TaskStepState = { taskID: string; stepIndex: number; status: string }
+
+/** Bounded, best-effort step receipt projection for reserved/in-progress tasks. */
+async function taskStepStates(
+  deps: OrchestrationToolsDeps,
+  sessionID: string,
+  keyedLocation: LocationLike,
+  board: LeadBoard,
+): Promise<TaskStepState[]> {
+  const claimHolding = board.tasks.filter(
+    (task) => (task.status === "reserved" || task.status === "in-progress") && task.stepIndex !== undefined,
+  )
+  const states: TaskStepState[] = []
+  for (const task of claimHolding) {
+    if (task.stepIndex === undefined) continue
+    try {
+      const receipt = parseStepRecord(await deps.storage.get(stepStorageKey(keyedLocation, sessionID, task.stepIndex)))
+      states.push({ taskID: task.taskID, stepIndex: task.stepIndex, status: receipt?.status ?? "missing" })
+    } catch {
+      states.push({ taskID: task.taskID, stepIndex: task.stepIndex, status: "unreadable" })
+    }
+  }
+  return states
+}
+
+/** Union of every task's declared write paths; the aggregate receipt's scope. */
+function aggregateBoardWriteScope(board: LeadBoard): string[] {
+  const paths: string[] = []
+  for (const task of board.tasks) {
+    for (const path of task.scope.writePaths) {
+      if (!paths.includes(path)) paths.push(path)
+    }
+  }
+  return paths
 }
 
 async function initLeadBoardTool(
@@ -744,6 +828,7 @@ async function runBoardValidateTool(
       contract,
       ...(receiptIDs.length > 0 ? { receiptIDs } : {}),
       revision,
+      ...(stringField(input, "baseRevision") ? { baseRevision: stringField(input, "baseRevision") } : {}),
       minimumCompletedAt: preTask.updatedAt,
     },
     validationDeps,
@@ -754,6 +839,7 @@ async function runBoardValidateTool(
   if (failures.length > 0 || blockers.length > 0) {
     return boardRefusal("validation-failed", "the unchanged D2 validator did not pass in the lead context", {
       checks: [...failures, ...blockers].slice(0, 8).map((check) => `${check.id}:${check.verdict}`),
+      ...(blockers.some((check) => check.id === "o2-vcs") ? { guidance: "commit or isolate pending changes for a clean worktree; validate the exact HEAD SHA, supplying baseRevision for a multi-commit range" } : {}),
     })
   }
   // Only plugin-computed validator checks become durable identifiers. The
@@ -827,13 +913,28 @@ async function completeLeadBoardTool(
   if (contract.taskId !== pre.board.boardID) {
     return boardRefusal("contract-mismatch", "the aggregate contract taskId must equal the board id")
   }
+  const approved = await readReviewRecordV2(deps.storage, deps.location, sessionID)
+  if (!approved || approved.state !== "approved") {
+    return boardRefusal("missing-review", "aggregate validation requires an approved V2 review with an exact base/head range")
+  }
+  // The aggregate receipt covers the whole board, so its write scope is the
+  // union of the board's task scopes. Deriving it when the caller omits one
+  // removes the previous dead end where an empty scope rejected every declared
+  // changed file; an explicit non-empty scope is still honored as supplied.
+  const aggregateContract =
+    contract.writeScope.length === 0
+      ? { ...contract, writeScope: aggregateBoardWriteScope(pre.board) }
+      : contract
   const result = await validateHandoff(
     {
       level: "orchestrator",
       handoff: recordField(input)?.handoff,
-      contract,
+      contract: aggregateContract,
       ...(receiptIDs.length > 0 ? { receiptIDs } : {}),
       revision,
+      // The approved review pins the aggregate comparison range. A caller's
+      // alternative base must never broaden/narrow the reviewed diff.
+      baseRevision: approved.baseSha,
     },
     validationDeps,
     sessionID,
@@ -871,6 +972,9 @@ async function completeLeadBoardTool(
     })
     if (!reviewCheck.valid) {
       return boardRefusal(reviewCheck.verdict, `aggregate completion requires an approved exact-revision review: ${reviewCheck.message}`)
+    }
+    if (review.baseSha !== approved.baseSha || review.runId !== approved.runId || review.submittedAt !== approved.submittedAt) {
+      return boardRefusal("review-changed", "the approved review changed after aggregate validation; validate the new exact range again")
     }
     const revisionIssues = boardCompletionRevisionIssuesV2(read.board, { revision, baseRevision: review.baseSha })
     if (revisionIssues.length > 0) {
@@ -1060,6 +1164,7 @@ const validateInput = {
     },
     receiptIDs: { type: "array", maxItems: 64, items: { type: "string", minLength: 1, maxLength: 128 } },
     revision: { type: "string", pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    baseRevision: { type: "string", pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
     minimumCompletedAt: { type: "number", minimum: 0 },
   },
   required: ["level", "handoff", "contract"],
@@ -1183,6 +1288,7 @@ const boardTransitionInput = {
     note: { type: "string", maxLength: 512 },
     cursor: { type: "string", maxLength: 512 },
     revision: { type: "string", maxLength: 512 },
+    baseRevision: { type: "string", pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
     receiptIDs: { type: "array", maxItems: 64, items: { type: "string", minLength: 1, maxLength: 128 } },
     handoff: { type: "object" },
     contract: boardHandoffContractJsonSchema,
